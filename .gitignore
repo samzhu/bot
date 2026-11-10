@@ -1,0 +1,54 @@
+# Operating System Files
+.DS_Store
+Thumbs.db
+
+# Environment and Secret Files (Strict paths & extensions, avoid broad wildcards that match code)
+*.env
+*.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.jks
+credentials.json
+client_secret*.json
+
+# Gradle / Java Backend
+HELP.md
+.gradle/
+**/build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Frontend / Node / Angular
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.angular/
+**/.angular/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# IDE & Editor Files
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+.vscode/
+.classpath
+.project
+.settings/
+.factorypath
+.apt_generated
+.springBeans
+.sts4-cache
+bin/
+/nbproject/private/
+/nbbuild/
+/nbdist/
+/.nb-gradle/
