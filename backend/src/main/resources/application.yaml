@@ -20,6 +20,10 @@ spring:
       - org.springframework.ai.model.google.genai.autoconfigure.transcription.GoogleGenAiTranscriptionConnectionAutoConfiguration
       - org.springframework.ai.model.google.genai.autoconfigure.transcription.GoogleGenAiTranscriptionAutoConfiguration
   ai:
+    google:
+      genai:
+        chat:
+          model: gemini-3.8-flash
     vectorstore:
       type: none
       pgvector:

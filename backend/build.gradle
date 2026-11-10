@@ -103,5 +103,26 @@ dependencyManagement {
 }
 
 tasks.named('test') {
-	useJUnitPlatform()
+	useJUnitPlatform {
+		excludeTags 'real-ai'
+	}
+}
+
+tasks.register('realAiSmokeTest', Test) {
+	description = 'Runs live real AI smoke test against genuine external model provider.'
+	group = 'verification'
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform {
+		includeTags 'real-ai'
+	}
+	systemProperty 'smoke.real-ai', 'true'
+	/*
+	 * WHY:
+	 * realAiSmokeTest is an opt-in live integration verification against an external cloud provider.
+	 * Its outcome depends on real-time external network and remote API availability.
+	 * Disabling Gradle up-to-date checking ensures that invoking this task always executes fresh
+	 * live verification rather than returning false-positive cached UP-TO-DATE successes.
+	 */
+	outputs.upToDateWhen { false }
 }

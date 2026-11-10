@@ -19,6 +19,16 @@ public class GoogleGenAiManualConfig {
     @Value("${spring.ai.google.genai.chat.model:}")
     private String modelName;
 
+    /*
+     * WHY / ARCHITECTURAL LIFECYCLE:
+     * 1. com.google.genai.Client implements AutoCloseable, holding underlying HTTP transport channels.
+     *    Spring manages its lifecycle and invokes client.close() when destroying the googleGenAiClient bean
+     *    (configured via destroyMethod = "close").
+     * 2. org.springframework.ai.google.genai.GoogleGenAiChatModel implements DisposableBean,
+     *    but its destroy() implementation is a no-op (verified via Spring AI 2.1.0-RC2 bytecode: '0: return').
+     *    It does NOT call client.close(), so managing the client lifecycle as a dedicated Spring bean
+     *    guarantees proper channel cleanup without risking double-close or connection leaks.
+     */
     @Bean(destroyMethod = "close")
     public Client googleGenAiClient() {
         if (apiKey == null || apiKey.isBlank()) {

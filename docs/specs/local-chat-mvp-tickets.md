@@ -12,7 +12,7 @@
 ```
 [Issue #2: 01 本機聊天最小閉環] (已完成)
        ├──> [Issue #3: 02 多輪歷史與停止生成] (已完成)
-       └──> [Issue #4: 03 重送與連線異常恢復] (已完成) ──> [Issue #5: 04 真模型設定與交付驗收] (Frontier)
+       └──> [Issue #4: 03 重送與連線異常恢復] (已完成) ──> [Issue #5: 04 真模型設定與交付驗收] (已完成待交付)
 ```
 
 ---
@@ -83,17 +83,17 @@
 - **GitHub Issue**：[#5 (Local Chat MVP 04：真模型設定與交付驗收)](https://github.com/samzhu/bot/issues/5)
 - **識別代號**：`04-real-model-config-and-delivery-acceptance`
 - **相依阻擋**：[#3 (Local Chat MVP 02：多輪歷史與停止生成)](https://github.com/samzhu/bot/issues/3) (已完成), [#4 (Local Chat MVP 03：重送與連線異常恢復)](https://github.com/samzhu/bot/issues/4) (已完成)
-- **狀態**：進行中 (`ready-for-agent` / Frontier)
+- **狀態**：已完成待交付 (`ready-for-review`)
 - **使用者可見交付**：
   開發者可透過指定 Profile 與設定檔切換至真實雲端模型進行端到端對話。模型名稱直接於組態檔中指定，無需額外環境變數。若未提供憑證或聊天模型名稱，系統於啟動時立即 Fail-Fast 報錯。提供獨立測試驗證與外部供應商之聊天雙向通訊，並完成本機瀏覽器端到端驗收流程與標準本機開發啟動說明文件。語音與嵌入向量功能嚴格維持 MVP 範圍外，本票不要求啟用或測試。
 - **驗收準則**：
-  - [ ] 啟用真實模型 Profile 時應用程式能成功啟動並載入供應商聊天模型組件，不載入 Mock。
-  - [ ] 未設定 API 憑證或聊天模型名稱時啟動立即觸發 Fail-Fast 阻擋並輸出清楚指引。
-  - [ ] 聊天模型名稱直接自 YAML 設定檔解析（Chat 模型為 `gemini-3.8-flash`）。
-  - [ ] 代理不得檢視或輸出秘密內容；應用程式正常載入私有組態可用於明確啟用的 Smoke 測試。
-  - [ ] 提供獨立 Smoke 驗證測試，僅針對聊天模型確保與外部供應商完成真實網路串流往返。
-  - [ ] 完成完整本機瀏覽器端到端驗收（新對話、多輪對話、取消、重整還原）。
-  - [ ] 提供精確標準的專案本機開發啟動指令與文件。
+  - [x] 啟用真實模型 Profile 時應用程式能成功啟動並載入供應商聊天模型組件，不載入 Mock。
+  - [x] 未設定 API 憑證或聊天模型名稱時啟動立即觸發 Fail-Fast 阻擋並輸出清楚指引。
+  - [x] 聊天模型名稱直接自 YAML 設定檔解析（Chat 模型為 `gemini-3.8-flash`）。
+  - [x] 代理不得檢視或輸出秘密內容；應用程式正常載入私有組態可用於明確啟用的 Smoke 測試。
+  - [x] 提供獨立 Smoke 驗證測試，僅針對聊天模型確保與外部供應商完成真實網路串流往返。
+  - [x] 完成完整本機瀏覽器端到端驗收（新對話、多輪對話、取消、重整還原）。
+  - [x] 提供精確標準的專案本機開發啟動指令與文件。
 
 ---
 
@@ -102,20 +102,20 @@
 ### 1. 目前編譯與測試真實狀態
 - **後端狀態**：
   - 編譯：`./gradlew compileJava compileTestJava` 通過（Exit Code 0）。
-  - 單檔整合測試：`LocalChatBackendIntegrationTests` 全部 23 項測試通過（Exit Code 0，含受控模型 `ControlledChatModel`、真 complete/cancel CAS 競爭、完整讀取 EOF 唯一終態斷言、滑動窗口 10 輪與中斷回合排除、同 ID 相同/相異 payload 重送確定性裁決、斷線/逾時/失敗回滾交易隔離、嚴格 PostgreSQL SQLState 23505 唯一約束判斷）。
+  - 全量離線整合測試：`./gradlew test` 共 31 項測試全數通過（31 passed, 0 skipped, 0 failed，含 23 項端到端 API 契約、4 項隔離 real-ai fail-fast、3 項 ProfileGuard、1 項 Spring Context）。
+  - 獨立真模型煙測：`./gradlew realAiSmokeTest`（1 passed, 0 skipped, 0 failed，確認 GoogleGenAiChatModel 實例，配置模型為 `gemini-3.8-flash`，即時外部雲端推理取得 `'PONG'`，嚴格序號、單一 Consistent `runId`、DB/Session 一致性均通過，`outputs.upToDateWhen { false }` 確保無快取假測）。
 - **前端狀態**：
-  - 建置：`npx ng build` 通過（Exit Code 0，初始 bundle 4.87 MB，樣式 7.07 kB，符合 7kB/8kB 預算）。
-  - SSE Parser 單元測試：`sse-parser.spec.mjs` 13 項測試全數通過（UTF-8 多位元組 split、CRLF split、心跳注釋忽略、seq 嚴格遞增、提早 EOF 檢測）。
+  - 建置：`npm run build` 通過（Exit Code 0，初始 bundle 4.87 MB < 5.5 MB 預算，組件樣式 7.07 kB < 8 kB 預算）。
+  - 單元測試套件：`npm test` 共 16 項測試全數通過（3 項 Vitest 前端組件測試含真實剪貼簿複製行為 + 13 項 SSE Parser 嚴格串流解析測試）。
   - 真 Browser 自動化：
     - `verify-ticket-01.mjs`（最小閉環串流與重載還原）通過。
     - `verify-ticket-02.mjs`（IME composition guard、Shift+Enter 換行、協同 Stop 取消、非首頁 deep conv 還原、22 輪 44 筆訊息分頁對齊）通過。
     - `verify-ticket-03.mjs` 全 6 項情境通過（Partial Error Failed Badge、In-Flight Disconnect 無 reload 自動恢復、Lost-Response 200 JSON 去重、Before-Persist 重試保留 temp ID 對齊 DB、Zero-Delta 取消無 ghost assistant row、Real 409 衝突拒絕無 retry-btn 與下一輪正常串流）。
+    - `verify-clipboard.mjs` 通過（真實 Chrome CDP 授權剪貼簿讀寫、按鈕「Copied!」狀態切換、逾時還原）。
 - **已驗收票單**：
   - Issue #2 (Ticket 01：本機聊天最小閉環) - 已交付關閉
   - Issue #3 (Ticket 02：多輪歷史與停止生成) - 已交付關閉
-  - Issue #4 (Ticket 03：重送與連線異常恢復) - 已驗收完成，進行交付
-- **歷史失敗紀錄（Historical Reference，已解決）**：
-  - 早期 Gate B 整合測試（12 項中 9 失敗）係因測試輔助方法誤選未暴露的 `userId` 欄位；已於 #2/#3 重構修復。
-
-### 2. 下一步實作推進計劃
-- Issue #4 完成 Git 交付並關閉後，進入下一個 Frontier 票單：**Issue #5 (Ticket 04：真模型設定與交付驗收)**。
+  - Issue #4 (Ticket 03：重送與連線異常恢復) - 已交付關閉
+  - Issue #5 (Ticket 04：真模型設定與交付驗收) - 已完成待交付審核
+- **Parent Issue 狀態**：
+  - Issue #1（Local Chat MVP：串流聊天與持久化歷史）維持 **OPEN** 作為整體功能追蹤。

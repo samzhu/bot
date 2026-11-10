@@ -6,6 +6,6 @@
 | :--- | :--- | :--- | :--- | :--- |
 | **Local Chat MVP：串流聊天與持久化歷史** | [local-chat-mvp.md](local-chat-mvp.md) | [local-chat-mvp-tickets.md](local-chat-mvp-tickets.md) | [#1](https://github.com/samzhu/bot/issues/1) (Parent) | 已發布 (`ready-for-agent`) |
 | ↳ Ticket 01：本機聊天最小閉環 | - | - | [#2](https://github.com/samzhu/bot/issues/2) | 已驗收完成 (`completed`) |
-| ↳ Ticket 02：多輪歷史與停止生成 | - | - | [#3](https://github.com/samzhu/bot/issues/3) | 已發布 (`ready-for-agent` / Frontier) |
-| ↳ Ticket 03：重送與連線異常恢復 | - | - | [#4](https://github.com/samzhu/bot/issues/4) | 已發布 (`ready-for-agent` / Blocked by #2) |
-| ↳ Ticket 04：真模型設定與交付驗收 | - | - | [#5](https://github.com/samzhu/bot/issues/5) | 已發布 (`ready-for-agent` / Blocked by #3, #4) |
+| ↳ Ticket 02：多輪歷史與停止生成 | - | - | [#3](https://github.com/samzhu/bot/issues/3) | 已驗收完成 (`completed`) |
+| ↳ Ticket 03：重送與連線異常恢復 | - | - | [#4](https://github.com/samzhu/bot/issues/4) | 已驗收完成 (`completed`) |
+| ↳ Ticket 04：真模型設定與交付驗收 | - | - | [#5](https://github.com/samzhu/bot/issues/5) | 已驗收完成 (`completed`) |

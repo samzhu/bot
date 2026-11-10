@@ -126,7 +126,7 @@ export class App extends ChatState implements OnInit {
     await this.loadConversations();
 
     // Check localStorage for previously active conversation to survive reloads
-    const savedId = localStorage.getItem('bot_active_conversation_id');
+    const savedId = this.getStorageItem('bot_active_conversation_id');
     const existing = this.conversations().find(c => c.id === savedId);
 
     if (existing) {
@@ -139,6 +139,31 @@ export class App extends ChatState implements OnInit {
     } else if (this.seedBot()) {
       await this.newConversation();
     }
+  }
+
+  /*
+   * WHY / ARCHITECTURAL RATIONALE:
+   * Local storage access can fail or throw SecurityError in restricted environments
+   * (e.g. private browsing mode, disabled storage cookies, sandboxed iframes, or headless unit tests).
+   * All conversation history, runs, and messages are authoritatively persisted on the server database.
+   * Client-side localStorage is strictly a best-effort convenience mechanism to restore active conversation selection
+   * across browser page reloads. A storage error is safely swallowed so that storage unavailability never breaks chat operations.
+   */
+  private getStorageItem(key: string): string | null {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        return window.localStorage.getItem(key);
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  private setStorageItem(key: string, value: string): void {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem(key, value);
+      }
+    } catch (_) {}
   }
 
   // --- GraphQL Operations ---
@@ -230,7 +255,7 @@ export class App extends ChatState implements OnInit {
     if (this.isStreaming()) return;
 
     this.currentConversationId.set(id);
-    localStorage.setItem('bot_active_conversation_id', id);
+    this.setStorageItem('bot_active_conversation_id', id);
     this.completedRunIds.clear();
     this.messageOffset.set(20);
     this.hasMoreMessages.set(false);
@@ -446,7 +471,7 @@ export class App extends ChatState implements OnInit {
         const newConv = json.data.createConversation;
         this.conversations.update(prev => [newConv, ...prev]);
         this.currentConversationId.set(newConv.id);
-        localStorage.setItem('bot_active_conversation_id', newConv.id);
+        this.setStorageItem('bot_active_conversation_id', newConv.id);
         this.messages.set([]);
         this.messageOffset.set(20);
         this.hasMoreMessages.set(false);
