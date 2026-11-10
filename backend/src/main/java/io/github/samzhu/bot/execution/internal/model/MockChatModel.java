@@ -40,6 +40,12 @@ public class MockChatModel implements ChatModel, StreamingChatModel {
         if (userText.contains("[ERROR]")) {
             return Flux.error(new RuntimeException("Simulated upstream streaming error"));
         }
+        if (userText.contains("[PARTIAL_ERROR]")) {
+            return Flux.fromArray(new String[] { "Hello, ", "this is a partial mock message before failure " })
+                    .delayElements(Duration.ofMillis(30))
+                    .map(chunk -> new ChatResponse(List.of(new Generation(new AssistantMessage(chunk)))))
+                    .concatWith(Flux.error(new RuntimeException("Simulated upstream streaming error after partial generation")));
+        }
 
         String[] chunks = new String[] {
             "Hello, ",
@@ -47,6 +53,13 @@ public class MockChatModel implements ChatModel, StreamingChatModel {
             "mock streaming response for: ",
             userText
         };
+
+        if (userText.contains("[DELAY]")) {
+            return Flux.fromArray(chunks)
+                    .delaySubscription(Duration.ofMillis(400))
+                    .delayElements(Duration.ofMillis(50))
+                    .map(chunk -> new ChatResponse(List.of(new Generation(new AssistantMessage(chunk)))));
+        }
 
         return Flux.fromArray(chunks)
                 .delayElements(Duration.ofMillis(30))

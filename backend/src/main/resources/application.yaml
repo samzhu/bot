@@ -1,6 +1,9 @@
 bot:
   conversation:
     window-turns: 10
+  run:
+    timeout: 180s
+    heartbeat-interval: 15s
 
 spring:
   application:

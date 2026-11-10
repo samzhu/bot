@@ -1,6 +1,6 @@
 # Backend Architecture & Module Boundaries (Pre-Modulith)
 
-> Document Version: 1.0 (Gate A)
+> Document Version: 1.1 (Issue #4 交付，Issue #5 推進中)
 > Baseline: Java 25 (toolchain 25), Gradle 9.8.2, Spring Boot 4.1.2, Spring AI 2.1.0-RC2
 
 ## 1. Overview & Architectural Goals

@@ -12,7 +12,7 @@
 ```
 [Issue #2: 01 本機聊天最小閉環] (已完成)
        ├──> [Issue #3: 02 多輪歷史與停止生成] (已完成)
-       └──> [Issue #4: 03 重送與連線異常恢復] (Frontier，下一票) ──> [Issue #5: 04 真模型設定與交付驗收]
+       └──> [Issue #4: 03 重送與連線異常恢復] (已完成) ──> [Issue #5: 04 真模型設定與交付驗收] (Frontier)
 ```
 
 ---
@@ -60,30 +60,30 @@
 ### Ticket 3: 重送與連線異常恢復 (Retry & Connection Anomaly Recovery)
 - **GitHub Issue**：[#4 (Local Chat MVP 03：重送與連線異常恢復)](https://github.com/samzhu/bot/issues/4)
 - **識別代號**：`03-retry-and-connection-recovery`
-- **相依阻擋**：[#2 (Local Chat MVP 01：本機聊天最小閉環)](https://github.com/samzhu/bot/issues/2) (已解除), [#3 (Local Chat MVP 02：多輪歷史與停止生成)](https://github.com/samzhu/bot/issues/3) (已解除)
-- **狀態**：可立即開始 (`ready-for-agent` / Frontier)
+- **相依阻擋**：[#2 (Local Chat MVP 01：本機聊天最小閉環)](https://github.com/samzhu/bot/issues/2) (已完成), [#3 (Local Chat MVP 02：多輪歷史與停止生成)](https://github.com/samzhu/bot/issues/3) (已完成)
+- **狀態**：已驗收完成 (`completed`)
 - **使用者可見交付**：
   當使用者遇到網路連線異常或連點送出按鈕時，系統提供具前端提示的自我修復與確定性復原。以相同請求識別碼與相同內容重送時，伺服器立即回傳 JSON 執行中介資料而不重放串流，且前端不重複產生訊息泡泡；若內容衝突則回傳 409 衝突拒絕並彈出前端錯誤提示。當使用者在同一對話已有任務進行時發起新任務，系統依據單一活躍任務規則回傳 409 衝突拒絕。當連線中斷或錯過終態事件時，前端可於重新連線後透過 GraphQL 權威 run 查詢自動恢復本機狀態。若串流遇到斷線、逾時或模型內部錯誤，伺服器安全中止上游，片段文字必須存在於資料庫並標註中斷。所有並發競爭使用受控發布者與鎖存器驗證而非任意等待。伺服器重啟時自動將所有殘留活躍任務收斂為失敗。
 - **驗收準則**：
-  - [ ] 相同請求識別碼與相同訊息內容重送時，回傳包含執行中介資料之 JSON 回應而非串流，前端不重複新增訊息。
-  - [ ] 相同請求識別碼但不同訊息內容重送時，回傳 409 衝突拒絕，前端呈現錯誤提示。
-  - [ ] 同一對話中存在執行中任務時發起新任務，回傳 409 衝突拒絕。
-  - [ ] 並發重送在資料庫唯一約束衝突時能自動自包裝異常中復原重查，並回傳正確中介資料。
-  - [ ] 並發競爭與取消時序以受控 Reactive 發布者與鎖存器驗證，不使用任意休眠。
-  - [ ] 遇到模型錯誤時發送失敗事件，並將資料庫狀態標記為失敗，不污染 Session Memory。
-  - [ ] 客戶端意外斷線時，伺服器自動中止生成並更新狀態為已取消，片段文字嚴格斷言存在於資料庫中。
-  - [ ] 串流逾時觸發確定性失敗終態轉換與逾時原因註記。
-  - [ ] 若 Session Memory 寫入失敗，整筆終態短交易完全復原並於獨立交易記錄失敗。
-  - [ ] 連線中斷恢復後，客戶端能透過 GraphQL 查詢 run 識別碼取得權威終態並同步介面。
-  - [ ] 伺服器重啟時自動將殘留活躍任務標記為失敗並記錄更新時間。
+  - [x] 相同請求識別碼與相同訊息內容重送時，回傳包含執行中介資料之 JSON 回應而非串流，前端不重複新增訊息。
+  - [x] 相同請求識別碼但不同訊息內容重送時，回傳 409 衝突拒絕，前端呈現錯誤提示。
+  - [x] 同一對話中存在執行中任務時發起新任務，回傳 409 衝突拒絕。
+  - [x] 並發重送在資料庫唯一約束衝突時能自動自包裝異常中復原重查，並回傳正確中介資料。
+  - [x] 並發競爭與取消時序以受控 Reactive 發布者與鎖存器驗證，不使用任意休眠。
+  - [x] 遇到模型錯誤時發送失敗事件，並將資料庫狀態標記為失敗，不污染 Session Memory。
+  - [x] 客戶端意外斷線時，伺服器自動中止生成並更新狀態為已取消，片段文字嚴格斷言存在於資料庫中。
+  - [x] 串流逾時觸發確定性失敗終態轉換與逾時原因註記。
+  - [x] 若 Session Memory 寫入失敗，整筆終態短交易完全復原並於獨立交易記錄失敗。
+  - [x] 連線中斷恢復後，客戶端能透過 GraphQL 查詢 run 識別碼取得權威終態並同步介面。
+  - [x] 伺服器重啟時自動將殘留活躍任務標記為失敗並記錄更新時間。
 
 ---
 
 ### Ticket 4: 真模型設定與交付驗收 (Real Model Configuration & Delivery Acceptance)
 - **GitHub Issue**：[#5 (Local Chat MVP 04：真模型設定與交付驗收)](https://github.com/samzhu/bot/issues/5)
 - **識別代號**：`04-real-model-config-and-delivery-acceptance`
-- **相依阻擋**：[#3 (Local Chat MVP 02：多輪歷史與停止生成)](https://github.com/samzhu/bot/issues/3), [#4 (Local Chat MVP 03：重送與連線異常恢復)](https://github.com/samzhu/bot/issues/4)
-- **狀態**：已發布 (`ready-for-agent` / Blocked by #3, #4)
+- **相依阻擋**：[#3 (Local Chat MVP 02：多輪歷史與停止生成)](https://github.com/samzhu/bot/issues/3) (已完成), [#4 (Local Chat MVP 03：重送與連線異常恢復)](https://github.com/samzhu/bot/issues/4) (已完成)
+- **狀態**：進行中 (`ready-for-agent` / Frontier)
 - **使用者可見交付**：
   開發者可透過指定 Profile 與設定檔切換至真實雲端模型進行端到端對話。模型名稱直接於組態檔中指定，無需額外環境變數。若未提供憑證或聊天模型名稱，系統於啟動時立即 Fail-Fast 報錯。提供獨立測試驗證與外部供應商之聊天雙向通訊，並完成本機瀏覽器端到端驗收流程與標準本機開發啟動說明文件。語音與嵌入向量功能嚴格維持 MVP 範圍外，本票不要求啟用或測試。
 - **驗收準則**：
@@ -102,15 +102,20 @@
 ### 1. 目前編譯與測試真實狀態
 - **後端狀態**：
   - 編譯：`./gradlew compileJava compileTestJava` 通過（Exit Code 0）。
-  - 單檔整合測試：`LocalChatBackendIntegrationTests` 全部 13 項測試通過（Exit Code 0，含受控模型 `ControlledChatModel`、真 complete/cancel CAS 競爭 `test8b`、完整讀取 EOF 唯一終態斷言、滑動窗口 10 輪與中斷回合排除）。
+  - 單檔整合測試：`LocalChatBackendIntegrationTests` 全部 23 項測試通過（Exit Code 0，含受控模型 `ControlledChatModel`、真 complete/cancel CAS 競爭、完整讀取 EOF 唯一終態斷言、滑動窗口 10 輪與中斷回合排除、同 ID 相同/相異 payload 重送確定性裁決、斷線/逾時/失敗回滾交易隔離、嚴格 PostgreSQL SQLState 23505 唯一約束判斷）。
 - **前端狀態**：
-  - 建置：`npx ng build` 通過（Exit Code 0，初始 bundle 4.85 MB，樣式 6.32 kB，符合 7kB/8kB 預算）。
-  - 真 Browser 自動化：`verify-ticket-01.mjs` 與 `verify-ticket-02.mjs` 全數斷言通過（Exit Code 0，包含 Stop 協同取消、刷新保持中斷狀態、真 Shift+Enter 換行、非首頁對話還原與擴增、22 輪 44 筆訊息全序列無重複無跳漏）。
+  - 建置：`npx ng build` 通過（Exit Code 0，初始 bundle 4.87 MB，樣式 7.07 kB，符合 7kB/8kB 預算）。
+  - SSE Parser 單元測試：`sse-parser.spec.mjs` 13 項測試全數通過（UTF-8 多位元組 split、CRLF split、心跳注釋忽略、seq 嚴格遞增、提早 EOF 檢測）。
+  - 真 Browser 自動化：
+    - `verify-ticket-01.mjs`（最小閉環串流與重載還原）通過。
+    - `verify-ticket-02.mjs`（IME composition guard、Shift+Enter 換行、協同 Stop 取消、非首頁 deep conv 還原、22 輪 44 筆訊息分頁對齊）通過。
+    - `verify-ticket-03.mjs` 全 6 項情境通過（Partial Error Failed Badge、In-Flight Disconnect 無 reload 自動恢復、Lost-Response 200 JSON 去重、Before-Persist 重試保留 temp ID 對齊 DB、Zero-Delta 取消無 ghost assistant row、Real 409 衝突拒絕無 retry-btn 與下一輪正常串流）。
 - **已驗收票單**：
   - Issue #2 (Ticket 01：本機聊天最小閉環) - 已交付關閉
-  - Issue #3 (Ticket 02：多輪歷史與停止生成) - 已驗收完成，進行交付
+  - Issue #3 (Ticket 02：多輪歷史與停止生成) - 已交付關閉
+  - Issue #4 (Ticket 03：重送與連線異常恢復) - 已驗收完成，進行交付
 - **歷史失敗紀錄（Historical Reference，已解決）**：
   - 早期 Gate B 整合測試（12 項中 9 失敗）係因測試輔助方法誤選未暴露的 `userId` 欄位；已於 #2/#3 重構修復。
 
 ### 2. 下一步實作推進計劃
-- Issue #3 完成 Git 交付並關閉後，進入下一個 Frontier 票單：**Issue #4 (Ticket 03：重送與連線異常恢復)**。
+- Issue #4 完成 Git 交付並關閉後，進入下一個 Frontier 票單：**Issue #5 (Ticket 04：真模型設定與交付驗收)**。

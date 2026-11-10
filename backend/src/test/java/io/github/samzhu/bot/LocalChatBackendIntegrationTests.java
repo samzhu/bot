@@ -25,6 +25,9 @@ import org.springframework.context.annotation.Import;
 import org.springframework.data.jdbc.core.JdbcAggregateTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.convention.TestBean;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import static org.mockito.Mockito.*;
+import static org.mockito.ArgumentMatchers.*;
 
 import java.io.BufferedReader;
 import java.io.InputStream;
@@ -68,14 +71,20 @@ class LocalChatBackendIntegrationTests {
     @Autowired
     private DatabaseInitializer databaseInitializer;
 
-    @Autowired
+    @MockitoSpyBean
     private SessionService sessionService;
+
+    @Autowired
+    private io.github.samzhu.bot.execution.internal.RunExecutionServiceImpl runExecutionService;
 
     @Autowired
     private CurrentUserProvider currentUserProvider;
 
     @Autowired
     private JdbcAggregateTemplate jdbcAggregateTemplate;
+
+    @Autowired
+    private javax.sql.DataSource dataSource;
 
     @TestBean(name = "mockChatModel", methodName = "controlledChatModel", enforceOverride = true)
     ChatModel mockChatModel;
@@ -84,6 +93,15 @@ class LocalChatBackendIntegrationTests {
 
     static ControlledChatModel controlledChatModel() {
         return ControlledChatModel.getInstance();
+    }
+
+    @TestBean(name = "runProperties", methodName = "testRunProperties", enforceOverride = true)
+    io.github.samzhu.bot.execution.internal.RunProperties runProperties;
+
+    TestRunProperties testRunProperties = TestRunProperties.getInstance();
+
+    static TestRunProperties testRunProperties() {
+        return TestRunProperties.getInstance();
     }
 
     private final HttpClient httpClient = HttpClient.newBuilder()
@@ -98,6 +116,8 @@ class LocalChatBackendIntegrationTests {
     void setUp() {
         baseUrl = "http://127.0.0.1:" + port;
         controlledChatModel.reset();
+        testRunProperties.reset();
+        reset(sessionService);
     }
 
     private String createTestConversation(String title) throws Exception {
@@ -1037,10 +1057,816 @@ class LocalChatBackendIntegrationTests {
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
-                if (line.startsWith("event: run.completed") || line.startsWith("event: run.failed") || line.startsWith("event: run.cancelled")) {
+                // Read until true EOF
+            }
+        }
+    }
+
+    record SseReadResult(
+        List<String> eventNames,
+        List<String> terminalEvents,
+        Map<String, List<JsonNode>> eventsData,
+        String runId
+    ) {}
+
+    private SseReadResult readFullSseStream(InputStream is) throws Exception {
+        List<String> eventNames = new CopyOnWriteArrayList<>();
+        List<String> terminalEvents = new CopyOnWriteArrayList<>();
+        Map<String, List<JsonNode>> eventsData = new ConcurrentHashMap<>();
+        AtomicReference<String> rId = new AtomicReference<>();
+
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+            String line;
+            String curEvent = null;
+            while ((line = reader.readLine()) != null) {
+                line = line.trim();
+                if (line.startsWith("event:")) {
+                    curEvent = line.substring(6).trim();
+                    eventNames.add(curEvent);
+                    if ("run.completed".equals(curEvent) || "run.cancelled".equals(curEvent) || "run.failed".equals(curEvent)) {
+                        terminalEvents.add(curEvent);
+                    }
+                } else if (line.startsWith("data:")) {
+                    String jsonText = line.substring(5).trim();
+                    if (!jsonText.isBlank()) {
+                        JsonNode n = objectMapper.readTree(jsonText);
+                        if (curEvent != null) {
+                            eventsData.computeIfAbsent(curEvent, k -> new CopyOnWriteArrayList<>()).add(n);
+                        }
+                        if (n.has("runId") && rId.get() == null) {
+                            rId.set(n.get("runId").asText());
+                        }
+                    }
+                }
+            }
+        }
+        return new SseReadResult(eventNames, terminalEvents, eventsData, rId.get());
+    }
+
+    @Test
+    void test14_ConcurrentDedupSameRequestIdSamePayload() throws Exception {
+        String convId = createTestConversation("Concurrent Dedup Conv");
+        String clientReqId = "req-14-" + UUID.randomUUID();
+        String jsonPayload = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", clientReqId,
+                "message", "Concurrent dedup message"
+        ));
+
+        CountDownLatch readyLatch = new CountDownLatch(2);
+        CountDownLatch raceGate = new CountDownLatch(1);
+
+        CompletableFuture<HttpResponse<InputStream>> worker1 = CompletableFuture.supplyAsync(() -> {
+            try {
+                readyLatch.countDown();
+                raceGate.await();
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "text/event-stream, application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(jsonPayload))
+                        .build();
+                return httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+
+        CompletableFuture<HttpResponse<InputStream>> worker2 = CompletableFuture.supplyAsync(() -> {
+            try {
+                readyLatch.countDown();
+                raceGate.await();
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "text/event-stream, application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(jsonPayload))
+                        .build();
+                return httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+
+        assertTrue(readyLatch.await(5, TimeUnit.SECONDS));
+        raceGate.countDown();
+
+        HttpResponse<InputStream> resp1 = worker1.get(5, TimeUnit.SECONDS);
+        HttpResponse<InputStream> resp2 = worker2.get(5, TimeUnit.SECONDS);
+
+        assertEquals(200, resp1.statusCode());
+        assertEquals(200, resp2.statusCode());
+
+        // One response must be text/event-stream, the other application/json duplicate
+        HttpResponse<InputStream> sseResp;
+        HttpResponse<InputStream> jsonResp;
+        String ct1 = resp1.headers().firstValue("Content-Type").orElse("");
+        String ct2 = resp2.headers().firstValue("Content-Type").orElse("");
+
+        if (ct1.contains("text/event-stream")) {
+            assertTrue(ct2.contains("application/json"), "Second response must be application/json duplicate");
+            sseResp = resp1;
+            jsonResp = resp2;
+        } else {
+            assertTrue(ct1.contains("application/json"), "First response must be application/json duplicate");
+            assertTrue(ct2.contains("text/event-stream"), "Second response must be text/event-stream");
+            sseResp = resp2;
+            jsonResp = resp1;
+        }
+
+        // Read SSE stream to EOF
+        SseReadResult sseResult = readFullSseStream(sseResp.body());
+        assertEquals(1, sseResult.terminalEvents().size(), "SSE must yield exactly 1 terminal event");
+        assertEquals("run.completed", sseResult.terminalEvents().get(0));
+        String runId = sseResult.runId();
+        assertNotNull(runId, "Run ID must not be null");
+
+        // Parse JSON duplicate response
+        String jsonText = new String(jsonResp.body().readAllBytes(), StandardCharsets.UTF_8);
+        JsonNode jsonNode = objectMapper.readTree(jsonText);
+        assertEquals(runId, jsonNode.path("runId").asText(), "Duplicate JSON runId must match SSE runId");
+        assertEquals(runId, jsonNode.path("id").asText(), "Duplicate JSON id must match SSE runId");
+        assertEquals(clientReqId, jsonNode.path("clientRequestId").asText());
+        assertEquals("Concurrent dedup message", jsonNode.path("promptText").asText());
+
+        // Database assertions: exactly 1 run, 1 USER message, 1 ASSISTANT message
+        List<AgentRun> runs = agentRunRepository.findByConversationIdWithPaging(convId, 10, 0);
+        assertEquals(1, runs.size(), "DB must contain exactly 1 run for this conversation");
+        assertEquals(clientReqId, runs.get(0).clientRequestId());
+
+        List<Message> msgs = messageRepository.findByRunId(runId);
+        assertEquals(2, msgs.size(), "DB must contain exactly 1 USER and 1 ASSISTANT message for this run");
+
+        // ControlledChatModel assertions: exactly 1 model subscription
+        assertEquals(1, controlledChatModel.getRecordedPrompts().size(), "Model must be subscribed exactly once");
+    }
+
+    @Test
+    void test15_ConcurrentConflictSameRequestIdDifferentPayload() throws Exception {
+        String convId = createTestConversation("Conflict Request Conv");
+        String clientReqId = "req-15-" + UUID.randomUUID();
+
+        // Real concurrent race with same clientRequestId but different payloads released from a shared gate
+        String payloadAlpha = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", clientReqId,
+                "message", "Payload Alpha"
+        ));
+        String payloadBeta = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", clientReqId,
+                "message", "Payload Beta"
+        ));
+
+        CountDownLatch readyLatch = new CountDownLatch(2);
+        CountDownLatch raceGate = new CountDownLatch(1);
+
+        CompletableFuture<HttpResponse<InputStream>> worker1 = CompletableFuture.supplyAsync(() -> {
+            try {
+                readyLatch.countDown();
+                raceGate.await();
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "text/event-stream, application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(payloadAlpha))
+                        .build();
+                return httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+
+        CompletableFuture<HttpResponse<InputStream>> worker2 = CompletableFuture.supplyAsync(() -> {
+            try {
+                readyLatch.countDown();
+                raceGate.await();
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "text/event-stream, application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(payloadBeta))
+                        .build();
+                return httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+
+        assertTrue(readyLatch.await(5, TimeUnit.SECONDS));
+        raceGate.countDown();
+
+        HttpResponse<InputStream> resp1 = worker1.get(5, TimeUnit.SECONDS);
+        HttpResponse<InputStream> resp2 = worker2.get(5, TimeUnit.SECONDS);
+
+        // One response must be 200 text/event-stream (winner), the other must be 409 application/json (conflicting loser)
+        HttpResponse<InputStream> winnerSse;
+        HttpResponse<InputStream> loserConflict;
+
+        if (resp1.statusCode() == 200) {
+            assertEquals(409, resp2.statusCode(), "Losing request with conflicting payload must return 409 Conflict");
+            winnerSse = resp1;
+            loserConflict = resp2;
+        } else {
+            assertEquals(409, resp1.statusCode(), "Losing request with conflicting payload must return 409 Conflict");
+            assertEquals(200, resp2.statusCode(), "Winning request must return 200 SSE");
+            winnerSse = resp2;
+            loserConflict = resp1;
+        }
+
+        assertTrue(winnerSse.headers().firstValue("Content-Type").orElse("").contains("text/event-stream"));
+        assertTrue(loserConflict.headers().firstValue("Content-Type").orElse("").contains("application/json"));
+
+        // Parse 409 JSON body
+        String conflictJsonText = new String(loserConflict.body().readAllBytes(), StandardCharsets.UTF_8);
+        JsonNode conflictJson = objectMapper.readTree(conflictJsonText);
+        assertEquals("Conflicting message for clientRequestId", conflictJson.path("error").asText());
+        assertFalse(conflictJson.path("runId").asText().isBlank());
+
+        // Read winning SSE stream to EOF
+        SseReadResult sseResult = readFullSseStream(winnerSse.body());
+        assertEquals(1, sseResult.terminalEvents().size());
+        assertEquals("run.completed", sseResult.terminalEvents().get(0));
+        assertEquals(conflictJson.path("runId").asText(), sseResult.runId(), "409 runId must match winning runId");
+
+        // DB assertions: exactly 1 run in DB, exactly 1 USER message, model subscribed exactly once
+        List<AgentRun> runs = agentRunRepository.findByConversationIdWithPaging(convId, 10, 0);
+        assertEquals(1, runs.size(), "DB must contain exactly 1 run for this conversation");
+        assertEquals(clientReqId, runs.get(0).clientRequestId());
+
+        List<Message> msgs = messageRepository.findByRunId(sseResult.runId());
+        assertEquals(2, msgs.size(), "DB must contain exactly 1 USER and 1 ASSISTANT message");
+
+        assertEquals(1, controlledChatModel.getRecordedPrompts().size(), "Model must be subscribed exactly once");
+    }
+
+    @Test
+    void test16_SingleActiveRunDifferentRequestIdSameConversation() throws Exception {
+        String convId = createTestConversation("Single Active Run Conv");
+        controlledChatModel.setHoldMode(true);
+
+        String runId1Req = "req-16a-" + UUID.randomUUID();
+        String body1 = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", runId1Req,
+                "message", "Active run 1 message"
+        ));
+
+        HttpRequest req1 = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .POST(HttpRequest.BodyPublishers.ofString(body1))
+                .build();
+
+        HttpResponse<InputStream> resp1 = httpClient.send(req1, HttpResponse.BodyHandlers.ofInputStream());
+        assertEquals(200, resp1.statusCode());
+        assertTrue(controlledChatModel.awaitSubscribed(5, TimeUnit.SECONDS), "Model must be subscribed for run 1");
+
+        // While run 1 is active, send run 2 with a DIFFERENT clientRequestId on the same conversation
+        String runId2Req = "req-16b-" + UUID.randomUUID();
+        String body2 = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", runId2Req,
+                "message", "Active run 2 conflicting message"
+        ));
+
+        HttpRequest req2 = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body2))
+                .build();
+
+        HttpResponse<String> resp2 = httpClient.send(req2, HttpResponse.BodyHandlers.ofString());
+        assertEquals(409, resp2.statusCode(), "Concurrent run on same conversation must return 409 Conflict");
+        assertTrue(resp2.headers().firstValue("Content-Type").orElse("").contains("application/json"));
+
+        JsonNode json2 = objectMapper.readTree(resp2.body());
+        assertEquals("Another active run is in progress for this conversation", json2.path("error").asText());
+        assertFalse(json2.path("runId").asText().isBlank(), "Must return active runId");
+
+        // Finish run 1
+        controlledChatModel.emitChunk("Run 1 finish reply");
+        controlledChatModel.complete();
+
+        SseReadResult result1 = readFullSseStream(resp1.body());
+        assertEquals(1, result1.terminalEvents().size());
+        assertEquals("run.completed", result1.terminalEvents().get(0));
+
+        // Now run 3 on same conversation must succeed (run 1 has reached terminal)
+        controlledChatModel.setHoldMode(false);
+        String runId3Req = "req-16c-" + UUID.randomUUID();
+        String body3 = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", runId3Req,
+                "message", "Run 3 next turn message"
+        ));
+
+        HttpRequest req3 = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .POST(HttpRequest.BodyPublishers.ofString(body3))
+                .build();
+
+        HttpResponse<InputStream> resp3 = httpClient.send(req3, HttpResponse.BodyHandlers.ofInputStream());
+        assertEquals(200, resp3.statusCode());
+        SseReadResult result3 = readFullSseStream(resp3.body());
+        assertEquals(1, result3.terminalEvents().size());
+        assertEquals("run.completed", result3.terminalEvents().get(0));
+    }
+
+    @Test
+    void test17_HeartbeatDetectsClientDisconnect_AbortsModel_AllowsNextRun() throws Exception {
+        testRunProperties.setHeartbeatInterval(Duration.ofMillis(100));
+        String convId = createTestConversation("Heartbeat Disconnect Conv");
+        controlledChatModel.setHoldMode(true);
+
+        String clientReqId = "req-17a-" + UUID.randomUUID();
+        String body = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", clientReqId,
+                "message", "Disconnect test message"
+        ));
+
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+
+        HttpResponse<InputStream> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
+        assertEquals(200, resp.statusCode());
+
+        // Read until run.started to ensure run is active and registered
+        InputStream is = resp.body();
+        BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
+        String line;
+        String runId = null;
+        while ((line = reader.readLine()) != null) {
+            line = line.trim();
+            if (line.startsWith("data:")) {
+                JsonNode node = objectMapper.readTree(line.substring(5).trim());
+                if (node.has("runId")) {
+                    runId = node.get("runId").asText();
                     break;
                 }
             }
         }
+        assertNotNull(runId);
+
+        // Abruptly close the client socket
+        is.close();
+
+        // Model stream subscription must be cancelled when the 100ms heartbeat write fails
+        assertTrue(controlledChatModel.awaitCancelled(5, TimeUnit.SECONDS), "Model stream subscription must be cancelled on client disconnect");
+
+        // Semantic await: observe transition to CANCELLED in DB up to 5 seconds without fixed sleep
+        long deadline = System.currentTimeMillis() + 5000;
+        AgentRun run = null;
+        while (System.currentTimeMillis() < deadline) {
+            var opt = agentRunRepository.findById(runId);
+            if (opt.isPresent() && RunStatus.CANCELLED.name().equals(opt.get().status())) {
+                run = opt.get();
+                break;
+            }
+            Thread.yield();
+        }
+        assertNotNull(run, "Run must transition to CANCELLED in DB upon client disconnect");
+        assertEquals(RunStatus.CANCELLED.name(), run.status());
+
+        // Next run on the same conversation must succeed immediately (not 409)
+        controlledChatModel.setHoldMode(false);
+        String clientReqId2 = "req-17b-" + UUID.randomUUID();
+        String body2 = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", clientReqId2,
+                "message", "Next run after disconnect"
+        ));
+
+        HttpRequest req2 = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .POST(HttpRequest.BodyPublishers.ofString(body2))
+                .build();
+
+        HttpResponse<InputStream> resp2 = httpClient.send(req2, HttpResponse.BodyHandlers.ofInputStream());
+        assertEquals(200, resp2.statusCode(), "Next run after disconnect must succeed");
+        SseReadResult result2 = readFullSseStream(resp2.body());
+        assertEquals(1, result2.terminalEvents().size());
+        assertEquals("run.completed", result2.terminalEvents().get(0));
+    }
+
+    @Test
+    void test18_ApplicationDeadline_EmitsRunFailedTimeout() throws Exception {
+        testRunProperties.setTimeout(Duration.ofMillis(400));
+        String convId = createTestConversation("App Deadline Conv");
+        controlledChatModel.setHoldMode(true);
+
+        String clientReqId = "req-18a-" + UUID.randomUUID();
+        String body = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", clientReqId,
+                "message", "Deadline timeout message"
+        ));
+
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+
+        HttpResponse<InputStream> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
+        assertEquals(200, resp.statusCode());
+
+        // Stream will be terminated by application deadline at 400ms emitting run.failed
+        SseReadResult result = readFullSseStream(resp.body());
+        assertEquals(1, result.terminalEvents().size(), "Must receive exactly 1 terminal event");
+        assertEquals("run.failed", result.terminalEvents().get(0));
+
+        JsonNode failData = result.eventsData().get("run.failed").get(0);
+        assertEquals("FAILED", failData.path("status").asText());
+        assertTrue(failData.path("reason").asText().toLowerCase().contains("timeout"), "Error reason must specify timeout");
+
+        // DB status must be FAILED
+        String runId = result.runId();
+        assertNotNull(runId);
+        AgentRun run = agentRunRepository.findById(runId).orElseThrow();
+        assertEquals(RunStatus.FAILED.name(), run.status());
+        assertTrue(run.errorMessage().toLowerCase().contains("timeout"));
+
+        // Reset timeout and verify next run on same conversation succeeds
+        testRunProperties.reset();
+        controlledChatModel.setHoldMode(false);
+
+        String clientReqId2 = "req-18b-" + UUID.randomUUID();
+        String body2 = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", clientReqId2,
+                "message", "Subsequent turn after timeout"
+        ));
+
+        HttpRequest req2 = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .POST(HttpRequest.BodyPublishers.ofString(body2))
+                .build();
+
+        HttpResponse<InputStream> resp2 = httpClient.send(req2, HttpResponse.BodyHandlers.ofInputStream());
+        assertEquals(200, resp2.statusCode());
+        SseReadResult result2 = readFullSseStream(resp2.body());
+        assertEquals(1, result2.terminalEvents().size());
+        assertEquals("run.completed", result2.terminalEvents().get(0));
+    }
+
+    @Test
+    void test19_PartialDeltaFollowedByModelError() throws Exception {
+        String convId = createTestConversation("Model Error Conv");
+        controlledChatModel.setHoldMode(true);
+
+        String clientReqId = "req-19-" + UUID.randomUUID();
+        String body = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", clientReqId,
+                "message", "Model error test message"
+        ));
+
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+
+        HttpResponse<InputStream> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
+        assertEquals(200, resp.statusCode());
+
+        assertTrue(controlledChatModel.awaitSubscribed(5, TimeUnit.SECONDS), "Model must be subscribed");
+        // Emit chunk and error immediately in sequence without Thread.sleep
+        controlledChatModel.emitChunk("Partial delta chunk");
+        controlledChatModel.error(new RuntimeException("Simulated upstream model error"));
+
+        SseReadResult result = readFullSseStream(resp.body());
+        assertEquals(1, result.terminalEvents().size(), "Must receive exactly 1 terminal event");
+        assertEquals("run.failed", result.terminalEvents().get(0));
+
+        JsonNode failData = result.eventsData().get("run.failed").get(0);
+        assertEquals("FAILED", failData.path("status").asText());
+        assertTrue(failData.path("reason").asText().contains("Simulated upstream model error"));
+
+        // DB checks: assistant message persisted with interrupted = true
+        String runId = result.runId();
+        assertNotNull(runId);
+        List<Message> msgs = messageRepository.findByRunId(runId);
+        Message assistantMsg = msgs.stream().filter(m -> "ASSISTANT".equals(m.role())).findFirst().orElseThrow();
+        assertTrue(assistantMsg.interrupted(), "Assistant message must be marked interrupted");
+        assertEquals("Partial delta chunk", assistantMsg.content());
+
+        // Session service must NOT contain this failed turn in active messages
+        List<org.springframework.ai.chat.messages.Message> activeMsgs = sessionService.getActiveMessages(convId);
+        assertTrue(activeMsgs == null || activeMsgs.isEmpty(), "Failed run must not contaminate SessionService memory");
+    }
+
+    @Test
+    void test20_SessionAppendFalse_TriggersRollback_FallbackToFailed() throws Exception {
+        String convId = createTestConversation("Session Append False Conv");
+
+        // Simulate SessionService.appendEvents returning false (optimistic lock mismatch)
+        doReturn(false).when(sessionService).appendEvents(eq(convId), anyList(), anyLong());
+
+        String clientReqId = "req-20-" + UUID.randomUUID();
+        String promptMsg = "Session append false message";
+        String body = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", clientReqId,
+                "message", promptMsg
+        ));
+
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+
+        HttpResponse<InputStream> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
+        assertEquals(200, resp.statusCode());
+
+        SseReadResult result = readFullSseStream(resp.body());
+        assertEquals(1, result.terminalEvents().size(), "Must receive exactly 1 terminal event");
+        assertEquals("run.failed", result.terminalEvents().get(0));
+
+        JsonNode failData = result.eventsData().get("run.failed").get(0);
+        assertEquals("FAILED", failData.path("status").asText());
+        assertTrue(failData.path("reason").asText().contains("SessionService.appendEvents failed"));
+        String eventMsgId = failData.path("messageId").asText();
+        assertNotNull(eventMsgId);
+        assertFalse(eventMsgId.isBlank());
+
+        // DB state: status FAILED, assistant message is unique, marked interrupted, ID matches event, content matches
+        String runId = result.runId();
+        assertNotNull(runId);
+        AgentRun run = agentRunRepository.findById(runId).orElseThrow();
+        assertEquals(RunStatus.FAILED.name(), run.status());
+
+        List<Message> msgs = messageRepository.findByRunId(runId);
+        assertEquals(2, msgs.size(), "DB must contain exactly 1 USER and 1 ASSISTANT message");
+        Message assistantMsg = msgs.stream().filter(m -> "ASSISTANT".equals(m.role())).findFirst().orElseThrow();
+        assertEquals(eventMsgId, assistantMsg.id(), "Assistant message ID must match run.failed event messageId");
+        assertTrue(assistantMsg.interrupted(), "Assistant message must be marked interrupted on rollback");
+        assertTrue(assistantMsg.content().contains("mock streaming response for: " + promptMsg));
+
+        // Fresh Session query: verify no message pair exists in SessionService
+        List<org.springframework.ai.chat.messages.Message> activeMsgs = sessionService.getActiveMessages(convId);
+        assertTrue(activeMsgs == null || activeMsgs.isEmpty(), "Session store must NOT contain any message pair for failed run");
+
+        // Subsequent run succeeds and is uncontaminated
+        reset(sessionService);
+        String nextReqId = "req-20-next-" + UUID.randomUUID();
+        String nextBody = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", nextReqId,
+                "message", "Next clean message"
+        ));
+        HttpRequest nextReq = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .POST(HttpRequest.BodyPublishers.ofString(nextBody))
+                .build();
+        HttpResponse<InputStream> nextResp = httpClient.send(nextReq, HttpResponse.BodyHandlers.ofInputStream());
+        assertEquals(200, nextResp.statusCode());
+        SseReadResult nextResult = readFullSseStream(nextResp.body());
+        assertEquals(1, nextResult.terminalEvents().size());
+        assertEquals("run.completed", nextResult.terminalEvents().get(0));
+
+        // In controlledChatModel, the prompt for next run must NOT contain promptMsg
+        Prompt lastPrompt = controlledChatModel.getLastPrompt();
+        assertNotNull(lastPrompt);
+        String lastPromptText = lastPrompt.getInstructions().stream()
+                .map(org.springframework.ai.chat.messages.Message::getText)
+                .reduce("", (a, b) -> a + " " + b);
+        assertFalse(lastPromptText.contains(promptMsg), "Subsequent prompt must not contain rolled-back turn");
+        assertTrue(lastPromptText.contains("Next clean message"));
+    }
+
+    @Test
+    void test21_SessionAppendThrows_TriggersRollback_FallbackToFailed() throws Exception {
+        String convId = createTestConversation("Session Append Throws Conv");
+
+        // Spy call real method to perform actual SQL insert, then throw to force rollback
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw new RuntimeException("Simulated post-append failure for transaction rollback");
+        }).when(sessionService).appendEvents(eq(convId), anyList(), anyLong());
+
+        String clientReqId = "req-21-" + UUID.randomUUID();
+        String promptMsg = "Session append throws message";
+        String body = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", clientReqId,
+                "message", promptMsg
+        ));
+
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+
+        HttpResponse<InputStream> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
+        assertEquals(200, resp.statusCode());
+
+        SseReadResult result = readFullSseStream(resp.body());
+        assertEquals(1, result.terminalEvents().size(), "Must receive exactly 1 terminal event");
+        assertEquals("run.failed", result.terminalEvents().get(0));
+
+        JsonNode failData = result.eventsData().get("run.failed").get(0);
+        assertEquals("FAILED", failData.path("status").asText());
+        assertTrue(failData.path("reason").asText().contains("Simulated post-append failure"));
+        String eventMsgId = failData.path("messageId").asText();
+        assertNotNull(eventMsgId);
+        assertFalse(eventMsgId.isBlank());
+
+        // DB state: status FAILED, assistant message is unique, interrupted, ID matches event, content matches
+        String runId = result.runId();
+        assertNotNull(runId);
+        AgentRun run = agentRunRepository.findById(runId).orElseThrow();
+        assertEquals(RunStatus.FAILED.name(), run.status());
+
+        List<Message> msgs = messageRepository.findByRunId(runId);
+        assertEquals(2, msgs.size(), "DB must contain exactly 1 USER and 1 ASSISTANT message");
+        Message assistantMsg = msgs.stream().filter(m -> "ASSISTANT".equals(m.role())).findFirst().orElseThrow();
+        assertEquals(eventMsgId, assistantMsg.id(), "Assistant message ID must match run.failed event messageId");
+        assertTrue(assistantMsg.interrupted(), "Assistant message must be marked interrupted on rollback");
+        assertTrue(assistantMsg.content().contains("mock streaming response for: " + promptMsg));
+
+        // Fresh Session query: prove that even though real appendEvents ran, the transaction rollback reverted Session SQL!
+        List<org.springframework.ai.chat.messages.Message> activeMsgs = sessionService.getActiveMessages(convId);
+        assertTrue(activeMsgs == null || activeMsgs.isEmpty(), "Session store must be empty because transaction rollback reverted Session SQL");
+
+        // Subsequent run succeeds and is uncontaminated
+        reset(sessionService);
+        String nextReqId = "req-21-next-" + UUID.randomUUID();
+        String nextBody = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", nextReqId,
+                "message", "Next clean message after throws"
+        ));
+        HttpRequest nextReq = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .POST(HttpRequest.BodyPublishers.ofString(nextBody))
+                .build();
+        HttpResponse<InputStream> nextResp = httpClient.send(nextReq, HttpResponse.BodyHandlers.ofInputStream());
+        assertEquals(200, nextResp.statusCode());
+        SseReadResult nextResult = readFullSseStream(nextResp.body());
+        assertEquals(1, nextResult.terminalEvents().size());
+        assertEquals("run.completed", nextResult.terminalEvents().get(0));
+
+        // In controlledChatModel, the prompt for next run must NOT contain promptMsg
+        Prompt lastPrompt = controlledChatModel.getLastPrompt();
+        assertNotNull(lastPrompt);
+        String lastPromptText = lastPrompt.getInstructions().stream()
+                .map(org.springframework.ai.chat.messages.Message::getText)
+                .reduce("", (a, b) -> a + " " + b);
+        assertFalse(lastPromptText.contains(promptMsg), "Subsequent prompt must not contain rolled-back turn");
+        assertTrue(lastPromptText.contains("Next clean message after throws"));
+    }
+
+    @Test
+    void test22_StalledStreamDoesNotHoldDbConnection() throws Exception {
+        String convId = createTestConversation("Stalled Stream Connection Conv");
+        controlledChatModel.setHoldMode(true);
+
+        String clientReqId = "req-22-" + UUID.randomUUID();
+        String body = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", clientReqId,
+                "message", "Connection pool test message"
+        ));
+
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+
+        HttpResponse<InputStream> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
+        assertEquals(200, resp.statusCode());
+        assertTrue(controlledChatModel.awaitSubscribed(5, TimeUnit.SECONDS), "Model must be subscribed");
+
+        // Verify active connections in Hikari pool is 0 while model stream is stalled in HOLD mode
+        com.zaxxer.hikari.HikariDataSource hikariDs = (com.zaxxer.hikari.HikariDataSource) dataSource;
+        com.zaxxer.hikari.HikariPoolMXBean mxBean = hikariDs.getHikariPoolMXBean();
+        assertNotNull(mxBean, "HikariPoolMXBean must be available");
+        assertEquals(0, mxBean.getActiveConnections(), "Active connection count in pool must be 0 while stream is held outside DB transaction");
+
+        // While the model stream is stalled in HOLD mode, execute 50 repository queries concurrently
+        ExecutorService pool = Executors.newFixedThreadPool(10);
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            futures.add(CompletableFuture.runAsync(() -> {
+                var found = conversationRepository.findById(convId);
+                assertTrue(found.isPresent(), "Conversation must be readable during held stream");
+                botRepository.findAll();
+            }, pool));
+        }
+
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(5, TimeUnit.SECONDS);
+        pool.shutdown();
+
+        // Verify connection count returns to 0 immediately after concurrent queries complete
+        assertEquals(0, mxBean.getActiveConnections(), "Active connection count must return to 0");
+
+        // Now resume and finish stream
+        controlledChatModel.emitChunk("finished reply");
+        controlledChatModel.complete();
+
+        SseReadResult result = readFullSseStream(resp.body());
+        assertEquals(1, result.terminalEvents().size());
+        assertEquals("run.completed", result.terminalEvents().get(0));
+    }
+
+    @Test
+    void test23_ValidationBoundaries() throws Exception {
+        String convId = createTestConversation("Validation Boundaries Conv");
+
+        // 1. Blank clientRequestId -> 400 Bad Request
+        String bodyBlankReqId = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", "   ",
+                "message", "valid prompt"
+        ));
+        HttpRequest req1 = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(bodyBlankReqId))
+                .build();
+        assertEquals(400, httpClient.send(req1, HttpResponse.BodyHandlers.ofString()).statusCode());
+
+        // 2. clientRequestId > 128 characters -> 400 Bad Request
+        String bodyOverlongReqId = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", "a".repeat(129),
+                "message", "valid prompt"
+        ));
+        HttpRequest req2 = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(bodyOverlongReqId))
+                .build();
+        assertEquals(400, httpClient.send(req2, HttpResponse.BodyHandlers.ofString()).statusCode());
+
+        // 3. Blank message -> 400 Bad Request
+        String bodyBlankMsg = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", "req-23-valid",
+                "message", "   "
+        ));
+        HttpRequest req3 = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(bodyBlankMsg))
+                .build();
+        assertEquals(400, httpClient.send(req3, HttpResponse.BodyHandlers.ofString()).statusCode());
+
+        // 4. Overlong message (> 10000 chars) -> 400 Bad Request
+        String bodyOverlongMsg = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", "req-23-valid-2",
+                "message", "m".repeat(10001)
+        ));
+        HttpRequest req4 = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(bodyOverlongMsg))
+                .build();
+        assertEquals(400, httpClient.send(req4, HttpResponse.BodyHandlers.ofString()).statusCode());
+
+        // 5. Foreign user owner guard: real foreign owner data verification (not just unknown conv)
+        String foreignConvId = createTestConversation("Foreign Owner Guard Conv");
+        // Start run with foreign user ("user-bob") directly via service
+        var bobStartOutcome = runExecutionService.startRun(foreignConvId, "req-23-bob", "Bob unauthorized message", "user-bob");
+        assertEquals(io.github.samzhu.bot.execution.ExecutionOperations.StartRunOutcome.Type.CONFLICT, bobStartOutcome.type(), "Foreign user startRun must be rejected");
+        assertEquals("Conversation not found or access denied", bobStartOutcome.conflictMessage());
+
+        // Start valid run with rightful owner (default user)
+        var aliceStartOutcome = runExecutionService.startRun(foreignConvId, "req-23-alice", "Alice authorized message", currentUserProvider.getCurrentUserId());
+        assertEquals(io.github.samzhu.bot.execution.ExecutionOperations.StartRunOutcome.Type.STARTED, aliceStartOutcome.type());
+        String aliceRunId = aliceStartOutcome.existingRun().id();
+
+        // Foreign user bob tries to cancel alice's run
+        var bobCancelOutcome = runExecutionService.cancelRun(aliceRunId, "user-bob");
+        assertEquals(RunStatus.FAILED, bobCancelOutcome.finalStatus());
+        assertFalse(bobCancelOutcome.cancelled(), "Foreign user cancelRun must fail");
+
+        // Rightful owner cancels run
+        var aliceCancelOutcome = runExecutionService.cancelRun(aliceRunId, currentUserProvider.getCurrentUserId());
+        assertEquals(RunStatus.CANCELLED, aliceCancelOutcome.finalStatus());
+        assertTrue(aliceCancelOutcome.cancelled());
+
+        // 6. Unknown conversation ID -> 409 Conflict ("Conversation not found or access denied")
+        String bodyUnknownConv = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", "req-23-valid-3",
+                "message", "valid prompt"
+        ));
+        HttpRequest req6 = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/conversations/conv-non-existent/runs"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(bodyUnknownConv))
+                .build();
+        HttpResponse<String> resp6 = httpClient.send(req6, HttpResponse.BodyHandlers.ofString());
+        assertEquals(409, resp6.statusCode());
+        JsonNode json6 = objectMapper.readTree(resp6.body());
+        assertEquals("Conversation not found or access denied", json6.path("error").asText());
     }
 }

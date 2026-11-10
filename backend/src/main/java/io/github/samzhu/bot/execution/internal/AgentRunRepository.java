@@ -14,6 +14,9 @@ public interface AgentRunRepository extends CrudRepository<AgentRun, String> {
 
     Optional<AgentRun> findByConversationIdAndClientRequestId(String conversationId, String clientRequestId);
 
+    @Query("SELECT * FROM agent_run WHERE conversation_id = :conversationId AND status IN ('PENDING', 'RUNNING') LIMIT 1")
+    Optional<AgentRun> findActiveRunByConversationId(String conversationId);
+
     @Query("SELECT * FROM agent_run WHERE conversation_id = :conversationId ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset")
     List<AgentRun> findByConversationIdWithPaging(String conversationId, int limit, int offset);
 

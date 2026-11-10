@@ -20,4 +20,17 @@ public class RunRegistry {
     public RunHandle remove(String runId) {
         return activeHandles.remove(runId);
     }
+
+    public boolean hasActiveRunForConversation(String conversationId) {
+        if (conversationId == null) return false;
+        return activeHandles.values().stream().anyMatch(h -> conversationId.equals(h.getConversationId()));
+    }
+
+    public RunHandle getActiveHandleForConversation(String conversationId) {
+        if (conversationId == null) return null;
+        return activeHandles.values().stream()
+                .filter(h -> conversationId.equals(h.getConversationId()))
+                .findFirst()
+                .orElse(null);
+    }
 }

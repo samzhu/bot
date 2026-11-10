@@ -3,12 +3,17 @@ package io.github.samzhu.bot.execution.internal;
 import io.github.samzhu.bot.execution.RunStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.scheduling.TaskScheduler;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import reactor.core.Disposable;
 import reactor.core.Disposables;
 
 import java.io.IOException;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ScheduledFuture;
 
 public class RunHandle {
 
@@ -33,11 +38,19 @@ public class RunHandle {
     private boolean terminal = false;
     private int seq = 1; // run.started is seq 1, deltas start at 2
 
+    private ScheduledFuture<?> deadlineFuture;
+    private ScheduledFuture<?> heartbeatFuture;
+
     public record TerminalResult(
         boolean casSuccess,
         RunStatus finalStatus,
-        String messageId
-    ) {}
+        String messageId,
+        String errorMessage
+    ) {
+        public TerminalResult(boolean casSuccess, RunStatus finalStatus, String messageId) {
+            this(casSuccess, finalStatus, messageId, null);
+        }
+    }
 
     public interface TerminalCallback {
         TerminalResult commitTerminal(String runId, String conversationId, RunStatus targetStatus, String errorMessage, String assistantContent, boolean interrupted, String userPrompt);
@@ -60,9 +73,36 @@ public class RunHandle {
         this.userMessageId = userMessageId;
         this.callback = callback;
 
-        this.emitter.onCompletion(() -> disconnect("Emitter onCompletion"));
-        this.emitter.onError(err -> disconnect("Emitter onError: " + (err != null ? err.getMessage() : "unknown")));
-        this.emitter.onTimeout(this::timeout);
+        this.emitter.onCompletion(() -> {
+            synchronized (lock) {
+                // If the run reached a clean terminal state (COMPLETED, FAILED, CANCELLED),
+                // onCompletion is the normal servlet request end and must NOT overwrite the final status.
+                if (terminal) return;
+                handleWriteFailure("Emitter onCompletion before terminal");
+            }
+        });
+        this.emitter.onError(err -> {
+            synchronized (lock) {
+                if (terminal) return;
+                handleWriteFailure("Emitter onError: " + (err != null ? err.getMessage() : "unknown"));
+            }
+        });
+        this.emitter.onTimeout(() -> {
+            synchronized (lock) {
+                if (terminal) return;
+                /*
+                 * RATIONALE: Servlet container timeout callback is the container's error notification/cleanup mechanism.
+                 * Transitioning to FAILED with timeout error reason reflects true outcome rather than CANCELLED,
+                 * without calling emitter.complete() as the container has already initiated error processing.
+                 */
+                terminal = true;
+                clearScheduledTasks();
+                swapDisposable.dispose();
+                registry.remove(runId);
+                String partial = fullReply.toString();
+                callback.commitTerminal(runId, conversationId, RunStatus.FAILED, "Execution timeout", partial, true, null);
+            }
+        });
     }
 
     public RunHandle(
@@ -75,10 +115,37 @@ public class RunHandle {
         this(runId, conversationId, ownerId, emitter, registry, null, callback);
     }
 
+    public void startScheduledTasks(TaskScheduler scheduler, Duration deadline, Duration heartbeatInterval) {
+        synchronized (lock) {
+            if (terminal || scheduler == null) return;
+            if (deadline != null && !deadline.isZero() && !deadline.isNegative()) {
+                this.deadlineFuture = scheduler.schedule(this::appTimeout, Instant.now().plus(deadline));
+            }
+            if (heartbeatInterval != null && !heartbeatInterval.isZero() && !heartbeatInterval.isNegative()) {
+                this.heartbeatFuture = scheduler.scheduleWithFixedDelay(
+                        this::sendHeartbeat,
+                        Instant.now().plus(heartbeatInterval),
+                        heartbeatInterval
+                );
+            }
+        }
+    }
+
+    private void clearScheduledTasks() {
+        if (deadlineFuture != null) {
+            deadlineFuture.cancel(false);
+            deadlineFuture = null;
+        }
+        if (heartbeatFuture != null) {
+            heartbeatFuture.cancel(false);
+            heartbeatFuture = null;
+        }
+    }
+
     public void sendStarted() {
         synchronized (lock) {
             try {
-                Map<String, Object> data = new java.util.HashMap<>();
+                Map<String, Object> data = new HashMap<>();
                 data.put("runId", runId);
                 data.put("seq", 1);
                 if (userMessageId != null) {
@@ -88,7 +155,7 @@ public class RunHandle {
                         .name("run.started")
                         .data(data));
             } catch (Exception ex) {
-                disconnect("Failed to send initial run.started: " + ex.getMessage());
+                handleWriteFailure("Failed to send initial run.started: " + ex.getMessage());
             }
         }
     }
@@ -115,9 +182,27 @@ public class RunHandle {
                         .name("message.delta")
                         .data(Map.of("runId", runId, "seq", currentSeq, "delta", chunk)));
             } catch (IOException | IllegalStateException ex) {
-                disconnect("SSE send error: " + ex.getMessage());
+                handleWriteFailure("SSE delta send error: " + ex.getMessage());
             } catch (Exception ex) {
-                disconnect("SSE unexpected error: " + ex.getMessage());
+                handleWriteFailure("SSE delta unexpected error: " + ex.getMessage());
+            }
+        }
+    }
+
+    public void sendHeartbeat() {
+        synchronized (lock) {
+            if (terminal) return;
+            try {
+                /*
+                 * RATIONALE: SSE Comment Heartbeat frame (: heartbeat\n\n).
+                 * Standard SSE ping that tests socket connectivity without incrementing
+                 * business sequence or triggering frontend onmessage handlers.
+                 */
+                emitter.send(SseEmitter.event().comment("heartbeat"));
+            } catch (IOException | IllegalStateException ex) {
+                handleWriteFailure("Heartbeat write failure: " + ex.getMessage());
+            } catch (Exception ex) {
+                handleWriteFailure("Heartbeat unexpected error: " + ex.getMessage());
             }
         }
     }
@@ -125,6 +210,7 @@ public class RunHandle {
     public void complete(String userPrompt) {
         synchronized (lock) {
             if (terminal) return;
+            clearScheduledTasks();
             String answer = fullReply.toString();
             if (answer.isBlank()) {
                 fail("Empty model response");
@@ -136,50 +222,21 @@ public class RunHandle {
             swapDisposable.dispose();
             registry.remove(runId);
 
-            if (result.casSuccess()) {
-                int currentSeq = ++seq;
-                try {
-                    emitter.send(SseEmitter.event()
-                            .name("run.completed")
-                            .data(Map.of(
-                                    "runId", runId,
-                                    "seq", currentSeq,
-                                    "status", "COMPLETED",
-                                    "messageId", result.messageId() != null ? result.messageId() : ""
-                            )));
-                } catch (Exception ignored) {}
-            }
-            try {
-                emitter.complete();
-            } catch (Exception ignored) {}
+            dispatchTerminalEvent(result);
         }
     }
 
     public void fail(String errorMessage) {
         synchronized (lock) {
             if (terminal) return;
+            clearScheduledTasks();
             String partial = fullReply.toString();
             TerminalResult result = callback.commitTerminal(runId, conversationId, RunStatus.FAILED, errorMessage, partial, true, null);
             terminal = true;
             swapDisposable.dispose();
             registry.remove(runId);
 
-            if (result.casSuccess()) {
-                int currentSeq = ++seq;
-                try {
-                    emitter.send(SseEmitter.event()
-                            .name("run.failed")
-                            .data(Map.of(
-                                    "runId", runId,
-                                    "seq", currentSeq,
-                                    "status", "FAILED",
-                                    "reason", errorMessage != null ? errorMessage : "Unknown error"
-                            )));
-                } catch (Exception ignored) {}
-            }
-            try {
-                emitter.complete();
-            } catch (Exception ignored) {}
+            dispatchTerminalEvent(result);
         }
     }
 
@@ -188,55 +245,123 @@ public class RunHandle {
             if (terminal) {
                 return callback.queryCurrentStatus(runId);
             }
+            clearScheduledTasks();
             String partial = fullReply.toString();
             TerminalResult result = callback.commitTerminal(runId, conversationId, RunStatus.CANCELLED, "Run cancelled by user", partial, true, null);
             terminal = true;
             swapDisposable.dispose();
             registry.remove(runId);
 
-            if (result.casSuccess()) {
-                int currentSeq = ++seq;
-                try {
-                    Map<String, Object> cancelData = new java.util.HashMap<>();
-                    cancelData.put("runId", runId);
-                    cancelData.put("seq", currentSeq);
-                    cancelData.put("status", "CANCELLED");
-                    cancelData.put("reason", "Run cancelled by user");
-                    if (result.messageId() != null) {
-                        cancelData.put("messageId", result.messageId());
-                    }
-                    emitter.send(SseEmitter.event()
-                            .name("run.cancelled")
-                            .data(cancelData));
-                } catch (Exception ignored) {}
-            }
+            dispatchTerminalEvent(result);
+            return result.finalStatus();
+        }
+    }
+
+    private void dispatchTerminalEvent(TerminalResult result) {
+        if (!result.casSuccess()) {
+            /*
+             * RATIONALE: CAS loser does not forge duplicate terminal SSE events (the winning committer owns terminal emission).
+             * However, if the emitter is still open, we close the live emitter cleanly so the HTTP connection reaches EOF
+             * rather than hanging indefinitely with clearScheduledTasks() already called.
+             */
             try {
                 emitter.complete();
             } catch (Exception ignored) {}
-            return result.finalStatus();
+            return;
         }
+
+        int currentSeq = ++seq;
+        RunStatus status = result.finalStatus();
+
+        if (status == RunStatus.COMPLETED) {
+            sendTerminalEventAndClose("run.completed", Map.of(
+                    "runId", runId,
+                    "seq", currentSeq,
+                    "status", "COMPLETED",
+                    "messageId", result.messageId() != null ? result.messageId() : ""
+            ));
+        } else if (status == RunStatus.CANCELLED) {
+            Map<String, Object> cancelData = new HashMap<>();
+            cancelData.put("runId", runId);
+            cancelData.put("seq", currentSeq);
+            cancelData.put("status", "CANCELLED");
+            cancelData.put("reason", result.errorMessage() != null ? result.errorMessage() : "Run cancelled by user");
+            if (result.messageId() != null) {
+                cancelData.put("messageId", result.messageId());
+            }
+            sendTerminalEventAndClose("run.cancelled", cancelData);
+        } else {
+            // FAILED (including fallback from complete or cancel)
+            Map<String, Object> failData = new HashMap<>();
+            failData.put("runId", runId);
+            failData.put("seq", currentSeq);
+            failData.put("status", "FAILED");
+            failData.put("reason", result.errorMessage() != null ? result.errorMessage() : "Execution failed");
+            if (result.messageId() != null) {
+                failData.put("messageId", result.messageId());
+            }
+            sendTerminalEventAndClose("run.failed", failData);
+        }
+    }
+
+    private void sendTerminalEventAndClose(String eventName, Map<String, Object> data) {
+        try {
+            emitter.send(SseEmitter.event().name(eventName).data(data));
+            // Only complete if send succeeded without socket exception
+            try {
+                emitter.complete();
+            } catch (Exception ignored) {}
+        } catch (IOException | IllegalStateException ex) {
+            log.info("Terminal event send failed on closed socket for run {}: {}", runId, ex.getMessage());
+            /*
+             * RATIONALE: Spring Framework 7 / Servlet container cleanup contract.
+             * When an IOException occurs while writing to the socket, the servlet container (Tomcat)
+             * manages channel cleanup and aborts the async request context.
+             * The application must not attempt further emitter writes or complete invocations.
+             */
+        } catch (Exception ex) {
+            log.warn("Terminal event unexpected error for run {}: {}", runId, ex.getMessage());
+        }
+    }
+
+    public void appTimeout() {
+        synchronized (lock) {
+            if (terminal) return;
+            log.warn("Application deadline exceeded for run {}", runId);
+            fail("Execution timeout");
+        }
+    }
+
+    private void handleWriteFailure(String reason) {
+        if (terminal) return;
+        terminal = true;
+        clearScheduledTasks();
+        registry.remove(runId);
+        log.info("Client write failed or disconnected for run {}: {}", runId, reason);
+        String partial = fullReply.toString();
+        callback.commitTerminal(runId, conversationId, RunStatus.CANCELLED, reason, partial, true, null);
+        swapDisposable.dispose();
+        /*
+         * RATIONALE: Spring Framework 7 / Servlet container cleanup contract.
+         * When an IOException occurs while writing to the HTTP socket, the servlet container (Tomcat)
+         * takes ownership of channel cleanup and closes the underlying transport.
+         * The application relies on container error notification rather than manually calling emitter.complete().
+         */
     }
 
     public void disconnect(String reason) {
         synchronized (lock) {
             if (terminal) return;
-            log.info("Client disconnected for run {}: {}", runId, reason);
-            String partial = fullReply.toString();
-            callback.commitTerminal(runId, conversationId, RunStatus.CANCELLED, "Client disconnected: " + reason, partial, true, null);
-            terminal = true;
-            swapDisposable.dispose();
-            registry.remove(runId);
-            try {
-                emitter.complete();
-            } catch (Exception ignored) {}
+            handleWriteFailure("Client disconnected: " + reason);
         }
     }
 
-    public void timeout() {
-        synchronized (lock) {
-            if (terminal) return;
-            fail("Execution timeout");
-        }
+    public String getRunId() {
+        return runId;
+    }
+
+    public String getConversationId() {
+        return conversationId;
     }
 
     public String getOwnerId() {

@@ -1,6 +1,6 @@
 # Local Chat MVP 規格說明書 (Specification)
 
-> 狀態：草案更新（Gate B 票單準備中），2026-11-10。
+> 狀態：現行規格（Issue #2, #3, #4 已完成驗收交付，Issue #5 進行中），2026-11-11。
 > 依據 `to-spec` 規格模板生成。
 > 決策邊界：本規格完全不包含任何程式碼片段、GraphQL Schema 語法塊、JSON 酬載或 SQL 宣告。僅以純語意精確定義外部可觀察行為、介面契約、資料庫約束與系統狀態機。  
 > 架構演進：基於 Java 25、Gradle 9.8.2、Spring Boot 4.1.2 與 Spring AI 2.1.0-RC2。採用模組化套件邊界（Pre-Modulith 單向無環架構）與標準 SessionService API，手動配置模型 Bean 並排除底層自動裝配。

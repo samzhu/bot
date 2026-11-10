@@ -41,7 +41,17 @@ public class RunController {
             case EXISTING -> ResponseEntity.ok()
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(outcome.existingRun());
-            case CONFLICT -> ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("error", outcome.conflictMessage()));
+            case CONFLICT -> {
+                Map<String, Object> body = new java.util.LinkedHashMap<>();
+                body.put("error", outcome.conflictMessage());
+                if (outcome.existingRun() != null) {
+                    body.put("runId", outcome.existingRun().id());
+                    body.put("status", outcome.existingRun().status());
+                }
+                yield ResponseEntity.status(HttpStatus.CONFLICT)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body(body);
+            }
             case STARTED -> ResponseEntity.ok()
                     .contentType(MediaType.TEXT_EVENT_STREAM)
                     .body(outcome.emitter());

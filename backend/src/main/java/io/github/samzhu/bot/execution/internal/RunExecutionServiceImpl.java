@@ -23,11 +23,13 @@ import org.springframework.ai.session.SessionService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.jdbc.core.JdbcAggregateTemplate;
+import org.springframework.scheduling.TaskScheduler;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import reactor.core.Disposable;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -48,6 +50,8 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
     private final SessionService sessionService;
     private final RunRegistry runRegistry;
     private final ChatModel chatModel;
+    private final TaskScheduler taskScheduler;
+    private final RunProperties runProperties;
     private final int windowTurns;
 
     public RunExecutionServiceImpl(
@@ -59,6 +63,8 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
             SessionService sessionService,
             RunRegistry runRegistry,
             ChatModel chatModel,
+            TaskScheduler botTaskScheduler,
+            RunProperties runProperties,
             @Value("${bot.conversation.window-turns:10}") int windowTurns) {
         this.runRepository = runRepository;
         this.conversationOperations = conversationOperations;
@@ -68,6 +74,8 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         this.sessionService = sessionService;
         this.runRegistry = runRegistry;
         this.chatModel = chatModel;
+        this.taskScheduler = botTaskScheduler;
+        this.runProperties = runProperties;
         this.windowTurns = windowTurns;
     }
 
@@ -106,11 +114,14 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
             if (oldRun.promptText() != null && oldRun.promptText().equals(message)) {
                 return new StartRunOutcome(StartRunOutcome.Type.EXISTING, toView(oldRun), null, null);
             } else {
-                return new StartRunOutcome(StartRunOutcome.Type.CONFLICT, null, null, "Conflicting message for clientRequestId");
+                return new StartRunOutcome(StartRunOutcome.Type.CONFLICT, toView(oldRun), null, "Conflicting message for clientRequestId");
             }
         }
 
         // 3. Atomically insert run + user message
+        // Why delegate active adjudication to DB: checking early active runs in application memory creates
+        // a race where a concurrent same-ID request is misclassified as 409 active run rather than 200 duplicate.
+        // We let the database unique indexes (uq_active_run_per_conv and uq_client_request_per_conv) adjudicate.
         String runId = UUID.randomUUID().toString();
         Instant now = Instant.now();
         AgentRun newRun = new AgentRun(runId, conversationId, clientRequestId, message, RunStatus.RUNNING.name(), null, now, now);
@@ -122,22 +133,33 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                 var uMsg = conversationOperations.appendMessage(conversationId, "USER", message, runId, false);
                 userMsgHolder[0] = uMsg.id();
             });
-        } catch (DataIntegrityViolationException ex) {
-            // Concurrent race: re-check for deduplication
-            Optional<AgentRun> raced = runRepository.findByConversationIdAndClientRequestId(conversationId, clientRequestId);
-            if (raced.isPresent()) {
-                AgentRun oldRun = raced.get();
-                if (oldRun.promptText() != null && oldRun.promptText().equals(message)) {
-                    return new StartRunOutcome(StartRunOutcome.Type.EXISTING, toView(oldRun), null, null);
-                } else {
-                    return new StartRunOutcome(StartRunOutcome.Type.CONFLICT, null, null, "Conflicting message for clientRequestId");
+        } catch (Exception ex) {
+            // Check if this is specifically a unique constraint collision on agent_run active or client_request
+            if (isRunUniqueConstraintCollision(ex)) {
+                // Why re-query same clientRequestId first: another concurrent thread with the SAME clientRequestId
+                // may have won the insert race. If so, return EXISTING (200 duplicate) or CONFLICT (409 conflicting payload), NOT a generic active 409!
+                Optional<AgentRun> raced = runRepository.findByConversationIdAndClientRequestId(conversationId, clientRequestId);
+                if (raced.isPresent()) {
+                    AgentRun oldRun = raced.get();
+                    if (oldRun.promptText() != null && oldRun.promptText().equals(message)) {
+                        return new StartRunOutcome(StartRunOutcome.Type.EXISTING, toView(oldRun), null, null);
+                    } else {
+                        return new StartRunOutcome(StartRunOutcome.Type.CONFLICT, toView(oldRun), null, "Conflicting message for clientRequestId");
+                    }
                 }
+                // If not same clientRequestId, collision was uq_active_run_per_conv: another active run is in progress
+                Optional<AgentRun> activeRaced = runRepository.findActiveRunByConversationId(conversationId);
+                return new StartRunOutcome(StartRunOutcome.Type.CONFLICT, activeRaced.map(this::toView).orElse(null), null, "Another active run is in progress for this conversation");
             }
-            return new StartRunOutcome(StartRunOutcome.Type.CONFLICT, null, null, "Another active run is in progress for this conversation");
+            // For non-unique-constraint exceptions (e.g. FK violation, NOT NULL, serialization failure), propagate!
+            if (ex instanceof RuntimeException re) {
+                throw re;
+            }
+            throw new RuntimeException("Failed to start run due to unexpected database error", ex);
         }
 
-        // 4. Create SseEmitter and RunHandle
-        SseEmitter emitter = new SseEmitter(180_000L);
+        // 4. Create SseEmitter with 0L timeout (lifecycle strictly managed by app deadline and heartbeat)
+        SseEmitter emitter = new SseEmitter(0L);
         RunHandle handle = new RunHandle(
                 runId,
                 conversationId,
@@ -162,8 +184,12 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
 
         runRegistry.register(runId, handle);
 
-        // 5. Send run.started event (seq = 1)
+        // 5. Send run.started event (seq = 1) BEFORE starting scheduled tasks
         handle.sendStarted();
+
+        // 6. Start scheduled tasks (application deadline & heartbeat) ONLY AFTER run.started has been sent
+        // Why startScheduledTasks after sendStarted: prevents deadline or heartbeat frames from interleaving before seq 1.
+        handle.startScheduledTasks(taskScheduler, runProperties.getTimeout(), runProperties.getHeartbeatInterval());
 
         // 6. Build prompt context using standard SessionService findOrCreate & bounded getActiveMessages (last 10 turns = 20 messages)
         List<org.springframework.ai.chat.messages.Message> aiMessages = new ArrayList<>();
@@ -251,7 +277,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                     RunStatus cur = runRepository.findById(runId)
                             .map(r -> RunStatus.valueOf(r.status()))
                             .orElse(RunStatus.FAILED);
-                    return new RunHandle.TerminalResult(false, cur, null);
+                    return new RunHandle.TerminalResult(false, cur, null, null);
                 }
 
                 String messageId = null;
@@ -283,24 +309,65 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                     }
                 }
 
-                return new RunHandle.TerminalResult(true, targetStatus, messageId);
+                return new RunHandle.TerminalResult(true, targetStatus, messageId, errorMessage);
             });
         } catch (Exception ex) {
             log.error("Transaction rolled back for run {} during terminal commit: {}", runId, ex.getMessage(), ex);
-            // In a new independent transaction, mark as FAILED
-            markFailedInNewTransaction(runId, "Terminal commit failure: " + ex.getMessage());
-            return new RunHandle.TerminalResult(false, RunStatus.FAILED, null);
+            // In a new independent short transaction, mark as FAILED with interrupted assistant partial (no Session pair)
+            return fallbackToFailed(runId, conversationId, assistantContent, "Terminal commit failure: " + ex.getMessage());
         }
     }
 
-    private void markFailedInNewTransaction(String runId, String error) {
+    private RunHandle.TerminalResult fallbackToFailed(String runId, String conversationId, String assistantContent, String error) {
         try {
-            transactionTemplate.executeWithoutResult(status -> {
-                runRepository.updateTerminalStatus(runId, RunStatus.FAILED.name(), error, Instant.now());
+            return transactionTemplate.execute(status -> {
+                int rows = runRepository.updateTerminalStatus(runId, RunStatus.FAILED.name(), error, Instant.now());
+                if (rows == 0) {
+                    status.setRollbackOnly();
+                    RunStatus cur = runRepository.findById(runId)
+                            .map(r -> RunStatus.valueOf(r.status()))
+                            .orElse(RunStatus.FAILED);
+                    return new RunHandle.TerminalResult(false, cur, null, error);
+                }
+                String msgId = null;
+                if (assistantContent != null && !assistantContent.isBlank()) {
+                    MessageView msg = conversationOperations.appendMessage(conversationId, "ASSISTANT", assistantContent, runId, true);
+                    msgId = msg.id();
+                }
+                return new RunHandle.TerminalResult(true, RunStatus.FAILED, msgId, error);
             });
         } catch (Exception e) {
             log.error("Failed to mark run {} as FAILED in fallback transaction", runId, e);
+            // Fresh query actual status from DB - DO NOT forge FAILED with casSuccess=true!
+            RunStatus actual = runRepository.findById(runId)
+                    .map(r -> RunStatus.valueOf(r.status()))
+                    .orElse(null);
+            return new RunHandle.TerminalResult(false, actual, null, error);
         }
+    }
+
+    private boolean isRunUniqueConstraintCollision(Throwable ex) {
+        Throwable cur = ex;
+        boolean isUniqueViolation = false;
+        boolean isRunConstraint = false;
+
+        while (cur != null) {
+            if (cur instanceof org.springframework.dao.DuplicateKeyException) {
+                isUniqueViolation = true;
+            }
+            if (cur instanceof java.sql.SQLException sqlEx) {
+                if ("23505".equals(sqlEx.getSQLState())) {
+                    isUniqueViolation = true;
+                }
+            }
+            String msg = cur.getMessage();
+            if (msg != null && (msg.contains("uq_active_run_per_conv") || msg.contains("uq_client_request_per_conv"))) {
+                isRunConstraint = true;
+            }
+            cur = cur.getCause();
+        }
+
+        return isUniqueViolation && isRunConstraint;
     }
 
     @Override

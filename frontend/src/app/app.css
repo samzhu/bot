@@ -371,8 +371,9 @@
   color: #ef4444;
 }
 
-/* Interrupted badge on assistant message */
-.interrupted-badge {
+/* Status badges on assistant message */
+.interrupted-badge,
+.failed-badge {
   display: inline-block;
   margin-left: 8px;
   padding: 2px 6px;
@@ -383,6 +384,56 @@
   border: 1px solid #e5e7eb;
   border-radius: 4px;
   vertical-align: middle;
+}
+
+.failed-badge {
+  border-color: #d1d5db;
+}
+
+/* Stream error & recovery banners */
+.stream-error-banner,
+.recovering-banner {
+  margin: 0 16px 8px 16px;
+  padding: 8px 12px;
+  background-color: #f9fafb;
+  border-radius: 6px;
+}
+
+.stream-error-banner {
+  border: 1px solid #e5e7eb;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  color: #374151;
+}
+
+.stream-error-text {
+  flex: 1;
+}
+
+.retry-btn {
+  margin-left: 12px;
+  padding: 4px 10px;
+  background-color: #ffffff;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #1f2937;
+  cursor: pointer;
+  transition: background-color 0.1s ease;
+}
+
+.retry-btn:hover {
+  background-color: #f3f4f6;
+}
+
+.recovering-banner {
+  border: 1px dashed #d1d5db;
+  font-size: 12px;
+  color: #6b7280;
+  text-align: center;
 }
 
 /* Pagination controls */
