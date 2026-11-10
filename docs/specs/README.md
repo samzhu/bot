@@ -4,4 +4,4 @@
 
 | 規格代號 / 名稱 | 規格檔案 | 關聯 GitHub Issue | 狀態 |
 | :--- | :--- | :--- | :--- |
-| **Local Chat MVP：串流聊天與持久化歷史** | [local-chat-mvp.md](local-chat-mvp.md) | 待發布建立 | Ready for Implementation |
+| **Local Chat MVP：串流聊天與持久化歷史** | [local-chat-mvp.md](local-chat-mvp.md) | [#1](https://github.com/samzhu/bot/issues/1) | Ready for Implementation (`ready-for-agent`) |
