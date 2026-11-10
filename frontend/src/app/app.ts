@@ -36,6 +36,8 @@ export interface GraphQLMessageView {
   createdAt: string;
 }
 
+export type ExtendedMessage = Message & { interrupted?: boolean };
+
 export interface SseEventPayload {
   eventType: string;
   dataStr: string;
@@ -67,9 +69,32 @@ export class App extends ChatState implements OnInit {
   readonly bots = signal<BotView[]>([]);
   readonly conversations = signal<ConversationView[]>([]);
   readonly currentConversationId = signal<string | null>(null);
-  readonly messages = signal<Message[]>([]);
+  readonly messages = signal<ExtendedMessage[]>([]);
   readonly isStreaming = signal<boolean>(false);
+  readonly isCancelling = signal<boolean>(false);
+  readonly activeRunId = signal<string | null>(null);
   readonly copiedMessageId = signal<string | null>(null);
+
+  // Bounded Pagination State (default limit 20, max cap 100)
+  readonly messageOffset = signal<number>(20);
+  readonly hasMoreMessages = signal<boolean>(false);
+  readonly isLoadingEarlier = signal<boolean>(false);
+
+  readonly conversationOffset = signal<number>(0);
+  readonly hasMoreConversations = signal<boolean>(false);
+  readonly isLoadingMoreConversations = signal<boolean>(false);
+
+  private readonly completedRunIds = new Set<string>();
+
+  private onRunTerminal(runId: string | null, messageCount: number): void {
+    if (runId && this.completedRunIds.has(runId)) {
+      return;
+    }
+    if (runId) {
+      this.completedRunIds.add(runId);
+    }
+    this.messageOffset.update(offset => offset + messageCount);
+  }
 
   // Derived state
   readonly seedBot = computed<BotView | null>(() => this.bots()[0] || null);
@@ -95,6 +120,9 @@ export class App extends ChatState implements OnInit {
 
     if (existing) {
       await this.selectConversation(existing.id);
+    } else if (savedId) {
+      // Saved conversation is beyond the initial paginated list; load directly by id
+      await this.selectConversation(savedId);
     } else if (this.conversations().length > 0) {
       await this.selectConversation(this.conversations()[0].id);
     } else if (this.seedBot()) {
@@ -124,19 +152,62 @@ export class App extends ChatState implements OnInit {
 
   async loadConversations(): Promise<void> {
     try {
+      const limit = 20;
       const res = await fetch('/graphql', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          query: `query { conversations(limit: 50, offset: 0) { id botId title createdAt updatedAt } }`
+          query: `query GetConversations($limit: Int, $offset: Int) {
+            conversations(limit: $limit, offset: $offset) { id botId title createdAt updatedAt }
+          }`,
+          variables: { limit, offset: 0 }
         })
       });
       const json = await res.json();
       if (json.data && json.data.conversations) {
-        this.conversations.set(json.data.conversations);
+        const list: ConversationView[] = json.data.conversations;
+        this.conversations.set(list);
+        this.conversationOffset.set(list.length);
+        this.hasMoreConversations.set(list.length >= limit);
       }
     } catch (err) {
       console.error('Failed to load conversations:', err);
+    }
+  }
+
+  async loadMoreConversations(): Promise<void> {
+    if (this.isLoadingMoreConversations() || !this.hasMoreConversations()) return;
+    this.isLoadingMoreConversations.set(true);
+    try {
+      const limit = 20;
+      const offset = this.conversationOffset();
+      const res = await fetch('/graphql', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: `query GetConversations($limit: Int, $offset: Int) {
+            conversations(limit: $limit, offset: $offset) { id botId title createdAt updatedAt }
+          }`,
+          variables: { limit, offset }
+        })
+      });
+      const json = await res.json();
+      if (json.data && json.data.conversations) {
+        const more: ConversationView[] = json.data.conversations;
+        if (more.length > 0) {
+          const existingIds = new Set(this.conversations().map(c => c.id));
+          const unique = more.filter(c => !existingIds.has(c.id));
+          this.conversations.update(prev => [...prev, ...unique]);
+          this.conversationOffset.update(o => o + more.length);
+        }
+        if (more.length < limit) {
+          this.hasMoreConversations.set(false);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load more conversations:', err);
+    } finally {
+      this.isLoadingMoreConversations.set(false);
     }
   }
 
@@ -149,18 +220,22 @@ export class App extends ChatState implements OnInit {
 
     this.currentConversationId.set(id);
     localStorage.setItem('bot_active_conversation_id', id);
+    this.completedRunIds.clear();
+    this.messageOffset.set(20);
+    this.hasMoreMessages.set(false);
 
     try {
+      const limit = 20;
       const res = await fetch('/graphql', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          query: `query GetConversation($id: ID!) {
+          query: `query GetConversation($id: ID!, $limit: Int, $offset: Int) {
             conversation(id: $id) {
               id
               botId
               title
-              messages(limit: 100, offset: 0) {
+              messages(limit: $limit, offset: $offset) {
                 id
                 role
                 content
@@ -169,7 +244,7 @@ export class App extends ChatState implements OnInit {
               }
             }
           }`,
-          variables: { id }
+          variables: { id, limit, offset: 0 }
         })
       });
 
@@ -185,26 +260,40 @@ export class App extends ChatState implements OnInit {
       }
 
       if (json.data && json.data.conversation) {
-        const rawMessages: GraphQLMessageView[] = json.data.conversation.messages || [];
+        const conv = json.data.conversation;
+        if (!this.conversations().some(c => c.id === id)) {
+          this.conversations.update(prev => [{
+            id: conv.id,
+            botId: conv.botId,
+            title: conv.title,
+            createdAt: conv.createdAt || '',
+            updatedAt: conv.updatedAt || ''
+          }, ...prev]);
+        }
+        const rawMessages: GraphQLMessageView[] = conv.messages || [];
+        this.hasMoreMessages.set(rawMessages.length >= limit);
+        this.messageOffset.set(rawMessages.length);
+
         /*
          * RATIONALE: The backend GraphQL API orders messages DESC (newest first) for paginated feeds.
          * The UI dialogue view requires chronological ASC order (oldest to newest); hence we reverse the list.
          * Furthermore, backend roles are uppercase 'USER' / 'ASSISTANT', so we normalize case to 'user' / 'assistant'.
          */
-        const chronological = [...rawMessages].reverse().map(m => {
+        const chronological: ExtendedMessage[] = [...rawMessages].reverse().map(m => {
           const roleNormalized = (m.role || '').toLowerCase();
           if (roleNormalized === 'user') {
-            const userMsg: UserMessage = {
+            const userMsg: ExtendedMessage = {
               id: m.id,
               role: 'user',
               content: m.content
             };
             return userMsg;
           } else {
-            const assistantMsg: AssistantMessage = {
+            const assistantMsg: ExtendedMessage = {
               id: m.id,
               role: 'assistant',
-              content: m.content
+              content: m.content,
+              interrupted: !!m.interrupted
             };
             return assistantMsg;
           }
@@ -217,10 +306,88 @@ export class App extends ChatState implements OnInit {
     }
   }
 
+  async loadEarlierMessages(): Promise<void> {
+    const convId = this.currentConversationId();
+    if (!convId || this.isLoadingEarlier() || !this.hasMoreMessages() || this.isStreaming()) return;
+    this.isLoadingEarlier.set(true);
+
+    try {
+      const limit = 20;
+      const offset = this.messageOffset();
+      const res = await fetch('/graphql', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: `query GetEarlierMessages($id: ID!, $limit: Int, $offset: Int) {
+            conversation(id: $id) {
+              id
+              messages(limit: $limit, offset: $offset) {
+                id
+                role
+                content
+                interrupted
+                createdAt
+              }
+            }
+          }`,
+          variables: { id: convId, limit, offset }
+        })
+      });
+
+      const json = await res.json();
+      if (this.currentConversationId() !== convId) return;
+
+      if (json.data && json.data.conversation) {
+        const rawMessages: GraphQLMessageView[] = json.data.conversation.messages || [];
+        if (rawMessages.length < limit) {
+          this.hasMoreMessages.set(false);
+        }
+        this.messageOffset.update(o => o + rawMessages.length);
+
+        const currentMessages = this.messages();
+        const existingIds = new Set(currentMessages.map(m => m.id));
+
+        const deduplicatedNew: ExtendedMessage[] = [];
+        for (const m of [...rawMessages].reverse()) {
+          if (existingIds.has(m.id)) {
+            continue;
+          }
+          const roleNormalized = (m.role || '').toLowerCase();
+          const targetRole = (roleNormalized === 'user' ? 'user' : 'assistant') as 'user' | 'assistant';
+          // Reconcile if a rendered optimistic message still held a temp ID with matching content & role
+          const tempMatch = currentMessages.find(
+            cur => cur.id.startsWith('temp-') && cur.role === targetRole && cur.content === m.content
+          );
+          if (tempMatch) {
+            tempMatch.id = m.id;
+            existingIds.add(m.id);
+            continue;
+          }
+          deduplicatedNew.push({
+            id: m.id,
+            role: targetRole,
+            content: m.content,
+            interrupted: !!m.interrupted
+          });
+        }
+
+        this.messages.update(prev => [...deduplicatedNew, ...prev]);
+      }
+    } catch (err) {
+      console.error('Failed to load earlier messages:', err);
+    } finally {
+      this.isLoadingEarlier.set(false);
+    }
+  }
+
   async newConversation(): Promise<void> {
     if (this.isStreaming()) return;
 
-    const bot = this.seedBot();
+    let bot = this.seedBot();
+    if (!bot) {
+      await this.loadBots();
+      bot = this.seedBot();
+    }
     if (!bot) return;
 
     try {
@@ -318,7 +485,7 @@ export class App extends ChatState implements OnInit {
         throw new Error(`Stream request failed with status ${response.status}`);
       }
 
-      await this.readSseStream(response.body, tempAssistantId);
+      await this.readSseStream(response.body, tempUserId, tempAssistantId);
     } catch (err) {
       console.error('Streaming error:', err);
       // Append error indicator to the assistant message
@@ -347,6 +514,7 @@ export class App extends ChatState implements OnInit {
    */
   private async readSseStream(
     body: ReadableStream<Uint8Array>,
+    tempUserId: string,
     tempAssistantId: string
   ): Promise<void> {
     const reader = body.getReader();
@@ -372,7 +540,7 @@ export class App extends ChatState implements OnInit {
 
         try {
           const data = JSON.parse(parsed.dataStr);
-          this.handleSseEvent(parsed.eventType, data, tempAssistantId);
+          this.handleSseEvent(parsed.eventType, data, tempUserId, tempAssistantId);
         } catch (parseErr) {
           console.error(`SSE JSON parse error for event ${parsed.eventType}:`, parsed.dataStr, parseErr);
           throw new Error(`Corrupted SSE JSON in event '${parsed.eventType}': ${parsed.dataStr}`);
@@ -391,7 +559,7 @@ export class App extends ChatState implements OnInit {
       if (parsed) {
         try {
           const data = JSON.parse(parsed.dataStr);
-          this.handleSseEvent(parsed.eventType, data, tempAssistantId);
+          this.handleSseEvent(parsed.eventType, data, tempUserId, tempAssistantId);
         } catch (parseErr) {
           console.error(`SSE JSON parse error in final buffer:`, parsed.dataStr, parseErr);
           throw new Error(`Corrupted final SSE JSON: ${parsed.dataStr}`);
@@ -421,16 +589,63 @@ export class App extends ChatState implements OnInit {
     return { eventType, dataStr };
   }
 
-  private handleSseEvent(eventType: string, data: any, tempAssistantId: string): void {
+  async cancelRun(): Promise<void> {
+    const runId = this.activeRunId();
+    if (!runId || this.isCancelling()) return;
+
+    this.isCancelling.set(true);
+    try {
+      const res = await fetch(`/api/runs/${runId}/cancel`, {
+        method: 'POST'
+      });
+      if (res.ok) {
+        const outcome = await res.json();
+        /*
+         * RATIONALE: Update based on true DB status returned by cancel endpoint.
+         * If model completed before cancel CAS, status is COMPLETED rather than CANCELLED.
+         * Also align temporary message ID with authoritative DB messageId to prevent duplicate optimistic items.
+         */
+        if (outcome.status === 'CANCELLED') {
+          const hasAssistant = Boolean(outcome.messageId);
+          this.messages.update(prev =>
+            prev.map(m => {
+              if (m.role === 'assistant' && (m.id.startsWith('temp-a-') || (outcome.messageId && m.id === outcome.messageId) || m.id === runId)) {
+                return {
+                  ...m,
+                  id: outcome.messageId || m.id,
+                  interrupted: true
+                };
+              }
+              return m;
+            })
+          );
+          this.onRunTerminal(runId, hasAssistant ? 2 : 1);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to cancel run:', err);
+    } finally {
+      this.isCancelling.set(false);
+    }
+  }
+
+  private handleSseEvent(eventType: string, data: any, tempUserId: string, tempAssistantId: string): void {
     if (eventType === 'run.started') {
-      // Sequence 1 verified
+      if (data && data.runId) {
+        this.activeRunId.set(data.runId);
+      }
+      if (data && data.userMessageId && tempUserId) {
+        this.messages.update(prev =>
+          prev.map(m => (m.id === tempUserId ? { ...m, id: data.userMessageId } : m))
+        );
+      }
     } else if (eventType === 'message.delta') {
       const delta = data.delta || '';
       this.messages.update(prev =>
         prev.map(m => {
           if (m.id === tempAssistantId && m.role === 'assistant') {
             const currentContent = typeof m.content === 'string' ? m.content : '';
-            const updated: AssistantMessage = {
+            const updated: ExtendedMessage = {
               ...m,
               content: currentContent + delta
             };
@@ -442,23 +657,49 @@ export class App extends ChatState implements OnInit {
       this.scrollToBottom();
     } else if (eventType === 'run.completed') {
       const messageId = data.messageId;
-      if (messageId) {
-        this.messages.update(prev =>
-          prev.map(m => {
-            if (m.id === tempAssistantId && m.role === 'assistant') {
-              const updated: AssistantMessage = { ...m, id: messageId };
-              return updated;
-            }
-            return m;
-          })
-        );
-      }
-    } else if (eventType === 'run.failed' || eventType === 'run.cancelled') {
-      // Stream terminal failure or cancel
+      this.messages.update(prev =>
+        prev.map(m => {
+          if (m.role === 'assistant' && (m.id === tempAssistantId || (messageId && m.id === messageId) || m.id.startsWith('temp-a-'))) {
+            const updated: ExtendedMessage = {
+              ...m,
+              id: messageId || m.id,
+              interrupted: false
+            };
+            return updated;
+          }
+          return m;
+        })
+      );
+      this.activeRunId.set(null);
+      this.onRunTerminal(data.runId, 2);
+    } else if (eventType === 'run.cancelled') {
+      const messageId = data.messageId;
+      const hasAssistant = Boolean(messageId);
+      this.messages.update(prev =>
+        prev.map(m => {
+          if (m.role === 'assistant' && (m.id === tempAssistantId || (messageId && m.id === messageId) || m.id.startsWith('temp-a-'))) {
+            const updated: ExtendedMessage = {
+              ...m,
+              id: messageId || m.id,
+              interrupted: true
+            };
+            return updated;
+          }
+          return m;
+        })
+      );
+      this.activeRunId.set(null);
+      this.onRunTerminal(data.runId, hasAssistant ? 2 : 1);
+    } else if (eventType === 'run.failed') {
+      this.activeRunId.set(null);
     }
   }
 
   // --- UI Helpers ---
+
+  isInterrupted(msg: Message): boolean {
+    return !!(msg as any).interrupted;
+  }
 
   copyMessage(content: string | any, msgId: string): void {
     const text = typeof content === 'string' ? content : JSON.stringify(content);
@@ -472,7 +713,19 @@ export class App extends ChatState implements OnInit {
   }
 
   onKeydown(event: KeyboardEvent): void {
-    if (event.key === 'Enter' && !event.shiftKey) {
+    /*
+     * RATIONALE: IME Composition Guard.
+     * When user is composing Chinese/Japanese IME candidates, isComposing is true
+     * and keyCode is 229; pressing Enter to select a candidate must NOT submit the input.
+     */
+    if (event.isComposing || event.keyCode === 229) {
+      return;
+    }
+    if (event.key === 'Enter') {
+      if (event.shiftKey) {
+        // Shift + Enter: standard multiline newline
+        return;
+      }
       event.preventDefault();
       this.submitInput(this.inputValue());
     }

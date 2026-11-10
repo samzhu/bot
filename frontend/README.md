@@ -36,6 +36,10 @@ ng build
 
 This will compile your project and store the build artifacts in the `dist/` directory. By default, the production build optimizes your application for performance and speed.
 
+### Bundle & Style Budgets (Ticket 02 / Issue #3 Rationale)
+- `initial`: `maximumWarning: 5.0MB`, `maximumError: 5.5MB` (measured initial bundle is ~4.85 MB due to CopilotKit runtime modules).
+- `anyComponentStyle`: `maximumWarning: 7kB`, `maximumError: 8kB`. Measured compiled `app.css` is 6.32 kB (accommodating monochrome stop button, interrupted status badge, and bounded pagination controls). Budget warning is set to 7 kB (actual + small margin) with error kept strictly at 8 kB to prevent regressions without unjustified looseness.
+
 ## Running unit tests
 
 To execute unit tests with the [Vitest](https://vitest.dev/) test runner, use the following command:

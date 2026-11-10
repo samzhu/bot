@@ -88,22 +88,27 @@ async function run() {
     await page.waitForSelector('.message-row.user');
     await page.waitForSelector('.message-row.assistant');
 
-    // Strict assertion: verify controls are disabled during active streaming
+    // Strict assertion: verify controls reflect active streaming (Stop available, sending blocked, nav disabled)
     const streamLockState = await page.evaluate(() => {
+      const stopBtn = document.querySelector('.stop-btn');
       const sendBtn = document.querySelector('.send-btn');
       const newChatBtn = document.querySelector('.new-chat-btn');
       return {
-        sendDisabled: sendBtn?.disabled === true,
-        sendText: sendBtn?.textContent?.trim(),
+        hasStopBtn: Boolean(stopBtn),
+        stopText: stopBtn?.textContent?.trim(),
+        sendBtnExists: Boolean(sendBtn),
         newChatDisabled: newChatBtn?.disabled === true
       };
     });
     console.log('Stream Lock Assertions:', streamLockState);
-    if (!streamLockState.sendDisabled) {
-      throw new Error('Assertion failed: Send button must be disabled during streaming');
+    if (!streamLockState.hasStopBtn) {
+      throw new Error('Assertion failed: Stop button must be visible during streaming');
     }
-    if (streamLockState.sendText !== 'Generating...') {
-      throw new Error(`Assertion failed: Send button text must be 'Generating...', got '${streamLockState.sendText}'`);
+    if (streamLockState.stopText !== 'Stop') {
+      throw new Error(`Assertion failed: Stop button text must be 'Stop', got '${streamLockState.stopText}'`);
+    }
+    if (streamLockState.sendBtnExists) {
+      throw new Error('Assertion failed: Send button must not be active while streaming (replaced by Stop)');
     }
     if (!streamLockState.newChatDisabled) {
       throw new Error('Assertion failed: New Chat button must be disabled during streaming');

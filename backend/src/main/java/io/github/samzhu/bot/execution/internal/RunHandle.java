@@ -22,6 +22,7 @@ public class RunHandle {
     private final String ownerId;
     private final SseEmitter emitter;
     private final RunRegistry registry;
+    private final String userMessageId;
     private final TerminalCallback callback;
     // Why Disposables.swap(): prevents race conditions where a stream reaches terminal
     // (or is cancelled) before the reactive subscription is attached; disposing swapDisposable
@@ -49,12 +50,14 @@ public class RunHandle {
             String ownerId,
             SseEmitter emitter,
             RunRegistry registry,
+            String userMessageId,
             TerminalCallback callback) {
         this.runId = runId;
         this.conversationId = conversationId;
         this.ownerId = ownerId;
         this.emitter = emitter;
         this.registry = registry;
+        this.userMessageId = userMessageId;
         this.callback = callback;
 
         this.emitter.onCompletion(() -> disconnect("Emitter onCompletion"));
@@ -62,12 +65,28 @@ public class RunHandle {
         this.emitter.onTimeout(this::timeout);
     }
 
+    public RunHandle(
+            String runId,
+            String conversationId,
+            String ownerId,
+            SseEmitter emitter,
+            RunRegistry registry,
+            TerminalCallback callback) {
+        this(runId, conversationId, ownerId, emitter, registry, null, callback);
+    }
+
     public void sendStarted() {
         synchronized (lock) {
             try {
+                Map<String, Object> data = new java.util.HashMap<>();
+                data.put("runId", runId);
+                data.put("seq", 1);
+                if (userMessageId != null) {
+                    data.put("userMessageId", userMessageId);
+                }
                 emitter.send(SseEmitter.event()
                         .name("run.started")
-                        .data(Map.of("runId", runId, "seq", 1)));
+                        .data(data));
             } catch (Exception ex) {
                 disconnect("Failed to send initial run.started: " + ex.getMessage());
             }
@@ -178,14 +197,17 @@ public class RunHandle {
             if (result.casSuccess()) {
                 int currentSeq = ++seq;
                 try {
+                    Map<String, Object> cancelData = new java.util.HashMap<>();
+                    cancelData.put("runId", runId);
+                    cancelData.put("seq", currentSeq);
+                    cancelData.put("status", "CANCELLED");
+                    cancelData.put("reason", "Run cancelled by user");
+                    if (result.messageId() != null) {
+                        cancelData.put("messageId", result.messageId());
+                    }
                     emitter.send(SseEmitter.event()
                             .name("run.cancelled")
-                            .data(Map.of(
-                                    "runId", runId,
-                                    "seq", currentSeq,
-                                    "status", "CANCELLED",
-                                    "reason", "Run cancelled by user"
-                            )));
+                            .data(cancelData));
                 } catch (Exception ignored) {}
             }
             try {

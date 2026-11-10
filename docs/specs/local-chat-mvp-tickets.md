@@ -10,9 +10,9 @@
 ## 票單相依圖（DAG）
 
 ```
-[Issue #2: 01 本機聊天最小閉環] (無阻擋，Frontier，可立即開始)
-       ├──> [Issue #3: 02 多輪歷史與停止生成] ──┐
-       └──> [Issue #4: 03 重送與連線異常恢復] ──┴──> [Issue #5: 04 真模型設定與交付驗收]
+[Issue #2: 01 本機聊天最小閉環] (已完成)
+       ├──> [Issue #3: 02 多輪歷史與停止生成] (已完成)
+       └──> [Issue #4: 03 重送與連線異常恢復] (Frontier，下一票) ──> [Issue #5: 04 真模型設定與交付驗收]
 ```
 
 ---
@@ -22,7 +22,7 @@
 ### Ticket 1: 本機聊天最小閉環 (Local Chat Minimal Loop)
 - **GitHub Issue**：[#2 (Local Chat MVP 01：本機聊天最小閉環)](https://github.com/samzhu/bot/issues/2)
 - **識別代號**：`01-local-chat-minimal-loop`
-- **相依阻擋**：None（無阻擋，Frontier）
+- **相依阻擋**：None（已完成）
 - **狀態**：已驗收完成 (`completed`)
 - **使用者可見交付**：
   使用者開啟本機聊天介面，可見預先植入的助理機器人名稱與乾淨的白底佈局。點擊「開啟新對話」按鈕後，系統於本機身分下建立新的交談階段。於輸入框輸入文字並送出，介面隨即建立即時串流並流式渲染模型回應增量。串流完成後，完整對話紀錄與回合資料保存至資料庫與 Session Memory，重新整理瀏覽器頁面能完整重新載入歷史對話與訊息泡泡。
@@ -41,27 +41,27 @@
 ### Ticket 2: 多輪歷史與停止生成 (Multi-turn History & Stop Generation)
 - **GitHub Issue**：[#3 (Local Chat MVP 02：多輪歷史與停止生成)](https://github.com/samzhu/bot/issues/3)
 - **識別代號**：`02-multi-turn-history-and-stop-generation`
-- **相依阻擋**：[#2 (Local Chat MVP 01：本機聊天最小閉環)](https://github.com/samzhu/bot/issues/2)
-- **狀態**：已發布 (`ready-for-agent` / Blocked by #2)
+- **相依阻擋**：[#2 (Local Chat MVP 01：本機聊天最小閉環)](https://github.com/samzhu/bot/issues/2) (已完成)
+- **狀態**：已驗收完成 (`completed`)
 - **使用者可見交付**：
   使用者在同一對話中進行多輪問答時，系統自動將前次回合歷史納入模型提示詞上下文，範圍限定為取自 Session Memory 的最近 10 個完整成功回合。當模型正在串流輸出時，輸入框送出按鈕自動切換為「停止生成」按鈕；使用者點擊後立即發送協同取消請求。真正完成與取消之並發競爭由資料庫 CAS 先成功者唯一勝出，結果可能為 COMPLETED 亦可能為 CANCELLED；已 COMPLETED 之任務不被事後取消覆寫，前端停止生成操作僅在取消贏得 CAS 競爭時發送 cancelled 事件。取消前已產生的片段文字被保留於對話紀錄中並標記中斷狀態，且該中斷回合自後續模型提示詞中排除。重複發送取消操作具備冪等性並回傳權威終態。
 - **驗收準則**：
-  - [ ] 多輪對話中，後續提問包含取自 Session Memory 的前次對話紀錄，最長包含 10 個完整回合。
-  - [ ] 串流生成過程中，輸入區顯示可點擊的停止生成控制按鈕。
-  - [ ] 點擊停止生成能中斷串流，且僅在取消贏得 CAS 競爭時發送 cancelled 事件。
-  - [ ] 真正完成與取消之並發競爭由資料庫 CAS 確定性裁決；已 COMPLETED 之任務不被事後覆寫為 CANCELLED。
-  - [ ] 中斷前生成的片段文字被保留並帶有中斷屬性與對應視覺標記。
-  - [ ] 被取消的中斷回合自動從後續模型提示詞的 Session Memory 上下文中排除。
-  - [ ] 重複點擊取消操作維持冪等成功，並回傳真實的最終狀態。
-  - [ ] 訊息與對話清單支援預設 20 筆、上限 100 筆之有界分頁檢索。
+  - [x] 多輪對話中，後續提問包含取自 Session Memory 的前次對話紀錄，最長包含 10 個完整回合。
+  - [x] 串流生成過程中，輸入區顯示可點擊的停止生成控制按鈕。
+  - [x] 點擊停止生成能中斷串流，且僅在取消贏得 CAS 競爭時發送 cancelled 事件。
+  - [x] 真正完成與取消之並發競爭由資料庫 CAS 確定性裁決；已 COMPLETED 之任務不被事後覆寫為 CANCELLED。
+  - [x] 中斷前生成的片段文字被保留並帶有中斷屬性與對應視覺標記。
+  - [x] 被取消的中斷回合自動從後續模型提示詞的 Session Memory 上下文中排除。
+  - [x] 重複點擊取消操作維持冪等成功，並回傳真實的最終狀態。
+  - [x] 訊息與對話清單支援預設 20 筆、上限 100 筆之有界分頁檢索。
 
 ---
 
 ### Ticket 3: 重送與連線異常恢復 (Retry & Connection Anomaly Recovery)
 - **GitHub Issue**：[#4 (Local Chat MVP 03：重送與連線異常恢復)](https://github.com/samzhu/bot/issues/4)
 - **識別代號**：`03-retry-and-connection-recovery`
-- **相依阻擋**：[#2 (Local Chat MVP 01：本機聊天最小閉環)](https://github.com/samzhu/bot/issues/2)
-- **狀態**：已發布 (`ready-for-agent` / Blocked by #2)
+- **相依阻擋**：[#2 (Local Chat MVP 01：本機聊天最小閉環)](https://github.com/samzhu/bot/issues/2) (已解除), [#3 (Local Chat MVP 02：多輪歷史與停止生成)](https://github.com/samzhu/bot/issues/3) (已解除)
+- **狀態**：可立即開始 (`ready-for-agent` / Frontier)
 - **使用者可見交付**：
   當使用者遇到網路連線異常或連點送出按鈕時，系統提供具前端提示的自我修復與確定性復原。以相同請求識別碼與相同內容重送時，伺服器立即回傳 JSON 執行中介資料而不重放串流，且前端不重複產生訊息泡泡；若內容衝突則回傳 409 衝突拒絕並彈出前端錯誤提示。當使用者在同一對話已有任務進行時發起新任務，系統依據單一活躍任務規則回傳 409 衝突拒絕。當連線中斷或錯過終態事件時，前端可於重新連線後透過 GraphQL 權威 run 查詢自動恢復本機狀態。若串流遇到斷線、逾時或模型內部錯誤，伺服器安全中止上游，片段文字必須存在於資料庫並標註中斷。所有並發競爭使用受控發布者與鎖存器驗證而非任意等待。伺服器重啟時自動將所有殘留活躍任務收斂為失敗。
 - **驗收準則**：
@@ -100,29 +100,17 @@
 ## 完整交接與當前狀態
 
 ### 1. 目前編譯與測試真實狀態
-- **編譯狀態**：`./gradlew compileJava compileTestJava` 通過（Exit Code 0，無編譯錯誤）。
-- **測試狀態**：Gate B 整合測試目前**未通過**。
-  - **已讀 Log 精確統計**（依據 `/tmp/bot-gate-b-test.log`）：
-    - 總計執行測試：12 項。
-    - 通過測試：3 項（`ProfileGuardTest` 3/3 通過）。
-    - 失敗測試：9 項（`LocalChatBackendIntegrationTests` 全部失敗，耗時 19s，Exit Code 1）。
-    - 其他未核對項目標註為未核對，不予猜測。
-  - **已知優先修復點**：
-    - `LocalChatBackendIntegrationTests.createTestConversation` 測試輔助方法發送之 GraphQL Mutation 誤選了 `userId` 欄位：
-      `mutation { createConversation(botId: "bot-general", title: "...") { id title userId } }`
-      而 `schema.graphqls` 定義之 `Conversation` 類型並無暴露 `userId` 欄位，導致 GraphQL 引擎拋出 `FieldUndefined` 驗證錯誤，所有依賴此輔助方法的 9 項測試皆於 `assertFalse(data.isMissingNode())` 失敗。
+- **後端狀態**：
+  - 編譯：`./gradlew compileJava compileTestJava` 通過（Exit Code 0）。
+  - 單檔整合測試：`LocalChatBackendIntegrationTests` 全部 13 項測試通過（Exit Code 0，含受控模型 `ControlledChatModel`、真 complete/cancel CAS 競爭 `test8b`、完整讀取 EOF 唯一終態斷言、滑動窗口 10 輪與中斷回合排除）。
+- **前端狀態**：
+  - 建置：`npx ng build` 通過（Exit Code 0，初始 bundle 4.85 MB，樣式 6.32 kB，符合 7kB/8kB 預算）。
+  - 真 Browser 自動化：`verify-ticket-01.mjs` 與 `verify-ticket-02.mjs` 全數斷言通過（Exit Code 0，包含 Stop 協同取消、刷新保持中斷狀態、真 Shift+Enter 換行、非首頁對話還原與擴增、22 輪 44 筆訊息全序列無重複無跳漏）。
+- **已驗收票單**：
+  - Issue #2 (Ticket 01：本機聊天最小閉環) - 已交付關閉
+  - Issue #3 (Ticket 02：多輪歷史與停止生成) - 已驗收完成，進行交付
+- **歷史失敗紀錄（Historical Reference，已解決）**：
+  - 早期 Gate B 整合測試（12 項中 9 失敗）係因測試輔助方法誤選未暴露的 `userId` 欄位；已於 #2/#3 重構修復。
 
-### 2. 後續已知缺口清單（待納入 Tracer-Bullet 票單依序實作修復）
-1. **Session 交易失敗之事件收斂**：`commitTerminalInternal` 在 Session 事件寫入失敗或拋錯時觸發短交易 Rollback 並於獨立交易標記 FAILED，但尚未補發 `run.failed` SSE 事件通知客戶端。
-2. **Spring Data 異常包裝處理**：並發相同 `clientRequestId` 插入衝突時，Spring Data JDBC 將 PostgreSQL 唯一約束違規包裝於 `DataIntegrityViolationException` 中，需精確解包並重新查詢以回傳冪等 200 JSON 中介資料。
-3. **整合測試嚴格化重構**：
-   - 消除測試中的 `Thread.sleep`，改以受控 Reactive Publisher 或 Latch 同步。
-   - 將 partial assistant 訊息由「可選斷言（if assistantMsg != null）」改為「嚴格存在斷言（assertNotNull）」。
-   - 移除預先插入 completed 狀態之假並發測試，改以真實 complete / cancel 競爭時序測試。
-   - 補齊客戶端斷線 Timeout 與 Session rollback 失敗場景之專屬整合測試。
-4. **前端與真實 AI 驗收**：
-   - 前端 Angular + CopilotKit ChatView（純佈局無 Runtime）尚未實作。
-   - 真實模型 Smoke 與端到端瀏覽器驗收尚未執行。
-
-### 3. 下一步實作推進計劃
-在 root 核准發布階段後，正式進入 `$implement` 實作階段，優先執行無阻擋之 Frontier 票單：**Issue #2 (Ticket 01：本機聊天最小閉環)**。
+### 2. 下一步實作推進計劃
+- Issue #3 完成 Git 交付並關閉後，進入下一個 Frontier 票單：**Issue #4 (Ticket 03：重送與連線異常恢復)**。

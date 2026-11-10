@@ -350,6 +350,97 @@
   cursor: not-allowed;
 }
 
+/* Neutral Stop button during active streaming */
+.stop-btn {
+  padding: 6px 16px;
+  background-color: #111827;
+  color: #fca5a5;
+  border: 1px solid #374151;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.stop-btn:hover {
+  background-color: #1f2937;
+  color: #ef4444;
+}
+
+/* Interrupted badge on assistant message */
+.interrupted-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #4b5563;
+  background-color: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  vertical-align: middle;
+}
+
+/* Pagination controls */
+.load-more-container {
+  display: flex;
+  justify-content: center;
+  padding: 10px 0;
+}
+
+.load-more-btn {
+  background: none;
+  border: 1px solid #e5e7eb;
+  background-color: #f9fafb;
+  color: #4b5563;
+  padding: 5px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.load-more-btn:hover:not(:disabled) {
+  background-color: #f3f4f6;
+  color: #111827;
+}
+
+.load-more-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.load-more-conv-container {
+  padding: 8px;
+}
+
+.load-more-conv-btn {
+  width: 100%;
+  background: none;
+  border: 1px dashed #d1d5db;
+  color: #6b7280;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.load-more-conv-btn:hover:not(:disabled) {
+  background-color: #f3f4f6;
+  color: #111827;
+}
+
+.load-more-conv-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Empty State */
 .empty-state {
   flex: 1;

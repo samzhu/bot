@@ -20,6 +20,7 @@ import org.springframework.ai.session.EventType;
 import org.springframework.ai.session.SessionAttributes;
 import org.springframework.ai.session.SessionEvent;
 import org.springframework.ai.session.SessionService;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.jdbc.core.JdbcAggregateTemplate;
 import org.springframework.stereotype.Service;
@@ -47,6 +48,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
     private final SessionService sessionService;
     private final RunRegistry runRegistry;
     private final ChatModel chatModel;
+    private final int windowTurns;
 
     public RunExecutionServiceImpl(
             AgentRunRepository runRepository,
@@ -56,7 +58,8 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
             TransactionTemplate transactionTemplate,
             SessionService sessionService,
             RunRegistry runRegistry,
-            ChatModel chatModel) {
+            ChatModel chatModel,
+            @Value("${bot.conversation.window-turns:10}") int windowTurns) {
         this.runRepository = runRepository;
         this.conversationOperations = conversationOperations;
         this.botOperations = botOperations;
@@ -65,6 +68,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         this.sessionService = sessionService;
         this.runRegistry = runRegistry;
         this.chatModel = chatModel;
+        this.windowTurns = windowTurns;
     }
 
     @Override
@@ -111,10 +115,12 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         Instant now = Instant.now();
         AgentRun newRun = new AgentRun(runId, conversationId, clientRequestId, message, RunStatus.RUNNING.name(), null, now, now);
 
+        final String[] userMsgHolder = new String[1];
         try {
             transactionTemplate.executeWithoutResult(status -> {
                 jdbcAggregateTemplate.insert(newRun);
-                conversationOperations.appendMessage(conversationId, "USER", message, runId, false);
+                var uMsg = conversationOperations.appendMessage(conversationId, "USER", message, runId, false);
+                userMsgHolder[0] = uMsg.id();
             });
         } catch (DataIntegrityViolationException ex) {
             // Concurrent race: re-check for deduplication
@@ -138,6 +144,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                 userId,
                 emitter,
                 runRegistry,
+                userMsgHolder[0],
                 new RunHandle.TerminalCallback() {
                     @Override
                     public RunHandle.TerminalResult commitTerminal(String rId, String convId, RunStatus targetStatus, String errorMessage, String assistantContent, boolean interrupted, String userPrompt) {
@@ -174,7 +181,8 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
 
             List<org.springframework.ai.chat.messages.Message> activeMessages = sessionService.getActiveMessages(conversationId);
             if (activeMessages != null && !activeMessages.isEmpty()) {
-                int maxTurnMessages = 20; // 10 complete turns
+                // Why configurable window: Ticket 02 limits prompt memory context to the most recent N complete turns (default 10, i.e. 20 messages).
+                int maxTurnMessages = Math.max(1, windowTurns) * 2;
                 int startIndex = Math.max(0, activeMessages.size() - maxTurnMessages);
                 aiMessages.addAll(activeMessages.subList(startIndex, activeMessages.size()));
             }

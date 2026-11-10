@@ -17,12 +17,26 @@
       @for (conv of conversations(); track conv.id) {
         <div
           class="conversation-item"
+          [attr.data-id]="conv.id"
           [class.active]="conv.id === currentConversationId()"
           [class.disabled]="isStreaming()"
           (click)="!isStreaming() && selectConversation(conv.id)"
           [title]="conv.title"
         >
           <span>{{ conv.title || 'Untitled' }}</span>
+        </div>
+      }
+
+      @if (hasMoreConversations()) {
+        <div class="load-more-conv-container">
+          <button
+            class="load-more-conv-btn"
+            type="button"
+            (click)="loadMoreConversations()"
+            [disabled]="isLoadingMoreConversations() || isStreaming()"
+          >
+            {{ isLoadingMoreConversations() ? 'Loading...' : 'Load more conversations' }}
+          </button>
         </div>
       }
     </div>
@@ -44,6 +58,19 @@
         <div class="custom-chat-layout">
           <!-- Message Scroll Area -->
           <div #messagesContainer class="message-list">
+            @if (hasMoreMessages()) {
+              <div class="load-more-container">
+                <button
+                  class="load-more-btn"
+                  type="button"
+                  (click)="loadEarlierMessages()"
+                  [disabled]="isLoadingEarlier() || isStreaming()"
+                >
+                  {{ isLoadingEarlier() ? 'Loading earlier messages...' : 'Load earlier messages' }}
+                </button>
+              </div>
+            }
+
             @if (messages().length === 0) {
               <div class="empty-state">
                 <div class="empty-state-title">Welcome to {{ seedBot()?.name || 'Assistant Bot' }}</div>
@@ -71,7 +98,12 @@
                 <div class="message-row assistant">
                   <div class="assistant-avatar">Bot</div>
                   <div class="assistant-bubble-container">
-                    <div class="assistant-bubble">{{ msg.content }}</div>
+                    <div class="assistant-bubble">
+                      <span>{{ msg.content }}</span>
+                      @if (isInterrupted(msg)) {
+                        <span class="interrupted-badge">[Interrupted]</span>
+                      }
+                    </div>
                     <div class="message-actions">
                       <button
                         class="copy-btn"
@@ -100,14 +132,25 @@
                 rows="2"
               ></textarea>
               <div class="composer-footer">
-                <button
-                  class="send-btn"
-                  type="button"
-                  (click)="submitInput(inputValue())"
-                  [disabled]="isStreaming() || !inputValue().trim()"
-                >
-                  {{ isStreaming() ? 'Generating...' : 'Send' }}
-                </button>
+                @if (isStreaming()) {
+                  <button
+                    class="stop-btn"
+                    type="button"
+                    (click)="cancelRun()"
+                    [disabled]="isCancelling()"
+                  >
+                    {{ isCancelling() ? 'Stopping...' : 'Stop' }}
+                  </button>
+                } @else {
+                  <button
+                    class="send-btn"
+                    type="button"
+                    (click)="submitInput(inputValue())"
+                    [disabled]="!inputValue().trim()"
+                  >
+                    Send
+                  </button>
+                }
               </div>
             </div>
           </div>
