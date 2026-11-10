@@ -2,7 +2,17 @@ plugins {
 	id 'java'
 	id 'org.springframework.boot' version '4.1.2'
 	id 'io.spring.dependency-management' version '1.1.7'
-	id 'org.graalvm.buildtools.native' version '1.1.14'
+	/*
+	 * WHY / ARCHITECTURAL TRADE-OFF:
+	 * GraalVM Native Image compilation and build-time Ahead-Of-Time (AOT) processing are explicitly out-of-scope
+	 * for the Local Chat MVP. Applying org.graalvm.buildtools.native automatically triggers Spring Boot's AOT plugin
+	 * and task registrations, introducing build-time analysis dependencies that are unneeded for local JVM development.
+	 *
+	 * RELEASE CONDITION TO RE-ENABLE:
+	 * Re-enable this plugin when Native Image compilation or ahead-of-time processing is explicitly scheduled,
+	 * verifying that active build profiles and datasource configurations are properly validated.
+	 */
+	// id 'org.graalvm.buildtools.native' version '1.1.14'
 	id 'org.cyclonedx.bom' version '3.5.1'
 }
 
@@ -11,7 +21,7 @@ version = '0.0.1-SNAPSHOT'
 
 java {
 	toolchain {
-		languageVersion = JavaLanguageVersion.of(27)
+		languageVersion = JavaLanguageVersion.of(25)
 	}
 }
 
@@ -20,7 +30,7 @@ repositories {
 }
 
 ext {
-	set('springAiVersion', "2.0.1")
+	set('springAiVersion', "2.1.0-RC2")
 	set('springModulithVersion', "2.1.1")
 }
 
@@ -41,7 +51,9 @@ dependencies {
 	implementation 'org.springframework.ai:spring-ai-markdown-document-reader'
 	implementation 'org.springframework.ai:spring-ai-pdf-document-reader'
 	// implementation 'org.springframework.ai:spring-ai-starter-mcp-client'
-	implementation 'org.springframework.ai:spring-ai-starter-model-chat-memory-repository-jdbc'
+	// implementation 'org.springframework.ai:spring-ai-starter-model-chat-memory-repository-jdbc'
+	implementation 'org.springframework.ai:spring-ai-session-jdbc:2.1.0-RC2'
+	implementation 'org.springframework.ai:spring-ai-client-chat'
 	// implementation 'org.springframework.ai:spring-ai-starter-model-google-genai'
 	implementation 'org.springframework.ai:spring-ai-google-genai'
 	// implementation 'org.springframework.ai:spring-ai-starter-model-google-genai-embedding'
@@ -49,6 +61,10 @@ dependencies {
 	// implementation 'org.springframework.ai:spring-ai-starter-tool-search-advisor'
 	implementation 'org.springframework.ai:spring-ai-starter-vector-store-pgvector'
 	implementation 'org.springframework.ai:spring-ai-vector-store-advisor'
+
+
+	implementation 'org.springframework.ai:spring-ai-google-genai-transcription:2.1.0-RC2'
+	implementation 'org.springframework.ai:spring-ai-starter-model-google-genai-tts:2.1.0-RC2'
 	// implementation 'org.springframework.modulith:spring-modulith-observability-api'
 	// implementation 'org.springframework.modulith:spring-modulith-starter-core'
 	// implementation 'org.springframework.modulith:spring-modulith-starter-jdbc'

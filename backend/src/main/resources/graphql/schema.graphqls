@@ -1,0 +1,55 @@
+enum RunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+type Bot {
+  id: ID!
+  name: String!
+  createdAt: String!
+}
+
+type Message {
+  id: ID!
+  conversationId: ID!
+  runId: ID!
+  role: String!
+  content: String!
+  interrupted: Boolean!
+  createdAt: String!
+}
+
+type Run {
+  id: ID!
+  conversationId: ID!
+  clientRequestId: String!
+  status: RunStatus!
+  errorMessage: String
+  createdAt: String!
+  updatedAt: String!
+}
+
+type Conversation {
+  id: ID!
+  botId: ID!
+  title: String!
+  createdAt: String!
+  updatedAt: String!
+  messages(limit: Int = 20, offset: Int = 0): [Message!]!
+  runs(limit: Int = 20, offset: Int = 0): [Run!]!
+}
+
+type Query {
+  bots(limit: Int = 20, offset: Int = 0): [Bot!]!
+  bot(id: ID!): Bot
+  conversations(limit: Int = 20, offset: Int = 0): [Conversation!]!
+  conversation(id: ID!): Conversation
+  run(id: ID!): Run
+}
+
+type Mutation {
+  createConversation(botId: ID!, title: String): Conversation!
+}

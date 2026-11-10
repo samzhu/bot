@@ -1,0 +1,118 @@
+<div class="layout-container">
+  <!-- 240px Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="workspace-title">Herdr Bot</div>
+    </div>
+
+    <!-- Seed Bot Indicator -->
+    <div class="seed-bot-card">
+      <div class="seed-bot-label">Seed Bot</div>
+      <div class="seed-bot-name">{{ seedBot()?.name || 'General Assistant' }}</div>
+    </div>
+
+    <!-- Recent Conversations List -->
+    <div class="sidebar-section-title">Recent Conversations</div>
+    <div class="conversation-list">
+      @for (conv of conversations(); track conv.id) {
+        <div
+          class="conversation-item"
+          [class.active]="conv.id === currentConversationId()"
+          [class.disabled]="isStreaming()"
+          (click)="!isStreaming() && selectConversation(conv.id)"
+          [title]="conv.title"
+        >
+          <span>{{ conv.title || 'Untitled' }}</span>
+        </div>
+      }
+    </div>
+  </aside>
+
+  <!-- Main Chat Area -->
+  <main class="main-area">
+    <!-- Top Header -->
+    <header class="header">
+      <div class="header-title">{{ currentTitle() }}</div>
+      <button class="new-chat-btn" (click)="newConversation()" [disabled]="isStreaming()" type="button">
+        + New Chat
+      </button>
+    </header>
+
+    <!-- CopilotChatView Layout -->
+    <copilot-chat-view [messages]="messages()" class="chat-view-container">
+      <ng-template #customLayout>
+        <div class="custom-chat-layout">
+          <!-- Message Scroll Area -->
+          <div #messagesContainer class="message-list">
+            @if (messages().length === 0) {
+              <div class="empty-state">
+                <div class="empty-state-title">Welcome to {{ seedBot()?.name || 'Assistant Bot' }}</div>
+                <div class="empty-state-subtitle">Type a message below to start your conversation.</div>
+              </div>
+            }
+
+            @for (msg of messages(); track msg.id) {
+              @if (msg.role === 'user') {
+                <div class="message-row user">
+                  <div class="user-bubble-container">
+                    <div class="user-bubble">{{ msg.content }}</div>
+                    <div class="message-actions">
+                      <button
+                        class="copy-btn"
+                        type="button"
+                        (click)="copyMessage(msg.content, msg.id)"
+                      >
+                        {{ copiedMessageId() === msg.id ? 'Copied!' : 'Copy' }}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              } @else if (msg.role === 'assistant') {
+                <div class="message-row assistant">
+                  <div class="assistant-avatar">Bot</div>
+                  <div class="assistant-bubble-container">
+                    <div class="assistant-bubble">{{ msg.content }}</div>
+                    <div class="message-actions">
+                      <button
+                        class="copy-btn"
+                        type="button"
+                        (click)="copyMessage(msg.content, msg.id)"
+                      >
+                        {{ copiedMessageId() === msg.id ? 'Copied!' : 'Copy' }}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              }
+            }
+          </div>
+
+          <!-- Composer Area -->
+          <div class="composer-container">
+            <div class="composer-box">
+              <textarea
+                class="composer-textarea"
+                placeholder="Send a message..."
+                [value]="inputValue()"
+                (input)="changeInput($any($event.target).value)"
+                (keydown)="onKeydown($event)"
+                [disabled]="isStreaming()"
+                rows="2"
+              ></textarea>
+              <div class="composer-footer">
+                <button
+                  class="send-btn"
+                  type="button"
+                  (click)="submitInput(inputValue())"
+                  [disabled]="isStreaming() || !inputValue().trim()"
+                >
+                  {{ isStreaming() ? 'Generating...' : 'Send' }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </ng-template>
+    </copilot-chat-view>
+  </main>
+</div>

@@ -12,6 +12,7 @@ Thumbs.db
 *.jks
 credentials.json
 client_secret*.json
+application-real-ai.yaml
 
 # Gradle / Java Backend
 HELP.md

@@ -50,9 +50,11 @@
    - 底部輸入區：寬輸入框，右下角整合送出/生成中停止按鈕。
    - 互動細節：各訊息氣泡支援文字複製。
    - **邊界嚴格控制**：原型圖中出現之多工作區切換、工作看板、用量儀表、檔案中心、白板、附件上傳、模型切換下拉選單、語音輸入列為後續提案，**MVP 介面嚴禁出現任何無效或無作用按鈕**。
-8. **模型抽象架構與手動配置**：
+8. **模型抽象架構、手動配置與語音依賴宣告**：
    - 業務與功能層僅依賴 Spring AI 標準抽象介面：`ChatModel`、`StreamingChatModel` 與 fluent `ChatClient`，**功能層絕不 import 任何 Google 具體類別，亦不為每個 class 增加空 interface**。
-   - Google GenAI 依賴採用底層模組 `org.springframework.ai:spring-ai-google-genai`，於專屬 configuration 類別以 Java Config 手動組裝 `com.google.genai.Client` 與 `GoogleGenAiChatModel`（參考 2.0.2 官方手動配置文檔，BOM 維持 2.0.1）。
+   - Spring AI BOM 最新決策更新為 `2.1.0-RC2`（先前 2.0.1 決策保留為歷史參考；參考 2.1 官方 Google GenAI 文件）。
+   - Google GenAI 依賴採用底層模組 `org.springframework.ai:spring-ai-google-genai`，於專屬 configuration 類別以 Java Config 手動組裝 `com.google.genai.Client` 與 `GoogleGenAiChatModel`。
+   - 音訊依賴宣告：已於 `build.gradle` 宣告 `spring-ai-google-genai-transcription:2.1.0-RC2` 與 `spring-ai-starter-model-google-genai-tts:2.1.0-RC2`。語音功能與 UI 仍屬後續提案，MVP 暫不實作，語音介面為標準抽象 `TextToSpeechModel` 與 `TranscriptionModel`；依官方文件（https://docs.spring.io/spring-ai/reference/2.1/api/audio/speech/google-genai-speech.html），TTS starter auto-configuration 未來於 local 關閉之精確 property 唯一為 `spring.ai.model.audio.speech=none`（註記：此 property 僅關閉 speech model，不保證 connection auto-config 消失，尚未實測，未用功能暫不立即實作配置程式碼）。
    - 預設 `local` 模式啟用離線 `MockChatModel`（支援決定性錯誤注入，不隨機）。
    - 當同時啟用 `local` 與 `real-ai` profile 時，系統**直接調用真實模型，不產生 Mock**。
    - 在 `real-ai` profile 下，若缺少 API Key 必須 **Fail Fast**（啟動即終止），嚴禁隱蔽降級到 Mock。
@@ -84,12 +86,12 @@ flowchart TD
 ```
 
 ### Gate G0: SDK 版本證據與依賴解析
-- **當前狀態**：**BLOCKED**（缺少 JDK 27 toolchain 下載解析器且無 resolver，前端精確套件尚未鎖版）。
+- **當前狀態**：**BLOCKED**（缺少 JDK 27 toolchain 下載解析器且無 resolver；實測 SDKMAN 安裝 Java 27 因官方 Broker 404 無法下載；前端精確套件尚未鎖版）。
 - **嚴格通過門檻（不可僅填表就通過）**：
-  1. **JDK 27 實際可用**：本機提供可用之 JDK 27 或透過 Gradle settings 配置有效之 toolchain download repository resolver，執行 `./gradlew -v` 與編譯任務時能正確綁定 Java 27。
-  2. **全部 direct / plugins / BOM 依賴解析無失敗**：`./gradlew dependencies --configuration runtimeClasspath` 與 `testRuntimeClasspath` 執行成功且 exit code 0，無未解析版本。
+  1. **JDK 27 實際可用**：本機提供可用之 JDK 27 或透過 Gradle settings 配置有效之 toolchain download repository resolver，執行 `./gradlew -v` 與編譯任務時能正確綁定 Java 27。實測 `./gradlew dependencies` 失敗於 configuration 階段（Log 存於 `/tmp/gradle-check/runtime-deps.log`，Exit Code 1）。
+  2. **全部 direct / plugins / BOM 依賴解析無失敗**：Spring AI BOM 升級至 `2.1.0-RC2`；音訊依賴（`spring-ai-google-genai-transcription` 與 `spring-ai-starter-model-google-genai-tts:2.1.0-RC2`）已宣告；`./gradlew dependencies --configuration runtimeClasspath` 與 `testRuntimeClasspath` 執行成功且 exit code 0，無未解析版本。
   3. **前端技術棧精確版驗證**：明確定義 Node、Angular、CopilotKit Angular、TypeScript 之精確版本，完成 peers 相容性檢查並產出乾淨之 lockfile。
-  4. **相依能力傳遞檢查**：確認 `spring-ai-google-genai-embedding` 是否有傳遞帶回任何未預期的 chat auto-configuration，若有需配置 `spring.ai.model.chat=none`。
+  4. **相依能力傳遞檢查**：確認 `spring-ai-google-genai-embedding` 與 `spring-ai-starter-model-google-genai-tts` 是否有傳遞帶回任何未預期的 chat/audio auto-configuration，若有需配置 `spring.ai.model.chat=none` 及 `spring.ai.model.audio.speech=none`（註記：此 property 僅關閉 speech model，不保證 connection auto-config 消失，尚未實測）。
 - **驗收標準 (Exit Criteria)**：
   - JDK 27 解析與建置通過、後端全 classpath 依賴樹解析成功 exit 0、前端精確版本與 lockfile 驗證無衝突，客觀證據存檔於 `docs/research/environment-baseline.md`。
 

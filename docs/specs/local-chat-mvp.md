@@ -1,9 +1,9 @@
 # Local Chat MVP 規格說明書 (Specification)
 
-> 狀態：待驗收規格，2026-11-10。  
-> 依據 `to-spec` 模板生成。  
+> 狀態：草案更新（Gate B 票單準備中），2026-11-10。
+> 依據 `to-spec` 規格模板生成。
 > 決策邊界：本規格完全不包含任何程式碼片段、GraphQL Schema 語法塊、JSON 酬載或 SQL 宣告。僅以純語意精確定義外部可觀察行為、介面契約、資料庫約束與系統狀態機。  
-> 最新架構邊界：MVP 聚焦最小可用閉環，排除 Spring Security / OAuth2、Liquibase、MCP 與 Spring Modulith。以應用層 Loopback 檢查固定身分、編號 SQL 初始化腳本與 Spring Data JDBC 完成純淨閉環。
+> 架構演進：基於 Java 25、Gradle 9.8.2、Spring Boot 4.1.2 與 Spring AI 2.1.0-RC2。採用模組化套件邊界（Pre-Modulith 單向無環架構）與標準 SessionService API，手動配置模型 Bean 並排除底層自動裝配。
 
 ---
 
@@ -32,28 +32,28 @@
 7. As a user, I want to create a new conversation for a chosen bot via a GraphQL mutation, so that my discussions are organized into separate dialogue sessions.
 8. As a user, I want to paginate through my conversation list with a default limit of 20 and a maximum cap of 100 items ordered deterministically, so that large conversation histories load predictably.
 9. As a user, I want to fetch conversation messages with uniform pagination limits capped at 100, so that message retrieval remains bounded and reliable.
-10. As a client application, I want to initiate an AI generation run by sending an HTTP POST request with a unique `clientRequestId` and prompt text, so that the server can orchestrate generation over a unidirectional server-sent event stream.
-11. As a client application, I want the server to respond with HTTP 200 and Content-Type application/json containing the existing run metadata if a duplicate `clientRequestId` with identical message content is received, so that retries are strictly idempotent without erroneously attempting to replay live SSE streams.
-12. As a client application, I want the server to respond with HTTP 409 Conflict if a duplicate `clientRequestId` is received with conflicting message content, so that invalid retries are caught immediately.
-13. As a user, I want the system to enforce that each conversation can have at most one active run (in either pending or running status) across the database, so that competing model outputs do not corrupt dialogue history.
+10. As a client application, I want to initiate an AI generation run by sending an HTTP POST request with a unique client request identifier and message text, so that the server can orchestrate generation over a unidirectional server-sent event stream.
+11. As a client application, I want the server to respond with HTTP 200 and Content-Type application/json containing the existing run metadata if a duplicate client request identifier with identical message content is received, so that retries are strictly idempotent without erroneously attempting to replay live SSE streams.
+12. As a client application, I want the server to respond with HTTP 409 Conflict if a duplicate client request identifier is received with conflicting message content, so that invalid retries are caught immediately.
+13. As a user, I want the system to enforce that each conversation can have at most one active run across the database, so that competing model outputs do not corrupt dialogue history.
 14. As a user, I want to receive an immediate rejection error if I trigger a new run while another run is still pending or running in the same conversation, so that I am clearly informed of ongoing activity.
-15. As a client application, I want the streaming response to be delivered over unidirectional SSE where every event contains an incrementing integer sequence number and authoritative run identifier, so that I can detect dropped or out-of-order packets.
+15. As a client application, I want the streaming response to be delivered over unidirectional SSE where every event contains an incrementing integer sequence number starting with run started at sequence 1 and deltas starting at sequence 2, so that I can detect dropped or out-of-order packets.
 16. As a user, I want to see token deltas streamed incrementally to the chat interface, so that I experience responsive and low-latency interaction.
-17. As a user, I want to see a clear completion event when the model finishes answering, so that the message state transitions cleanly to finalized.
+17. As a user, I want to see a clear completion event containing the persisted message identifier when the model finishes answering, so that the message state transitions cleanly to finalized.
 18. As a user, I want to explicitly cancel an ongoing generation run via an abort button or disconnect, so that unwanted generation is promptly stopped.
-19. As a client application, I want the cancellation endpoint to be idempotent, so that repeating a cancel request succeeds without side effects.
-20. As a user, I want generation to transition to a terminal state (completed, failed, or cancelled) at most once, so that a finished run can never be retroactively overwritten as cancelled by network tear-down callbacks.
+19. As a client application, I want the cancellation endpoint to be idempotent and verify user ownership, so that repeating a cancel request succeeds and returns the true terminal status without side effects.
+20. As a user, I want generation to transition to a terminal state at most once, so that a finished run can never be retroactively overwritten as cancelled by network tear-down callbacks.
 21. As a user, I want partial responses generated prior to interruption to be preserved in history with an interrupted flag set to true, so that I can inspect what was generated before cancellation.
 22. As a user, I want subsequent conversation turns to only include successful historical messages in the model prompt window, so that interrupted or failed partial fragments do not pollute subsequent model reasoning.
-23. As a user, I want the conversation history injected into the model prompt to be constrained by a configurable sliding window, so that token usage remains bounded over lengthy discussions.
+23. As a user, I want the conversation history injected into the model prompt to be managed via standard session services constrained to a sliding window of recent complete turns, so that token usage remains bounded over lengthy discussions.
 24. As a client application, I want to query the authoritative status and metadata of any run via GraphQL by its identifier, so that if a connection drops and misses terminal events, I can verify the final outcome upon reconnection.
 25. As a developer, I want unhandled stream timeouts to be marked deterministically as failed with a timeout reason, so that hung runs do not linger indefinitely.
-26. As a developer, I want any runs left in a pending or running state when the server restarts to be automatically recovered and finalized as failed, so that orphan records do not block new runs indefinitely.
-27. As a frontend user, I want to interact with a clean chat interface matching the approved prototype layout (white background, narrow 240px sidebar, top header with title and new conversation button, right-aligned user bubbles, left-aligned assistant text, bottom input box with send/stop states, and text copy actions), so that I have an intuitive and uncluttered experience.
+26. As a developer, I want any runs left in an active state when the server restarts to be automatically recovered and finalized as failed using the updated timestamp, so that orphan records do not block new runs indefinitely.
+27. As a frontend user, I want to interact with a clean chat interface matching the approved prototype layout, so that I have an intuitive and uncluttered experience.
 28. As a frontend user, I want all non-MVP features visible in prototype mocks (such as workspace switching, kanban boards, usage metrics, file repositories, whiteboards, attachments, model dropdowns, and voice input) to be completely excluded, so that the interface contains zero dead or inactive controls.
 29. As a tester, I want the test suite to execute against a deterministic mock model in local/test mode, so that tests pass reliably offline without incurring model API costs or random failures.
 30. As a tester, I want deterministic error injection capabilities in the mock model, so that failure and cancellation edge cases can be reproduced consistently.
-31. As an operator running with the real-ai profile, I want the system to fail fast upon startup if the required API key is missing, so that misconfigurations are detected before traffic is served.
+31. As an operator running with the real-ai profile, I want the system to fail fast upon startup if the required API key or chat model is missing, so that misconfigurations are detected before traffic is served.
 32. As an operator running with both local and real-ai profiles, I want the system to invoke the real model directly rather than generating mock responses, so that end-to-end functionality can be validated in development.
 
 ---
@@ -61,26 +61,51 @@
 ## Implementation Decisions
 
 ### 1. Identity & Network Security Architecture
-- Local development requests are strictly constrained to loopback network addresses (127.0.0.1 / ::1).
-- The authenticated identity is resolved exclusively on the server as a fixed developer principal `dev-user`; incoming requests cannot pass or override user identifiers.
+- Local development requests are strictly constrained to loopback network addresses.
+- The authenticated identity is resolved exclusively on the server as a fixed developer principal; incoming requests cannot pass or override user identifiers.
 - Non-local deployment profiles trigger an immediate fail-fast abort on application startup. Spring Security and OAuth2 filter chains are completely excluded from the MVP.
 
 ### 2. State Machine & Database Constraints
 - The run lifecycle is modeled as a monotonic state machine with five discrete states: pending, running, completed, failed, and cancelled. Completed, failed, and cancelled are terminal states.
 - Transitions to any terminal state are atomic and occur at most once using compare-and-swap semantics; subsequent updates to a terminal run are disregarded.
-- A single active run per conversation is strictly enforced at the database tier using a partial unique index over the conversation identifier filtered by active states (pending and running). Cross-row check constraints are explicitly avoided.
+- A single active run per conversation is strictly enforced at the database tier using a partial unique index over the conversation identifier filtered by active states. Cross-row check constraints are explicitly avoided.
 - Client request deduplication is enforced by a composite unique constraint on conversation identifier and client request identifier.
-- Server startup executes a mandatory reconciliation routine that transitions any dangling pending or running runs to failed with an orphan restart reason code.
+- Server startup executes a mandatory reconciliation routine that transitions any dangling active runs to failed with an orphan restart reason code, recording the change using the updated timestamp.
 
-### 3. Database Schema Lifecycle
-- Database tables and initial seed data are managed via numbered SQL initialization scripts tracked by an internal schema execution table.
-- Initialization executes idempotently, supporting repeated application launches and fresh PostgreSQL instances without Liquibase.
+### 3. Modular Package Architecture (Pre-Modulith)
+- The codebase is partitioned into distinct functional modules directly beneath the root package: identity, bot, conversation, execution, and bootstrap.
+- Every module exposes only facade interfaces and data transfer objects at its module root. All database entities, repositories, and web controllers are encapsulated within internal subpackages.
+- Cross-module access is restricted to root facade interfaces; importing internal subpackages across modules is strictly prohibited.
+- Module dependencies flow in a strict directed acyclic graph: execution depends on conversation and bot, conversation depends on bot, and all modules depend on identity.
+- Conversation module contains zero references to execution types. In GraphQL, the runs field on conversations is resolved by an execution web controller mapping, avoiding circular dependencies.
 
-### 4. API & Communication Protocols
+### 4. Run Lifecycle & Concurrency Monitor (RunHandle)
+- The lifecycle of an active stream is governed by an encapsulated monitor using a single lock.
+- Delta buffering, sequence counter increment, and event emission occur under this monitor to eliminate packet reordering races.
+- Sequence numbering starts with run started at sequence 1, followed by deltas beginning at sequence 2, and concludes with a terminal event.
+- Subscription lifecycle is managed through swap disposables. If a run reaches a terminal state before the reactive subscription is attached, the late subscription is disposed immediately upon arrival.
+- Normal stream completion is cleanly distinguished from client disconnection: normal completion sets terminal status and closes the emitter, making subsequent framework completion callbacks a no-op; unexpected network disconnection prior to completion transitions the run to cancelled and preserves partial text with an interrupted flag.
+
+### 5. Short Transactions & Session Memory Integration
+- The application integrates standard SessionService capabilities backed by relational session tables, replacing legacy chat memory repositories.
+- Short database transactions are strictly enforced. Generation occurs outside of database transactions; no connection is held while streaming model tokens.
+- Upon completion, a single short transaction atomically executes the compare-and-swap status transition, persists the assistant message, and appends the user and assistant event pair to SessionService with expected version validation.
+- If the compare-and-swap update affects zero rows because another path has already finalized the run (a CAS loser), the transaction does not attempt to mark the run as failed; it simply rolls back and queries the existing authoritative terminal status from the database.
+- If the compare-and-swap succeeds but subsequent transaction operations fail (such as session event append returning false or throwing an exception), the entire transaction is rolled back, and a subsequent independent transaction executes a compare-and-swap to transition the run to failed with the failure description.
+- Historical context passed to the model prompt is retrieved directly from active session messages, bounded to a sliding window of the last 10 completed turns (20 messages), ensuring interrupted or failed turns are excluded.
+
+### 6. Model Configuration & YAML Resolution
+- External model integrations (such as Google GenAI) are configured manually as standalone beans. Automated model starter configurations are explicitly excluded via application configuration to prevent duplicate bean conflicts and unintended initializations.
+- Model names are specified directly in configuration files rather than environment variable fallbacks: chat model is configured as gemini-3.8-flash, text-to-speech as gemini-3.8-flash-tts, and audio transcription as gemini-3.5-transcribe.
+- Private configurations and API credentials reside in a dedicated configuration file within the backend configuration directory, which is excluded by source control and never read, output, or modified by automation agents.
+- In local development mode, a deterministic mock model is active by default, supporting synthetic delays, token chunking, and deterministic error injection when prompted with an error keyword.
+- When the real-ai profile is activated, the manual Google configuration is loaded, and absence of credentials triggers a fail-fast startup abort.
+
+### 7. API Contracts & Transports
 - The API is partitioned into structured operations (GraphQL) and streaming execution (HTTP POST with unidirectional Server-Sent Events).
 - GraphQL Queries:
-  - Retrieval of available bots with deterministic ordering and pagination limits.
-  - Retrieval of conversations with deterministic ordering and pagination parameters.
+  - Retrieval of available bots with bounded pagination.
+  - Retrieval of conversations with bounded pagination.
   - Retrieval of a single conversation with its associated message history and execution runs, where messages and runs support identical, bounded pagination limits.
   - Retrieval of an individual execution run by its identifier.
   - System prompt text is an internal bot configuration and is excluded from external GraphQL bot types.
@@ -88,40 +113,29 @@
   - Creation of a new conversation assigned to a specific bot.
 - All GraphQL listing queries enforce a default page limit of 20 and an absolute maximum cap of 100, sorted deterministically by creation timestamp descending followed by identifier descending.
 - Streaming Endpoint:
-  - Initialized via HTTP POST containing the client request identifier and prompt text.
-  - For a new request, the server responds with HTTP 200 and Content-Type `text/event-stream`. The stream emits event-driven frames: run started, message delta tokens, run completed, run failed, and run cancelled. Every event frame contains a monotonically increasing integer sequence number and the run identifier.
-  - For a repeated request with an identical client request identifier and identical message content, the server responds with HTTP 200 and Content-Type `application/json` containing the existing run metadata. Live SSE streams are never replayed.
+  - Initialized via HTTP POST containing the client request identifier and message text. Client request identifier is limited to 128 characters and message text is limited to 10,000 characters.
+  - For a new request, the server responds with HTTP 200 and Content-Type text/event-stream. The stream emits run started, message delta tokens, and a terminal event (run completed, run failed, or run cancelled).
+  - For a repeated request with an identical client request identifier and identical message content, the server responds with HTTP 200 and Content-Type application/json containing existing run metadata. Live SSE streams are never replayed.
   - For a repeated request with an identical client request identifier but conflicting message content, the server responds with HTTP 409 Conflict.
+  - Concurrent requests with duplicate client request identifiers that encounter database unique constraint violations roll back and re-query to return idempotent metadata or conflict responses.
+  - Concurrent requests on the same conversation with different client request identifiers are rejected with HTTP 409 Conflict via database partial unique index enforcement.
 - Stream Cancellation Endpoint:
-  - An HTTP POST endpoint accepts the run identifier to trigger immediate cooperative interruption. The operation is strictly idempotent.
-- Client Transport Implementation:
-  - The frontend streaming reader uses native `fetch` coupled with readable byte stream decoding and an abort controller, safely buffering chunk boundaries to handle multi-byte UTF-8 split characters and Server-Sent Event frame boundaries. Native browser `EventSource` is not used because it cannot dispatch HTTP POST requests.
+  - An HTTP POST endpoint accepts the run identifier, verifies requesting ownership, and triggers cooperative cancellation. The operation returns HTTP 200 with the authoritative terminal status and is strictly idempotent.
 
-### 5. Persistence & Context Management
-- Short-lived database transactions are enforced. The database connection is acquired to persist the initial user message and pending run, immediately committed, and released prior to invoking the AI model or streaming chunks.
-- During SSE streaming, no database connections or transaction contexts are held open.
-- When the stream concludes or is aborted, a separate short transaction is opened to record the generated assistant response and update the run to its terminal state.
-- If generation is cancelled or fails, the partial assistant response is saved with an interrupted attribute set to true.
-- Model prompt context assembly retrieves only successfully completed, uninterrupted messages belonging to the conversation, sliced to a bounded sliding window.
-
-### 6. Model Architecture & Manual Configuration
-- The application relies on abstract model interfaces for chat and streaming chat capabilities. Business and domain components interact solely with standard abstractions and fluent client wrappers, without referencing vendor-specific classes.
-- Model providers (such as Google GenAI) are integrated via standalone configuration classes using core client artifacts rather than automated provider starters, ensuring explicit bean lifecycle management and clean separation.
-- In local development mode, a deterministic mock model implementation is active by default, supporting synthetic latency and deterministic error injection.
-- When both local and real-ai profiles are active, the system configures the genuine external model provider and completely disables the mock model.
-- If the real-ai profile is active but the vendor API credentials are absent, the application triggers a fail-fast startup abort.
-
-### 7. Frontend Visual & Interaction Specification
-- Layout adheres to the approved visual prototype using standard styling without external heavy UI component libraries:
-  - Background is clean white.
-  - Left navigation is a narrow sidebar (approximately 240px width) containing the workspace header block at the top, followed by the active Seed Bot indicator and recent conversations list.
+### 8. Frontend Visual, Interaction & Code Annotation Specifications
+- Frontend Architecture:
+  - Built with Angular using `@copilotkit/angular` in layout-only mode for `ChatView`, without relying on external CopilotKit cloud runtime or backend agent runtime proxy.
+- Visual Layout & Controls:
+  - Clean white background.
+  - Left navigation is a narrow 240px sidebar displaying the Seed Bot indicator and recent conversations list.
   - Top main header displays the active conversation title and a "New Conversation" action button.
-  - Central dialogue area displays user messages right-aligned with rounded corners and subtle background fill, while assistant responses are left-aligned in standard body typography.
+  - Central dialogue area displays user messages right-aligned with rounded corners, and assistant text left-aligned.
   - Bottom composer features a full-width input container with a combined send/stop toggle button at the bottom-right.
-  - Individual message bubbles support a copy-to-clipboard action.
-- Scope boundary for MVP UI:
-  - Only functional features are rendered (Seed Bot, recent conversations, new conversation, title, message bubbles, text input, stream stopping, text copying).
-  - Out-of-scope prototype artifacts (such as workspace switchers, kanban views, usage gauges, file managers, whiteboards, attachments, model selector dropdowns, and microphone controls) are entirely omitted, guaranteeing that zero inactive or non-functional controls appear.
+  - Message bubbles support a copy-to-clipboard action.
+- Omitted Non-MVP Controls:
+  - Out-of-scope prototype artifacts (such as workspace switchers, kanban views, usage metrics, file attachments, whiteboards, attachments, model selector dropdowns, and microphone controls) are entirely omitted, guaranteeing zero non-functional controls.
+- Code Annotation & Architectural Traceability:
+  - Whenever special technical constraints or architectural trade-offs are encountered (such as single-lock lifecycle monitors, swap disposables, CAS rollback boundaries, database partial unique indices with collision re-query, or manual bean registrations with auto-configuration exclusions), developers must place inline comments in close proximity to the code explaining the "why" rationale, active constraints, and necessary future release conditions, rather than merely restating step-by-step actions.
 
 ---
 
@@ -147,8 +161,9 @@
 - Multi-tenant authentication, user registration, Spring Security, and OAuth2 authorization servers.
 - Liquibase migration starter.
 - Model Context Protocol (MCP) clients and tool execution.
-- Spring Modulith starter core and architecture boundary verifiers.
+- Spring Modulith starter core and architecture boundary verifiers (prepared via package boundaries for post-MVP adoption).
 - Retrieval-Augmented Generation (RAG), document ingestion, embedding generation, and pgvector semantic search.
+- Audio and speech capabilities (batch audio transcription with gemini-3.5-transcribe and real-time live transcription with gemini-3.5-transcribe-live are documented as future adapter extensions).
 - Workflow orchestration engines, scheduling, and multi-agent coordination.
 - GraalVM Native Image compilation and enterprise OpenTelemetry collectors.
 - Inactive UI prototype controls (workspace switching, kanban, usage metrics, file/whiteboard attachments, model selection dropdowns, voice input).
@@ -157,4 +172,5 @@
 
 ## Further Notes
 
-- Current environment gate G0 remains **BLOCKED** pending JDK 27 toolchain provisioning decisions and frontend dependency lockfile resolution. Implementation will proceed strictly in accordance with Gate prerequisites.
+- Environment Baseline: Java 25 (toolchain 25), Gradle 9.8.2, Spring Boot 4.1.2, Spring AI 2.1.0-RC2.
+- Environment Gate G0 backend compilation has successfully passed. Gate A modular package boundaries have been verified with clean compilation. Gate B integration testing is currently in draft ticket sequencing prior to execution.
