@@ -47,137 +47,79 @@
     <!-- Top Header -->
     <header class="header">
       <div class="header-title">{{ currentTitle() }}</div>
-      <button class="new-chat-btn" (click)="newConversation()" [disabled]="isStreaming()" type="button">
-        + New Chat
-      </button>
+      <div class="header-actions">
+        @if (isStreaming()) {
+          <button
+            class="stop-btn"
+            data-testid="stop-btn"
+            type="button"
+            (click)="cancelRun()"
+            [disabled]="isCancelling() || !activeRunId()"
+          >
+            {{ isCancelling() ? 'Stopping...' : 'Stop' }}
+          </button>
+        }
+        <button class="new-chat-btn" (click)="newConversation()" [disabled]="isStreaming()" type="button">
+          + New Chat
+        </button>
+      </div>
     </header>
 
-    <!-- CopilotChatView Layout -->
-    <copilot-chat-view [messages]="messages()" class="chat-view-container">
-      <ng-template #customLayout>
-        <div class="custom-chat-layout">
-          <!-- Message Scroll Area -->
-          <div #messagesContainer class="message-list">
-            @if (hasMoreMessages()) {
-              <div class="load-more-container">
-                <button
-                  class="load-more-btn"
-                  type="button"
-                  (click)="loadEarlierMessages()"
-                  [disabled]="isLoadingEarlier() || isStreaming()"
-                >
-                  {{ isLoadingEarlier() ? 'Loading earlier messages...' : 'Load earlier messages' }}
-                </button>
-              </div>
-            }
+    <!-- Stream Error / Retry Banner -->
+    @if (streamError()) {
+      <div class="stream-error-banner" data-testid="stream-error-banner">
+        <span class="stream-error-text">{{ streamError() }}</span>
+        @if (pendingRequest() && !isStreaming() && !isRecovering()) {
+          <button
+            class="retry-btn"
+            data-testid="retry-btn"
+            type="button"
+            (click)="retryPending()"
+          >
+            重試
+          </button>
+        }
+      </div>
+    }
+    @if (isRecovering()) {
+      <div class="recovering-banner" data-testid="connection-recovering-banner">
+        <span>連線中斷，正在嘗試恢復...</span>
+      </div>
+    }
+    @if (lastMessageInterrupted() && !isStreaming()) {
+      <div class="recovering-banner" data-testid="last-interrupted-banner">
+        <span>前次回應已中斷</span>
+      </div>
+    }
+    @if (lastMessageFailed() && !isStreaming()) {
+      <div class="stream-error-banner" data-testid="last-failed-banner">
+        <span class="stream-error-text">前次回應失敗</span>
+      </div>
+    }
 
-            @if (messages().length === 0) {
-              <div class="empty-state">
-                <div class="empty-state-title">Welcome to {{ seedBot()?.name || 'Assistant Bot' }}</div>
-                <div class="empty-state-subtitle">Type a message below to start your conversation.</div>
-              </div>
-            }
+    <!-- Bounded Pagination Bar -->
+    @if (hasMoreMessages()) {
+      <div class="load-more-container">
+        <button
+          class="load-more-btn"
+          type="button"
+          (click)="loadEarlierMessages()"
+          [disabled]="isLoadingEarlier() || isStreaming()"
+        >
+          {{ isLoadingEarlier() ? 'Loading earlier messages...' : 'Load earlier messages' }}
+        </button>
+      </div>
+    }
 
-            @for (msg of messages(); track msg.id) {
-              @if (msg.role === 'user') {
-                <div class="message-row user" [attr.data-message-id]="msg.id">
-                  <div class="user-bubble-container">
-                    <div class="user-bubble">{{ msg.content }}</div>
-                    <div class="message-actions">
-                      <button
-                        class="copy-btn"
-                        type="button"
-                        (click)="copyMessage(msg.content, msg.id)"
-                      >
-                        {{ copiedMessageId() === msg.id ? 'Copied!' : 'Copy' }}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              } @else if (msg.role === 'assistant') {
-                <div class="message-row assistant" [attr.data-message-id]="msg.id">
-                  <div class="assistant-avatar">Bot</div>
-                  <div class="assistant-bubble-container">
-                    <div class="assistant-bubble">
-                      <span>{{ msg.content }}</span>
-                      @if (isFailed(msg)) {
-                        <span class="failed-badge">[Failed]</span>
-                      } @else if (isInterrupted(msg)) {
-                        <span class="interrupted-badge">[Interrupted]</span>
-                      }
-                    </div>
-                    <div class="message-actions">
-                      <button
-                        class="copy-btn"
-                        type="button"
-                        (click)="copyMessage(msg.content, msg.id)"
-                      >
-                        {{ copiedMessageId() === msg.id ? 'Copied!' : 'Copy' }}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              }
-            }
-          </div>
-
-          <!-- Stream Error / Retry Banner -->
-          @if (streamError()) {
-            <div class="stream-error-banner">
-              <span class="stream-error-text">{{ streamError() }}</span>
-              @if (pendingRequest() && !isStreaming() && !isRecovering()) {
-                <button
-                  class="retry-btn"
-                  type="button"
-                  (click)="retryPending()"
-                >
-                  重試
-                </button>
-              }
-            </div>
-          }
-          @if (isRecovering()) {
-            <div class="recovering-banner">
-              <span>連線中斷，正在嘗試恢復...</span>
-            </div>
-          }
-
-          <!-- Composer Area -->
-          <div class="composer-container">
-            <div class="composer-box">
-              <textarea
-                class="composer-textarea"
-                placeholder="Send a message..."
-                [value]="inputValue()"
-                (input)="changeInput($any($event.target).value)"
-                (keydown)="onKeydown($event)"
-                [disabled]="isStreaming()"
-                rows="2"
-              ></textarea>
-              <div class="composer-footer">
-                @if (isStreaming()) {
-                  <button
-                    class="stop-btn"
-                    type="button"
-                    (click)="cancelRun()"
-                    [disabled]="isCancelling()"
-                  >
-                    {{ isCancelling() ? 'Stopping...' : 'Stop' }}
-                  </button>
-                } @else {
-                  <button
-                    class="send-btn"
-                    type="button"
-                    (click)="submitInput(inputValue())"
-                    [disabled]="!inputValue().trim()"
-                  >
-                    Send
-                  </button>
-                }
-              </div>
-            </div>
-          </div>
-        </div>
+    <!-- Native CopilotChatView -->
+    <copilot-chat-view
+      [messages]="messages()"
+      [showCursor]="isStreaming()"
+      [inputTemplate]="nativeInputTpl"
+      class="chat-view-container"
+    >
+      <ng-template #nativeInputTpl>
+        <copilot-chat-input [mode]="isStreaming() ? 'processing' : 'input'"></copilot-chat-input>
       </ng-template>
     </copilot-chat-view>
   </main>

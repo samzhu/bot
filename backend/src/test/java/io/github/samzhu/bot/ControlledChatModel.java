@@ -28,7 +28,8 @@ public class ControlledChatModel implements ChatModel, StreamingChatModel {
 
     public enum Mode {
         AUTOMATIC,
-        HOLD
+        HOLD,
+        BLOCKING_ITERATOR
     }
 
     private static final ControlledChatModel INSTANCE = new ControlledChatModel();
@@ -45,6 +46,10 @@ public class ControlledChatModel implements ChatModel, StreamingChatModel {
     private volatile CountDownLatch cancelledLatch = new CountDownLatch(1);
     private volatile CountDownLatch finishedLatch = new CountDownLatch(1);
 
+    private volatile CountDownLatch blockLatch = null;
+    private volatile CountDownLatch blockEnteredLatch = null;
+    private volatile CountDownLatch blockDisposedLatch = null;
+
     public ControlledChatModel() {
     }
 
@@ -55,6 +60,16 @@ public class ControlledChatModel implements ChatModel, StreamingChatModel {
         subscribedLatch = new CountDownLatch(1);
         cancelledLatch = new CountDownLatch(1);
         finishedLatch = new CountDownLatch(1);
+        blockLatch = null;
+        blockEnteredLatch = null;
+        blockDisposedLatch = null;
+    }
+
+    public synchronized void setBlockingIteratorMode(CountDownLatch blockLatch, CountDownLatch enteredLatch, CountDownLatch disposedLatch) {
+        this.mode = Mode.BLOCKING_ITERATOR;
+        this.blockLatch = blockLatch;
+        this.blockEnteredLatch = enteredLatch;
+        this.blockDisposedLatch = disposedLatch;
     }
 
     public synchronized void setHoldMode(boolean hold) {
@@ -129,6 +144,42 @@ public class ControlledChatModel implements ChatModel, StreamingChatModel {
                     .doOnSubscribe(sub -> subscribedLatch.countDown())
                     .doOnCancel(() -> cancelledLatch.countDown())
                     .doFinally(signalType -> finishedLatch.countDown());
+        }
+
+        if (mode == Mode.BLOCKING_ITERATOR) {
+            Iterable<ChatResponse> blockingIterable = () -> new java.util.Iterator<>() {
+                @Override
+                public boolean hasNext() {
+                    return true;
+                }
+
+                @Override
+                public ChatResponse next() {
+                    if (blockEnteredLatch != null) {
+                        blockEnteredLatch.countDown();
+                    }
+                    try {
+                        if (blockLatch != null) {
+                            blockLatch.await(10, TimeUnit.SECONDS);
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    return new ChatResponse(List.of(new Generation(new AssistantMessage("Unblocked chunk"))));
+                }
+            };
+
+            return Flux.fromIterable(blockingIterable)
+                    .doOnCancel(() -> {
+                        if (blockDisposedLatch != null) {
+                            blockDisposedLatch.countDown();
+                        }
+                    })
+                    .doFinally(signal -> {
+                        if (blockDisposedLatch != null) {
+                            blockDisposedLatch.countDown();
+                        }
+                    });
         }
 
         String[] chunks = new String[] {

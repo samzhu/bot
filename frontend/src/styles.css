@@ -15,21 +15,25 @@ html, body {
   overflow: hidden;
 }
 
-/* Scrollbar styles */
-::-webkit-scrollbar {
+/* App shell sidebar scrollbar scoping: preserves CopilotKit native chat scrollbars untouched */
+.sidebar ::-webkit-scrollbar,
+.conversation-list::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 
-::-webkit-scrollbar-track {
+.sidebar ::-webkit-scrollbar-track,
+.conversation-list::-webkit-scrollbar-track {
   background: transparent;
 }
 
-::-webkit-scrollbar-thumb {
+.sidebar ::-webkit-scrollbar-thumb,
+.conversation-list::-webkit-scrollbar-thumb {
   background: #d1d5db;
   border-radius: 3px;
 }
 
-::-webkit-scrollbar-thumb:hover {
+.sidebar ::-webkit-scrollbar-thumb:hover,
+.conversation-list::-webkit-scrollbar-thumb:hover {
   background: #9ca3af;
 }

@@ -5,12 +5,12 @@ import org.springframework.data.relational.core.mapping.Table;
 
 import java.time.Instant;
 
-@Table("agent_run")
-public record AgentRun(
+@Table("chat_run")
+public record ChatRun(
     @Id String id,
     String conversationId,
     String clientRequestId,
-    String promptText,
+    String inputText,
     String status,
     String errorMessage,
     Instant createdAt,

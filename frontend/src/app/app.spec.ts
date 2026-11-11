@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
+import { appConfig } from './app.config';
 import { App } from './app';
 
 describe('App', () => {
@@ -17,20 +18,35 @@ describe('App', () => {
       });
     }));
 
-    if (!navigator.clipboard) {
-      Object.defineProperty(navigator, 'clipboard', {
+    if (typeof globalThis.ResizeObserver === 'undefined') {
+      globalThis.ResizeObserver = class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      } as any;
+    }
+
+    if (typeof Element !== 'undefined' && !Element.prototype.scrollTo) {
+      Element.prototype.scrollTo = () => {};
+    }
+
+    if (typeof window !== 'undefined' && (!window.localStorage || typeof window.localStorage.getItem !== 'function')) {
+      const store: Record<string, string> = {};
+      Object.defineProperty(window, 'localStorage', {
         value: {
-          writeText: vi.fn().mockResolvedValue(undefined)
+          getItem: (key: string) => store[key] || null,
+          setItem: (key: string, val: string) => { store[key] = val; },
+          removeItem: (key: string) => { delete store[key]; },
+          clear: () => {}
         },
         configurable: true,
         writable: true
       });
-    } else {
-      vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined);
     }
 
     await TestBed.configureTestingModule({
       imports: [App],
+      providers: [appConfig.providers]
     }).compileComponents();
   });
 
@@ -52,18 +68,24 @@ describe('App', () => {
     expect(compiled.querySelector('.workspace-title')?.textContent).toContain('Herdr Bot');
   });
 
-  it('should copy message content to clipboard and set copied state', async () => {
+  it('should bind raw messages and status prompts without altering message content', async () => {
     const fixture = TestBed.createComponent(App);
     const app = fixture.componentInstance;
     await fixture.whenStable();
 
-    const writeSpy = vi.spyOn(navigator.clipboard, 'writeText');
-    const testContent = 'Hello world to be copied';
-    const testMsgId = 'msg-123';
+    app.messages.set([
+      { id: 'u1', role: 'user', content: 'hello' },
+      { id: 'a1', role: 'assistant', content: '**bold response**', interrupted: true }
+    ]);
+    fixture.detectChanges();
 
-    app.copyMessage(testContent, testMsgId);
+    // Verify messages signal retains raw content unchanged
+    expect(app.messages()[1].content).toBe('**bold response**');
+    expect(app.lastMessageInterrupted()).toBe(true);
+    expect(app.lastMessageFailed()).toBe(false);
 
-    expect(writeSpy).toHaveBeenCalledWith(testContent);
-    expect(app.copiedMessageId()).toBe(testMsgId);
+    const compiled = fixture.nativeElement as HTMLElement;
+    expect(compiled.querySelector('copilot-chat-view')).toBeTruthy();
+    expect(compiled.querySelector('.recovering-banner')?.textContent).toContain('前次回應已中斷');
   });
 });

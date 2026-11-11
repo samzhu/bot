@@ -5,6 +5,7 @@ import io.github.samzhu.bot.conversation.ConversationView;
 import io.github.samzhu.bot.conversation.MessageView;
 import org.springframework.data.jdbc.core.JdbcAggregateTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.List;
@@ -54,11 +55,13 @@ public class ConversationOperationsImpl implements ConversationOperations {
     }
 
     @Override
+    @Transactional
     public MessageView appendMessage(String conversationId, String role, String content, String runId, boolean interrupted) {
         String msgId = UUID.randomUUID().toString();
         Instant now = Instant.now();
         Message msg = new Message(msgId, conversationId, runId, role, content, interrupted, now);
         Message saved = jdbcAggregateTemplate.insert(msg);
+        conversationRepository.touchUpdatedAt(conversationId, now);
         return toView(saved);
     }
 

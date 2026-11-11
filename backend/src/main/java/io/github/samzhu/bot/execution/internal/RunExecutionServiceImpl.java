@@ -28,12 +28,16 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import reactor.core.Disposable;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -42,7 +46,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
 
     private static final Logger log = LoggerFactory.getLogger(RunExecutionServiceImpl.class);
 
-    private final AgentRunRepository runRepository;
+    private final ChatRunRepository runRepository;
     private final ConversationOperations conversationOperations;
     private final BotOperations botOperations;
     private final JdbcAggregateTemplate jdbcAggregateTemplate;
@@ -55,7 +59,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
     private final int windowTurns;
 
     public RunExecutionServiceImpl(
-            AgentRunRepository runRepository,
+            ChatRunRepository runRepository,
             ConversationOperations conversationOperations,
             BotOperations botOperations,
             JdbcAggregateTemplate jdbcAggregateTemplate,
@@ -108,10 +112,10 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         ConversationView conv = convOpt.get();
 
         // 2. ClientRequestId deduplication check
-        Optional<AgentRun> existing = runRepository.findByConversationIdAndClientRequestId(conversationId, clientRequestId);
+        Optional<ChatRun> existing = runRepository.findByConversationIdAndClientRequestId(conversationId, clientRequestId);
         if (existing.isPresent()) {
-            AgentRun oldRun = existing.get();
-            if (oldRun.promptText() != null && oldRun.promptText().equals(message)) {
+            ChatRun oldRun = existing.get();
+            if (oldRun.inputText() != null && oldRun.inputText().equals(message)) {
                 return new StartRunOutcome(StartRunOutcome.Type.EXISTING, toView(oldRun), null, null);
             } else {
                 return new StartRunOutcome(StartRunOutcome.Type.CONFLICT, toView(oldRun), null, "Conflicting message for clientRequestId");
@@ -124,7 +128,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         // We let the database unique indexes (uq_active_run_per_conv and uq_client_request_per_conv) adjudicate.
         String runId = UUID.randomUUID().toString();
         Instant now = Instant.now();
-        AgentRun newRun = new AgentRun(runId, conversationId, clientRequestId, message, RunStatus.RUNNING.name(), null, now, now);
+        ChatRun newRun = new ChatRun(runId, conversationId, clientRequestId, message, RunStatus.RUNNING.name(), null, now, now);
 
         final String[] userMsgHolder = new String[1];
         try {
@@ -134,21 +138,21 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                 userMsgHolder[0] = uMsg.id();
             });
         } catch (Exception ex) {
-            // Check if this is specifically a unique constraint collision on agent_run active or client_request
+            // Check if this is specifically a unique constraint collision on chat_run active or client_request
             if (isRunUniqueConstraintCollision(ex)) {
                 // Why re-query same clientRequestId first: another concurrent thread with the SAME clientRequestId
                 // may have won the insert race. If so, return EXISTING (200 duplicate) or CONFLICT (409 conflicting payload), NOT a generic active 409!
-                Optional<AgentRun> raced = runRepository.findByConversationIdAndClientRequestId(conversationId, clientRequestId);
+                Optional<ChatRun> raced = runRepository.findByConversationIdAndClientRequestId(conversationId, clientRequestId);
                 if (raced.isPresent()) {
-                    AgentRun oldRun = raced.get();
-                    if (oldRun.promptText() != null && oldRun.promptText().equals(message)) {
+                    ChatRun oldRun = raced.get();
+                    if (oldRun.inputText() != null && oldRun.inputText().equals(message)) {
                         return new StartRunOutcome(StartRunOutcome.Type.EXISTING, toView(oldRun), null, null);
                     } else {
                         return new StartRunOutcome(StartRunOutcome.Type.CONFLICT, toView(oldRun), null, "Conflicting message for clientRequestId");
                     }
                 }
                 // If not same clientRequestId, collision was uq_active_run_per_conv: another active run is in progress
-                Optional<AgentRun> activeRaced = runRepository.findActiveRunByConversationId(conversationId);
+                Optional<ChatRun> activeRaced = runRepository.findActiveRunByConversationId(conversationId);
                 return new StartRunOutcome(StartRunOutcome.Type.CONFLICT, activeRaced.map(this::toView).orElse(null), null, "Another active run is in progress for this conversation");
             }
             // For non-unique-constraint exceptions (e.g. FK violation, NOT NULL, serialization failure), propagate!
@@ -220,9 +224,21 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         }
 
         // 7. Dispatch model streaming
+        /*
+         * WHY Schedulers.boundedElastic():
+         * Provider SDKs such as Spring AI's Google GenAI wrap blocking iterable streams (e.g. ResponseStream via Flux.fromIterable).
+         * Subscribing on the caller thread causes synchronous iteration on Tomcat's MVC worker thread, preventing startRun()
+         * from returning the SseEmitter and delaying HTTP 200 headers and seq 1 run.started until generation is complete.
+         * Offloading subscription to Reactor's shared boundedElastic scheduler releases Tomcat's worker thread, allowing
+         * startRun() to return the SseEmitter so headers and run.started are flushed to the client without delay.
+         * This enables real-time delta consumption and timely user cancellation.
+         * The resulting Disposable is registered via handle.setSubscription(disposable), maintaining thread safety under
+         * single-lock CAS, TransactionTemplate atomicity, and clean disposal if cancelled early or late.
+         */
         if (chatModel instanceof StreamingChatModel streamingModel) {
             try {
-                Disposable disposable = streamingModel.stream(new Prompt(aiMessages))
+                Disposable disposable = Flux.defer(() -> streamingModel.stream(new Prompt(aiMessages)))
+                        .subscribeOn(Schedulers.boundedElastic())
                         .subscribe(
                                 chatResponse -> {
                                     if (chatResponse != null && chatResponse.getResult() != null && chatResponse.getResult().getOutput() != null) {
@@ -241,13 +257,35 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                 handle.fail("Model subscription error: " + ex.getMessage());
             }
         } else {
+            /*
+             * Non-streaming fallback: wrap synchronous ChatModel.call in Mono.fromCallable with the same boundedElastic
+             * scheduler to prevent blocking the MVC request thread when alternative non-streaming models are configured.
+             * Explicitly require non-null ChatResponse so null model returns trigger immediate failure rather than hanging
+             * as an empty Mono until the deadline scheduler fires.
+             */
             try {
-                var response = chatModel.call(new Prompt(aiMessages));
-                String text = response.getResult().getOutput().getText();
-                handle.delta(text);
-                handle.complete(message);
+                Disposable disposable = Mono.fromCallable(() -> {
+                            var response = chatModel.call(new Prompt(aiMessages));
+                            Objects.requireNonNull(response, "Model call returned null ChatResponse");
+                            return response;
+                        })
+                        .subscribeOn(Schedulers.boundedElastic())
+                        .subscribe(
+                                response -> {
+                                    if (response.getResult() != null && response.getResult().getOutput() != null) {
+                                        String text = response.getResult().getOutput().getText();
+                                        if (text != null) {
+                                            handle.delta(text);
+                                        }
+                                    }
+                                    handle.complete(message);
+                                },
+                                error -> handle.fail(error != null ? error.getMessage() : "Model execution error")
+                        );
+                handle.setSubscription(disposable);
             } catch (Exception ex) {
-                handle.fail(ex.getMessage());
+                log.error("Synchronous exception invoking non-streaming model for run {}", runId, ex);
+                handle.fail("Model execution error: " + ex.getMessage());
             }
         }
 
@@ -382,11 +420,11 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         }
 
         // DB Fallback if not active in registry
-        Optional<AgentRun> runOpt = runRepository.findById(runId);
+        Optional<ChatRun> runOpt = runRepository.findById(runId);
         if (runOpt.isEmpty()) {
             return new CancelRunOutcome(runId, RunStatus.FAILED, false);
         }
-        AgentRun run = runOpt.get();
+        ChatRun run = runOpt.get();
         Optional<ConversationView> conv = conversationOperations.findConversationById(run.conversationId(), userId);
         if (conv.isEmpty()) {
             return new CancelRunOutcome(runId, RunStatus.FAILED, false);
@@ -400,12 +438,12 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         return new CancelRunOutcome(runId, finalStatus, finalStatus == RunStatus.CANCELLED);
     }
 
-    private RunView toView(AgentRun r) {
+    private RunView toView(ChatRun r) {
         return new RunView(
                 r.id(),
                 r.conversationId(),
                 r.clientRequestId(),
-                r.promptText(),
+                r.inputText(),
                 r.status(),
                 r.errorMessage(),
                 r.createdAt(),

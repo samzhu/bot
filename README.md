@@ -65,18 +65,27 @@ Access the UI at `http://localhost:4200`.
 
 ## 4. Verification & Testing
 
+### Specifications & Sub-Tickets
+- [GitHub Spec #6: Spec: MVP 資料模型重構與 Local 示範載入](https://github.com/samzhu/bot/issues/6)
+- [GitHub Sub-issue #7 (T1): 乾淨重建後可正常聊天](https://github.com/samzhu/bot/issues/7)
+- [GitHub Sub-issue #8 (T2): local啟動即可查看完整示範](https://github.com/samzhu/bot/issues/8) (Blocked by #7)
+
+### Local Demonstration Seed & Artifact Isolation
+- **SourceSet Isolation**: Demonstration loaders and local fixtures reside in the dedicated `localDevelopment` sourceSet (`src/local/java`), included only in `bootRun` and `test` classpaths.
+- **Production Artifacts**: Neither production `bootJar` nor container images contain demo SQL, seed classes, or private configurations.
+- **Idempotence**: When booting under the `local` profile, `LocalDataSeedInitializer` automatically populates three demonstration scenarios (`COMPLETED`, `FAILED`, `CANCELLED`) with fixed IDs. Subsequent restarts detect existing data and skip initialization without modifying or duplicating records.
+
 ### Backend Test Suites
 ```bash
 cd backend
 
-# 1. Full offline unit & integration test suite (31 tests, strictly mock/isolated, excludes live calls)
+# 1. Full offline unit & integration test suite (isolated PostgreSQL & controlled model)
 ./gradlew test
 
 # 2. Dedicated fail-fast configuration tests (missing API key, missing model, zero network)
 ./gradlew test --tests RealAiFailFastTests
 
 # 3. Dedicated opt-in real model live smoke test (requires Docker + backend/config/application-real-ai.yaml)
-# Outputs only safe model metadata (gemini-3.8-flash); outputs.upToDateWhen { false } prevents cached skips.
 ./gradlew realAiSmokeTest
 ```
 
@@ -87,19 +96,24 @@ cd frontend
 # 1. Unified test command (runs Vitest unit tests + Node SSE parser tests)
 npm test
 
-# 2. Vitest unit tests alone (3 tests)
+# 2. Vitest unit tests alone
 npm run test:unit
 
-# 3. SSE Stream Parser test suite alone (13 tests)
+# 3. SSE Stream Parser test suite alone
 npm run test:parser
 
-# 4. Production bundle build (actual bundle: 5.00 MB < 5.5 MB budget; component CSS: 7.07 kB < 8 kB budget)
+# 4. Production bundle build (verified within angular.json budgets)
 npm run build
 ```
 
 ### End-to-End Browser Automation
+> **Note**: All browser verification suites run against the local deterministic mock backend (`./gradlew bootRun --args="--spring.profiles.active=local"`), NOT `real-ai`, to test deterministic SSE streaming, artificial faults (`[PARTIAL_ERROR]`), delays (`[DELAY]`), and cooperative cancellations without consuming external model quota.
+
 ```bash
 cd frontend
+
+# Seed Verification: 3 seed conversations, banners, eager New Chat baseline+1, and reload persistence
+node verify-seed.mjs
 
 # Ticket 01: Minimal loop (new chat, streaming deltas, reload persistence)
 node verify-ticket-01.mjs

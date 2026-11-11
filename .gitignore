@@ -53,3 +53,6 @@ bin/
 /nbbuild/
 /nbdist/
 /.nb-gradle/
+
+# Documentation ignored from repository tracking per user request
+/docs/

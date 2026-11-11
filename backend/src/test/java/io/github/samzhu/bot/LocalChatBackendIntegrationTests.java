@@ -10,8 +10,8 @@ import io.github.samzhu.bot.conversation.internal.ConversationRepository;
 import io.github.samzhu.bot.conversation.internal.Message;
 import io.github.samzhu.bot.conversation.internal.MessageRepository;
 import io.github.samzhu.bot.execution.RunStatus;
-import io.github.samzhu.bot.execution.internal.AgentRun;
-import io.github.samzhu.bot.execution.internal.AgentRunRepository;
+import io.github.samzhu.bot.execution.internal.ChatRun;
+import io.github.samzhu.bot.execution.internal.ChatRunRepository;
 import io.github.samzhu.bot.identity.CurrentUserProvider;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -63,13 +63,19 @@ class LocalChatBackendIntegrationTests {
     private MessageRepository messageRepository;
 
     @Autowired
-    private AgentRunRepository agentRunRepository;
+    private ChatRunRepository chatRunRepository;
 
     @Autowired
     private BotRepository botRepository;
 
     @Autowired
     private DatabaseInitializer databaseInitializer;
+
+    @Autowired
+    private org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    private org.springframework.transaction.support.TransactionTemplate transactionTemplate;
 
     @MockitoSpyBean
     private SessionService sessionService;
@@ -118,6 +124,13 @@ class LocalChatBackendIntegrationTests {
         controlledChatModel.reset();
         testRunProperties.reset();
         reset(sessionService);
+
+        // Ensure default bot fixture exists in test database (main migrations no longer contain demo V2 seed)
+        jdbcTemplate.update("""
+            INSERT INTO bot (id, name, system_prompt, created_at)
+            VALUES ('bot-general', 'General Assistant', 'You are a helpful, accurate, and concise AI coding assistant.', CURRENT_TIMESTAMP)
+            ON CONFLICT (id) DO NOTHING;
+        """);
     }
 
     private String createTestConversation(String title) throws Exception {
@@ -231,8 +244,8 @@ class LocalChatBackendIntegrationTests {
         assertNotNull(runIdRef.get());
         String runId = runIdRef.get();
 
-        // Verify DB AgentRun state
-        AgentRun run = agentRunRepository.findById(runId).orElseThrow();
+        // Verify DB ChatRun state
+        ChatRun run = chatRunRepository.findById(runId).orElseThrow();
         assertEquals(RunStatus.COMPLETED.name(), run.status());
 
         // Verify DB Messages
@@ -440,7 +453,7 @@ class LocalChatBackendIntegrationTests {
 
         // Verify DB status is FAILED
         String runId = runIdRef.get();
-        AgentRun run = agentRunRepository.findById(runId).orElseThrow();
+        ChatRun run = chatRunRepository.findById(runId).orElseThrow();
         assertEquals(RunStatus.FAILED.name(), run.status());
 
         // Verify Session Memory excludes this failed turn
@@ -527,7 +540,7 @@ class LocalChatBackendIntegrationTests {
         assertEquals("run.cancelled", terminalEvents.get(0));
 
         // Verify DB state
-        AgentRun run = agentRunRepository.findById(runId).orElseThrow();
+        ChatRun run = chatRunRepository.findById(runId).orElseThrow();
         assertEquals(RunStatus.CANCELLED.name(), run.status());
 
         // Verify assistant message is saved with interrupted = true
@@ -549,7 +562,7 @@ class LocalChatBackendIntegrationTests {
 
         // 1. Pre-insert a COMPLETED run
         String runId = UUID.randomUUID().toString();
-        AgentRun completedRun = new AgentRun(
+        ChatRun completedRun = new ChatRun(
                 runId, convId, clientReqId, "prompt",
                 RunStatus.COMPLETED.name(), null, Instant.now(), Instant.now()
         );
@@ -574,12 +587,12 @@ class LocalChatBackendIntegrationTests {
         assertFalse(repeatNode.path("cancelled").asBoolean());
 
         // DB state remains COMPLETED
-        AgentRun after = agentRunRepository.findById(runId).orElseThrow();
+        ChatRun after = chatRunRepository.findById(runId).orElseThrow();
         assertEquals(RunStatus.COMPLETED.name(), after.status(), "COMPLETED run must not be overwritten to CANCELLED");
 
         // 3. Repeated cancel on a CANCELLED run
         String cancelledRunId = UUID.randomUUID().toString();
-        AgentRun cancelledRun = new AgentRun(
+        ChatRun cancelledRun = new ChatRun(
                 cancelledRunId, convId, "req-cancel-dup", "prompt",
                 RunStatus.CANCELLED.name(), "Run cancelled by user", Instant.now(), Instant.now()
         );
@@ -596,7 +609,7 @@ class LocalChatBackendIntegrationTests {
         assertTrue(node2.path("cancelled").asBoolean());
 
         // DB state remains CANCELLED
-        AgentRun after2 = agentRunRepository.findById(cancelledRunId).orElseThrow();
+        ChatRun after2 = chatRunRepository.findById(cancelledRunId).orElseThrow();
         assertEquals(RunStatus.CANCELLED.name(), after2.status());
     }
 
@@ -705,7 +718,7 @@ class LocalChatBackendIntegrationTests {
         assertTrue("run.completed".equals(finalEvent) || "run.cancelled".equals(finalEvent));
 
         // DB status must match terminal event exactly
-        AgentRun finalRun = agentRunRepository.findById(runId).orElseThrow();
+        ChatRun finalRun = chatRunRepository.findById(runId).orElseThrow();
         if ("run.completed".equals(finalEvent)) {
             assertEquals(RunStatus.COMPLETED.name(), finalRun.status());
             // Session must have exactly 1 pair (2 messages)
@@ -813,7 +826,7 @@ class LocalChatBackendIntegrationTests {
         assertEquals(1, terminalEvents.size(), "Must receive exactly 1 terminal event before EOF");
         assertEquals("run.cancelled", terminalEvents.get(0));
 
-        AgentRun run = agentRunRepository.findById(runId).orElseThrow();
+        ChatRun run = chatRunRepository.findById(runId).orElseThrow();
         assertEquals(RunStatus.CANCELLED.name(), run.status(), "Cancelled run must not be overwritten by late model completion");
 
         // Verify Session has 0 messages
@@ -890,7 +903,7 @@ class LocalChatBackendIntegrationTests {
         assertEquals(1, terminalEvents.size(), "Must receive exactly 1 terminal event before EOF");
         assertEquals("run.completed", terminalEvents.get(0));
 
-        AgentRun run = agentRunRepository.findById(runId).orElseThrow();
+        ChatRun run = chatRunRepository.findById(runId).orElseThrow();
         assertEquals(RunStatus.COMPLETED.name(), run.status());
 
         // 2. Late cancel arrives afterwards -> must NOT overwrite DB status
@@ -921,7 +934,7 @@ class LocalChatBackendIntegrationTests {
         String convId = createTestConversation("Orphan Conv");
         String orphanRunId = UUID.randomUUID().toString();
 
-        AgentRun orphan = new AgentRun(
+        ChatRun orphan = new ChatRun(
                 orphanRunId, convId, "req-orphan", "prompt",
                 RunStatus.RUNNING.name(), null, Instant.now(), Instant.now()
         );
@@ -930,7 +943,7 @@ class LocalChatBackendIntegrationTests {
         // Trigger DatabaseInitializer simulation of server restart
         databaseInitializer.run(null);
 
-        AgentRun recovered = agentRunRepository.findById(orphanRunId).orElseThrow();
+        ChatRun recovered = chatRunRepository.findById(orphanRunId).orElseThrow();
         assertEquals(RunStatus.FAILED.name(), recovered.status());
         assertEquals("SYSTEM_RESTART_ORPHAN", recovered.errorMessage());
 
@@ -1189,7 +1202,7 @@ class LocalChatBackendIntegrationTests {
         assertEquals("Concurrent dedup message", jsonNode.path("promptText").asText());
 
         // Database assertions: exactly 1 run, 1 USER message, 1 ASSISTANT message
-        List<AgentRun> runs = agentRunRepository.findByConversationIdWithPaging(convId, 10, 0);
+        List<ChatRun> runs = chatRunRepository.findByConversationIdWithPaging(convId, 10, 0);
         assertEquals(1, runs.size(), "DB must contain exactly 1 run for this conversation");
         assertEquals(clientReqId, runs.get(0).clientRequestId());
 
@@ -1287,7 +1300,7 @@ class LocalChatBackendIntegrationTests {
         assertEquals(conflictJson.path("runId").asText(), sseResult.runId(), "409 runId must match winning runId");
 
         // DB assertions: exactly 1 run in DB, exactly 1 USER message, model subscribed exactly once
-        List<AgentRun> runs = agentRunRepository.findByConversationIdWithPaging(convId, 10, 0);
+        List<ChatRun> runs = chatRunRepository.findByConversationIdWithPaging(convId, 10, 0);
         assertEquals(1, runs.size(), "DB must contain exactly 1 run for this conversation");
         assertEquals(clientReqId, runs.get(0).clientRequestId());
 
@@ -1418,9 +1431,9 @@ class LocalChatBackendIntegrationTests {
 
         // Semantic await: observe transition to CANCELLED in DB up to 5 seconds without fixed sleep
         long deadline = System.currentTimeMillis() + 5000;
-        AgentRun run = null;
+        ChatRun run = null;
         while (System.currentTimeMillis() < deadline) {
-            var opt = agentRunRepository.findById(runId);
+            var opt = chatRunRepository.findById(runId);
             if (opt.isPresent() && RunStatus.CANCELLED.name().equals(opt.get().status())) {
                 run = opt.get();
                 break;
@@ -1486,7 +1499,7 @@ class LocalChatBackendIntegrationTests {
         // DB status must be FAILED
         String runId = result.runId();
         assertNotNull(runId);
-        AgentRun run = agentRunRepository.findById(runId).orElseThrow();
+        ChatRun run = chatRunRepository.findById(runId).orElseThrow();
         assertEquals(RunStatus.FAILED.name(), run.status());
         assertTrue(run.errorMessage().toLowerCase().contains("timeout"));
 
@@ -1599,7 +1612,7 @@ class LocalChatBackendIntegrationTests {
         // DB state: status FAILED, assistant message is unique, marked interrupted, ID matches event, content matches
         String runId = result.runId();
         assertNotNull(runId);
-        AgentRun run = agentRunRepository.findById(runId).orElseThrow();
+        ChatRun run = chatRunRepository.findById(runId).orElseThrow();
         assertEquals(RunStatus.FAILED.name(), run.status());
 
         List<Message> msgs = messageRepository.findByRunId(runId);
@@ -1683,7 +1696,7 @@ class LocalChatBackendIntegrationTests {
         // DB state: status FAILED, assistant message is unique, interrupted, ID matches event, content matches
         String runId = result.runId();
         assertNotNull(runId);
-        AgentRun run = agentRunRepository.findById(runId).orElseThrow();
+        ChatRun run = chatRunRepository.findById(runId).orElseThrow();
         assertEquals(RunStatus.FAILED.name(), run.status());
 
         List<Message> msgs = messageRepository.findByRunId(runId);
@@ -1868,5 +1881,336 @@ class LocalChatBackendIntegrationTests {
         assertEquals(409, resp6.statusCode());
         JsonNode json6 = objectMapper.readTree(resp6.body());
         assertEquals("Conversation not found or access denied", json6.path("error").asText());
+    }
+
+    @Test
+    void regression_blockingModelSubscriptionDoesNotBlockMvc_allowsImmediateSseAndCancel() throws Exception {
+        String convId = createTestConversation("Blocking Provider Regression Conv");
+
+        CountDownLatch blockLatch = new CountDownLatch(1);
+        CountDownLatch enteredLatch = new CountDownLatch(1);
+        CountDownLatch disposedLatch = new CountDownLatch(1);
+
+        controlledChatModel.setBlockingIteratorMode(blockLatch, enteredLatch, disposedLatch);
+
+        String clientRequestId = "req-regress-blocking-" + UUID.randomUUID();
+        String payload = objectMapper.writeValueAsString(Map.of(
+                "clientRequestId", clientRequestId,
+                "message", "Test prompt for blocking provider regression"
+        ));
+
+        HttpRequest startReq = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(payload))
+                .build();
+
+        AtomicReference<String> activeRunId = new AtomicReference<>();
+        AtomicReference<String> terminalEvent = new AtomicReference<>();
+        java.util.concurrent.atomic.AtomicInteger terminalCount = new java.util.concurrent.atomic.AtomicInteger(0);
+        CountDownLatch startedReceivedLatch = new CountDownLatch(1);
+        CountDownLatch streamClosedLatch = new CountDownLatch(1);
+
+        // Connect via SSE in background thread
+        CompletableFuture<Void> sseFuture = CompletableFuture.runAsync(() -> {
+            try {
+                HttpResponse<InputStream> resp = httpClient.send(startReq, HttpResponse.BodyHandlers.ofInputStream());
+                assertEquals(200, resp.statusCode());
+                assertTrue(resp.headers().firstValue("Content-Type").orElse("").contains("text/event-stream"));
+
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(resp.body(), StandardCharsets.UTF_8))) {
+                    String line;
+                    String currentEvent = null;
+                    while ((line = reader.readLine()) != null) {
+                        if (line.startsWith("event:")) {
+                            currentEvent = line.substring(6).trim();
+                        } else if (line.startsWith("data:")) {
+                            String data = line.substring(5).trim();
+                            if ("run.started".equals(currentEvent)) {
+                                JsonNode node = objectMapper.readTree(data);
+                                activeRunId.set(node.path("runId").asText());
+                                startedReceivedLatch.countDown();
+                            } else if ("run.cancelled".equals(currentEvent) || "run.completed".equals(currentEvent) || "run.failed".equals(currentEvent)) {
+                                terminalCount.incrementAndGet();
+                                terminalEvent.set(currentEvent);
+                            }
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                // Do not swallow unknown read exceptions: only expected stream closure (IOException / InterruptedException)
+                // is acceptable; any unexpected error is rethrown to fail sseFuture.get() deterministically.
+                if (!(e instanceof java.io.IOException) && !(e instanceof InterruptedException)) {
+                    throw new RuntimeException("Unexpected SSE reading exception", e);
+                }
+            } finally {
+                streamClosedLatch.countDown();
+            }
+        });
+
+        try {
+            // 1. Verify model entered blocking iterator on boundedElastic thread
+            assertTrue(enteredLatch.await(5, TimeUnit.SECONDS), "Model should have entered blocking iterator on boundedElastic thread");
+
+            // 2. Server MUST return HTTP 200 and seq 1 run.started WHILE model is STILL blocked on blockLatch
+            assertTrue(startedReceivedLatch.await(5, TimeUnit.SECONDS), "SSE run.started must arrive at client while provider is still blocked");
+            String runId = activeRunId.get();
+            assertNotNull(runId, "Run ID must be present in run.started event");
+
+            // Model is STILL blocked (blockLatch is not released!)
+            assertEquals(1, blockLatch.getCount(), "blockLatch must still be held (model not released)");
+
+            // 3. Issue HTTP cancel while model is blocked
+            HttpRequest cancelReq = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/api/runs/" + runId + "/cancel"))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.noBody())
+                    .build();
+
+            HttpResponse<String> cancelResp = httpClient.send(cancelReq, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, cancelResp.statusCode());
+            JsonNode cancelJson = objectMapper.readTree(cancelResp.body());
+            assertEquals(runId, cancelJson.path("runId").asText());
+            assertEquals("CANCELLED", cancelJson.path("status").asText());
+            assertTrue(cancelJson.path("cancelled").asBoolean());
+
+            // 4. Verify upstream was disposed/cancelled
+            assertTrue(disposedLatch.await(5, TimeUnit.SECONDS), "Upstream blocking stream must be disposed on cancel");
+
+            // 5. Verify SSE stream receives run.cancelled terminal event and closes cleanly
+            assertTrue(streamClosedLatch.await(5, TimeUnit.SECONDS), "SSE stream must close cleanly after cancel");
+            sseFuture.get(5, TimeUnit.SECONDS); // Bounded check on future before finally to ensure no unhandled exceptions
+            assertEquals(1, terminalCount.get(), "Terminal event count must be exactly 1");
+            assertEquals("run.cancelled", terminalEvent.get(), "Terminal event on SSE must be run.cancelled");
+
+            // 6. DB authoritative state
+            ChatRun runInDb = chatRunRepository.findById(runId).orElseThrow();
+            assertEquals("CANCELLED", runInDb.status());
+
+            List<Message> msgs = messageRepository.findByRunId(runId);
+            Optional<Message> cancelledMsg = msgs.stream().filter(m -> "ASSISTANT".equalsIgnoreCase(m.role())).findFirst();
+            if (cancelledMsg.isPresent()) {
+                assertTrue(cancelledMsg.get().interrupted());
+            }
+        } finally {
+            // Ensure latch is always released so background threads don't hang if assertions fail
+            blockLatch.countDown();
+            sseFuture.cancel(true);
+        }
+    }
+
+    @Test
+    void test_CompositeForeignKey_EnforcesConversationIntegrity() throws Exception {
+        String conv1 = createTestConversation("Conv 1");
+        String conv2 = createTestConversation("Conv 2");
+        String runId = UUID.randomUUID().toString();
+        Instant now = Instant.now();
+
+        // 1. Insert chat_run in conv1
+        ChatRun run = new ChatRun(runId, conv1, "req-cfk", "hello", RunStatus.RUNNING.name(), null, now, now);
+        jdbcAggregateTemplate.insert(run);
+
+        // 2. Inserting message with conv2 (mismatched conversation_id) must fail composite FK fk_msg_conv_run
+        Message mismatchedMsg = new Message(UUID.randomUUID().toString(), conv2, runId, "USER", "mismatched", false, now);
+        assertThrows(org.springframework.dao.DataIntegrityViolationException.class, () -> {
+            jdbcAggregateTemplate.insert(mismatchedMsg);
+        }, "Inserting message with mismatched conversation_id and run_id must violate composite FK constraint");
+
+        // 3. Inserting message with conv1 (matching) succeeds
+        Message matchedMsg = new Message(UUID.randomUUID().toString(), conv1, runId, "USER", "matched", false, now);
+        assertDoesNotThrow(() -> jdbcAggregateTemplate.insert(matchedMsg));
+    }
+
+    @Test
+    void test_ConversationUpdatedAt_UpdatedOnAppendMessage_ReordersConversations() throws Exception {
+        // 1. Create two conversations: conv1 and conv2
+        String conv1 = createTestConversation("Old Conv 1");
+        String conv2 = createTestConversation("New Conv 2");
+
+        // 2. Set explicit timestamp fixtures: conv1 = 2 hours ago, conv2 = 1 hour ago
+        Instant tConv1 = Instant.now().minus(Duration.ofHours(2));
+        Instant tConv2 = Instant.now().minus(Duration.ofHours(1));
+        jdbcTemplate.update("UPDATE conversation SET updated_at = ? WHERE id = ?", java.sql.Timestamp.from(tConv1), conv1);
+        jdbcTemplate.update("UPDATE conversation SET updated_at = ? WHERE id = ?", java.sql.Timestamp.from(tConv2), conv2);
+
+        // Helper lambda to fetch all conversation IDs in order via bounded GraphQL pagination
+        java.util.function.Supplier<List<String>> fetchConversationIdsInOrder = () -> {
+            List<String> orderedIds = new ArrayList<>();
+            int offset = 0;
+            int limit = 20;
+            while (offset < 200) { // bounded pagination
+                String query = String.format("{\"query\":\"query { conversations(limit: %d, offset: %d) { id } }\"}", limit, offset);
+                try {
+                    HttpRequest req = HttpRequest.newBuilder()
+                            .uri(URI.create(baseUrl + "/graphql"))
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(query))
+                            .build();
+                    HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+                    JsonNode listNode = objectMapper.readTree(resp.body()).path("data").path("conversations");
+                    if (!listNode.isArray() || listNode.isEmpty()) {
+                        break;
+                    }
+                    for (JsonNode n : listNode) {
+                        orderedIds.add(n.path("id").asText());
+                    }
+                    if (listNode.size() < limit) {
+                        break;
+                    }
+                    offset += limit;
+                } catch (Exception ex) {
+                    throw new RuntimeException(ex);
+                }
+            }
+            return orderedIds;
+        };
+
+        // 3. Verify initial GraphQL ordering: conv2 (1h ago) before conv1 (2h ago)
+        List<String> allBefore = fetchConversationIdsInOrder.get();
+        int idxConv1Before = allBefore.indexOf(conv1);
+        int idxConv2Before = allBefore.indexOf(conv2);
+        assertTrue(idxConv1Before >= 0 && idxConv2Before >= 0, "Both conversations must be reachable via GraphQL pagination");
+        assertTrue(idxConv2Before < idxConv1Before, "Initially, conv2 must appear before conv1");
+
+        // 4. Send message to conv1 (the older conversation)
+        String runId = UUID.randomUUID().toString();
+        Instant now = Instant.now();
+        ChatRun run = new ChatRun(runId, conv1, "req-touch-order", "Order message", RunStatus.RUNNING.name(), null, now, now);
+        jdbcAggregateTemplate.insert(run);
+        conversationOperations.appendMessage(conv1, "USER", "Order message", runId, false);
+
+        // 5. Query GraphQL conversations again
+        List<String> allAfter = fetchConversationIdsInOrder.get();
+        int idxConv1After = allAfter.indexOf(conv1);
+        int idxConv2After = allAfter.indexOf(conv2);
+        assertTrue(idxConv1After < idxConv2After, "After new message on conv1, conv1 must be reordered before conv2");
+
+        // 6. Verify non-target conversation conv2 timestamp is strictly unchanged
+        Instant conv2UpdatedAfter = conversationRepository.findById(conv2).orElseThrow().updatedAt();
+        assertEquals(tConv2.toEpochMilli(), conv2UpdatedAfter.toEpochMilli(),
+                "Non-target conversation updated_at must remain strictly unchanged");
+    }
+
+    @Test
+    void test_DatabaseInitializer_NumericSorting_WithRealPostgresDDL() throws Exception {
+        // Clean up test tables if exist from previous run
+        jdbcTemplate.execute("DROP TABLE IF EXISTS test_child CASCADE;");
+        jdbcTemplate.execute("DROP TABLE IF EXISTS test_parent CASCADE;");
+        jdbcTemplate.execute("DROP TABLE IF EXISTS test_schema_version CASCADE;");
+
+        // Execute migrations against controlled test resources (V2__test_parent.sql and V10__test_child.sql)
+        // If alphabetical sorting was used, V10 would execute before V2 and fail with FK target missing error!
+        int applied = databaseInitializer.applyMigrations("classpath:db/test-migration/*.sql", "test_schema_version");
+        assertEquals(2, applied, "Both V2 and V10 migrations must be applied successfully in numeric order");
+
+        // Verify ledger recorded both scripts
+        List<String> ledger = jdbcTemplate.query(
+                "SELECT script_name FROM test_schema_version",
+                (rs, rowNum) -> rs.getString("script_name")
+        );
+        assertEquals(2, ledger.size());
+        assertTrue(ledger.containsAll(List.of("V2__test_parent.sql", "V10__test_child.sql")),
+                "Ledger must record both migrations");
+
+        // Verify test_child exists and references test_parent by inserting a row
+        jdbcTemplate.execute("INSERT INTO test_parent (id) VALUES (1)");
+        assertDoesNotThrow(() -> jdbcTemplate.execute("INSERT INTO test_child (id, parent_id) VALUES (10, 1)"));
+
+        // Running a second time must be completely idempotent (0 applied)
+        int repeatApplied = databaseInitializer.applyMigrations("classpath:db/test-migration/*.sql", "test_schema_version");
+        assertEquals(0, repeatApplied, "Re-running migrations must be idempotent and apply 0 scripts");
+
+        // Clean up
+        jdbcTemplate.execute("DROP TABLE IF EXISTS test_child CASCADE;");
+        jdbcTemplate.execute("DROP TABLE IF EXISTS test_parent CASCADE;");
+        jdbcTemplate.execute("DROP TABLE IF EXISTS test_schema_version CASCADE;");
+    }
+
+    @Test
+    void test_DatabaseCatalogComments_100PercentCoverageAcross8Tables() {
+        List<String> targetTables = List.of(
+                "schema_version", "bot", "conversation", "chat_run", "message",
+                "ai_session", "ai_session_index", "ai_session_event"
+        );
+
+        for (String table : targetTables) {
+            // Verify table comment strictly in public schema
+            Integer tableCommentCount = jdbcTemplate.queryForObject("""
+                SELECT count(*)
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
+                WHERE n.nspname = 'public' AND c.relname = ? AND length(trim(d.description)) > 0
+            """, Integer.class, table);
+            assertNotNull(tableCommentCount);
+            assertEquals(1, tableCommentCount, "Table " + table + " must have a non-empty comment in pg_catalog (public schema)");
+
+            // Verify all columns have non-empty comments strictly in public schema
+            Integer missingColComments = jdbcTemplate.queryForObject("""
+                SELECT count(*)
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                JOIN pg_attribute a ON a.attrelid = c.oid
+                LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = a.attnum
+                WHERE n.nspname = 'public'
+                  AND c.relname = ?
+                  AND a.attnum > 0
+                  AND NOT a.attisdropped
+                  AND (d.description IS NULL OR length(trim(d.description)) = 0)
+            """, Integer.class, table);
+            assertNotNull(missingColComments);
+            assertEquals(0, missingColComments, "Table " + table + " has columns without comments in pg_catalog (public schema)");
+        }
+    }
+
+    @Test
+    void test_LocalDataSeedInitializer_Idempotent_And_SessionTurnPair() {
+        var localDataSeedInitializer = new io.github.samzhu.bot.bootstrap.LocalDataSeedInitializer(
+                sessionService, jdbcTemplate, transactionTemplate
+        );
+
+        // Run seed initializer
+        localDataSeedInitializer.run(null);
+
+        // 1. Verify 3 conversations exist
+        var completedConv = conversationRepository.findById("seed-conv-completed-01").orElseThrow();
+        var failedConv = conversationRepository.findById("seed-conv-failed-01").orElseThrow();
+        var cancelledConv = conversationRepository.findById("seed-conv-cancelled-01").orElseThrow();
+
+        // 2. Verify runs and statuses
+        var completedRun = chatRunRepository.findById("seed-run-completed-01").orElseThrow();
+        assertEquals("COMPLETED", completedRun.status());
+        var failedRun = chatRunRepository.findById("seed-run-failed-01").orElseThrow();
+        assertEquals("FAILED", failedRun.status());
+        var cancelledRun = chatRunRepository.findById("seed-run-cancelled-01").orElseThrow();
+        assertEquals("CANCELLED", cancelledRun.status());
+
+        // 3. Verify Messages & Interrupted flags
+        var msgsCancelled = messageRepository.findByRunId("seed-run-cancelled-01");
+        assertTrue(msgsCancelled.stream().anyMatch(m -> "ASSISTANT".equals(m.role()) && m.interrupted()),
+                "Cancelled assistant message must be marked interrupted = true");
+
+        var msgsFailed = messageRepository.findByRunId("seed-run-failed-01");
+        assertTrue(msgsFailed.stream().anyMatch(m -> "ASSISTANT".equals(m.role()) && m.interrupted()),
+                "Failed assistant partial message must be marked interrupted = true");
+
+        var msgsCompleted = messageRepository.findByRunId("seed-run-completed-01");
+        assertTrue(msgsCompleted.stream().anyMatch(m -> "ASSISTANT".equals(m.role()) && !m.interrupted()),
+                "Completed assistant message must have interrupted = false");
+
+        // 4. Verify Spring AI Session Memory Turn Pair:
+        // Completed conversation has turn pair in SessionService
+        var completedActive = sessionService.getActiveMessages("seed-conv-completed-01");
+        assertNotNull(completedActive);
+        assertEquals(2, completedActive.size(), "Completed seed conv must have exactly 1 turn pair (2 messages) in session memory");
+
+        // Failed and cancelled have 0 active messages in session memory
+        var failedActive = sessionService.getActiveMessages("seed-conv-failed-01");
+        assertTrue(failedActive == null || failedActive.isEmpty(), "Failed seed conv must have 0 session messages");
+        var cancelledActive = sessionService.getActiveMessages("seed-conv-cancelled-01");
+        assertTrue(cancelledActive == null || cancelledActive.isEmpty(), "Cancelled seed conv must have 0 session messages");
+
+        // 5. Test re-entrancy / idempotence: running second time does not throw or duplicate
+        assertDoesNotThrow(() -> localDataSeedInitializer.run(null));
     }
 }

@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Set;
 
 @Component
+@org.springframework.core.annotation.Order(10)
 public class DatabaseInitializer implements ApplicationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(DatabaseInitializer.class);
@@ -34,42 +35,11 @@ public class DatabaseInitializer implements ApplicationRunner {
     public void run(ApplicationArguments args) throws Exception {
         log.info("Starting schema initialization and orphan recovery...");
 
-        // 1. Ensure schema_version table exists
-        jdbcTemplate.execute("""
-            CREATE TABLE IF NOT EXISTS schema_version (
-                script_name VARCHAR(255) PRIMARY KEY,
-                executed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-        """);
+        applyMigrations("classpath:db/migration/*.sql", "schema_version");
 
-        // 2. Query executed scripts
-        List<String> executed = jdbcTemplate.query(
-            "SELECT script_name FROM schema_version",
-            (rs, rowNum) -> rs.getString("script_name")
-        );
-        Set<String> executedSet = new HashSet<>(executed);
-
-        // 3. Scan classpath migration resources
-        PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
-        Resource[] resources = resolver.getResources("classpath:db/migration/*.sql");
-
-        Arrays.sort(resources, Comparator.comparing(Resource::getFilename));
-
-        for (Resource resource : resources) {
-            String filename = resource.getFilename();
-            if (filename != null && !executedSet.contains(filename)) {
-                log.info("Applying SQL migration: {}", filename);
-                try (InputStream in = resource.getInputStream()) {
-                    String sql = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-                    jdbcTemplate.execute(sql);
-                }
-                jdbcTemplate.update("INSERT INTO schema_version (script_name) VALUES (?)", filename);
-            }
-        }
-
-        // 4. Server restart recovery: transition lingering PENDING/RUNNING runs to FAILED
+        // Server restart recovery: transition lingering PENDING/RUNNING runs to FAILED
         int recovered = jdbcTemplate.update("""
-            UPDATE agent_run
+            UPDATE chat_run
             SET status = 'FAILED',
                 error_message = 'SYSTEM_RESTART_ORPHAN',
                 updated_at = CURRENT_TIMESTAMP
@@ -81,5 +51,61 @@ public class DatabaseInitializer implements ApplicationRunner {
         } else {
             log.info("No orphaned runs detected on startup.");
         }
+    }
+
+    public int applyMigrations(String locationPattern, String versionTable) throws Exception {
+        jdbcTemplate.execute(String.format("""
+            CREATE TABLE IF NOT EXISTS %s (
+                script_name VARCHAR(255) PRIMARY KEY,
+                executed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+        """, versionTable));
+
+        List<String> executed = jdbcTemplate.query(
+            "SELECT script_name FROM " + versionTable,
+            (rs, rowNum) -> rs.getString("script_name")
+        );
+        Set<String> executedSet = new HashSet<>(executed);
+
+        PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
+        Resource[] resources = resolver.getResources(locationPattern);
+        sortResources(resources);
+
+        int applied = 0;
+        for (Resource resource : resources) {
+            String filename = resource.getFilename();
+            if (filename != null && !executedSet.contains(filename)) {
+                log.info("Applying SQL migration: {}", filename);
+                try (InputStream in = resource.getInputStream()) {
+                    String sql = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+                    jdbcTemplate.execute(sql);
+                }
+                jdbcTemplate.update("INSERT INTO " + versionTable + " (script_name) VALUES (?)", filename);
+                applied++;
+            }
+        }
+        return applied;
+    }
+
+    private static void sortResources(Resource[] resources) {
+        Arrays.sort(resources, (r1, r2) -> {
+            int v1 = extractNumericVersion(r1.getFilename());
+            int v2 = extractNumericVersion(r2.getFilename());
+            if (v1 != v2) {
+                return Integer.compare(v1, v2);
+            }
+            return String.valueOf(r1.getFilename()).compareTo(String.valueOf(r2.getFilename()));
+        });
+    }
+
+    private static int extractNumericVersion(String filename) {
+        if (filename == null) return 0;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("^V(\\d+)__").matcher(filename);
+        if (m.find()) {
+            try {
+                return Integer.parseInt(m.group(1));
+            } catch (NumberFormatException ignored) {}
+        }
+        return 0;
     }
 }

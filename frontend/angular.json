@@ -25,7 +25,6 @@
               }
             ],
             "styles": [
-              "node_modules/@copilotkit/angular/dist/styles.css",
               "src/styles.css"
             ]
           },

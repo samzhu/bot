@@ -33,6 +33,31 @@ async function createConversationViaBackend(title) {
   return json.data.createConversation.id;
 }
 
+async function queryConversationGraphQL(convId) {
+  const res = await fetch(`${BACKEND_URL}/graphql`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      query: `query CheckConv($id: ID!) {
+        conversation(id: $id) {
+          id
+          title
+          messages(limit: 50) {
+            id
+            role
+            content
+            interrupted
+            createdAt
+          }
+        }
+      }`,
+      variables: { id: convId }
+    })
+  });
+  const json = await res.json();
+  return json.data?.conversation;
+}
+
 async function fetchFirst20Conversations() {
   const res = await fetch(`${BACKEND_URL}/graphql`, {
     method: 'POST',
@@ -90,7 +115,7 @@ async function run() {
     // -------------------------------------------------------------
     console.log('\n=== Testing IME Composition Guard & Real Keyboard Shift+Enter ===');
     await page.goto(BASE_URL, { waitUntil: 'networkidle0' });
-    await page.waitForSelector('.composer-textarea');
+    await page.waitForSelector('textarea');
 
     // Establish fresh conversation
     await page.waitForFunction(() => {
@@ -102,7 +127,7 @@ async function run() {
     await page.waitForFunction(
       (prev) => {
         const cur = localStorage.getItem('bot_active_conversation_id');
-        const rows = document.querySelectorAll('.message-row');
+        const rows = document.querySelectorAll('[data-message-role]');
         return Boolean(cur && cur !== prev && rows.length === 0);
       },
       { timeout: 10000 },
@@ -111,9 +136,9 @@ async function run() {
 
     // 1. Dispatch IME compositionstart and keydown Enter with isComposing: true
     console.log('1. Testing IME Composition Guard...');
-    await page.focus('.composer-textarea');
+    await page.focus('textarea');
     await page.evaluate(() => {
-      const textarea = document.querySelector('.composer-textarea');
+      const textarea = document.querySelector('textarea');
       textarea.value = '測試輸入法候選詞';
       textarea.dispatchEvent(new Event('input', { bubbles: true }));
       textarea.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
@@ -129,7 +154,7 @@ async function run() {
       textarea.dispatchEvent(enterEvt);
     });
 
-    const imeSubmitted = await page.evaluate(() => document.querySelectorAll('.message-row').length);
+    const imeSubmitted = await page.evaluate(() => document.querySelectorAll('[data-message-role]').length);
     console.log('Message count after IME Enter (must be 0):', imeSubmitted);
     if (imeSubmitted !== 0) {
       throw new Error(`IME Guard failed: message submitted during active composition (rows=${imeSubmitted})`);
@@ -137,7 +162,7 @@ async function run() {
 
     // End IME composition
     await page.evaluate(() => {
-      const textarea = document.querySelector('.composer-textarea');
+      const textarea = document.querySelector('textarea');
       textarea.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
       textarea.value = '';
       textarea.dispatchEvent(new Event('input', { bubbles: true }));
@@ -145,20 +170,20 @@ async function run() {
 
     // 2. Real keyboard Shift+Enter: page.keyboard.down('Shift') / press('Enter') / up('Shift')
     console.log('2. Testing Real Keyboard Shift+Enter (must insert actual newline without submitting)...');
-    await page.focus('.composer-textarea');
+    await page.focus('textarea');
     await page.keyboard.type('Line 1 of multiline text');
     await page.keyboard.down('Shift');
     await page.keyboard.press('Enter');
     await page.keyboard.up('Shift');
     await page.keyboard.type('Line 2 of multiline text');
 
-    const textareaValue = await page.$eval('.composer-textarea', el => el.value);
+    const textareaValue = await page.$eval('textarea', el => el.value);
     console.log('Textarea value after Shift+Enter:', JSON.stringify(textareaValue));
     if (!textareaValue.includes('\n') || textareaValue !== 'Line 1 of multiline text\nLine 2 of multiline text') {
       throw new Error(`Shift+Enter failed to insert real newline: got ${JSON.stringify(textareaValue)}`);
     }
 
-    const shiftSubmitted = await page.evaluate(() => document.querySelectorAll('.message-row').length);
+    const shiftSubmitted = await page.evaluate(() => document.querySelectorAll('[data-message-role]').length);
     console.log('Message count after Shift+Enter (must be 0):', shiftSubmitted);
     if (shiftSubmitted !== 0) {
       throw new Error(`Shift+Enter submitted a message unexpectedly (rows=${shiftSubmitted})`);
@@ -166,7 +191,7 @@ async function run() {
 
     // Clear textarea for subsequent steps
     await page.evaluate(() => {
-      const textarea = document.querySelector('.composer-textarea');
+      const textarea = document.querySelector('textarea');
       textarea.value = '';
       textarea.dispatchEvent(new Event('input', { bubbles: true }));
     });
@@ -176,24 +201,23 @@ async function run() {
     // -------------------------------------------------------------
     console.log('\n=== Testing Turn 1: Normal Completed Stream ===');
     const TURN1_TEXT = 'Hello Luna 1: Normal Completion Test';
-    await page.type('.composer-textarea', TURN1_TEXT);
-    await page.click('.send-btn');
+    await page.type('textarea', TURN1_TEXT);
+    await page.click('button[aria-label="Send message"]');
 
     await page.waitForFunction(() => {
-      const sendBtn = document.querySelector('.send-btn');
+      const sendBtn = document.querySelector('button[aria-label="Send message"]');
       const stopBtn = document.querySelector('.stop-btn');
-      const assistant = document.querySelector('.message-row.assistant .assistant-bubble');
+      const assistant = document.querySelector('[data-message-role="assistant"]');
       return Boolean(sendBtn && !stopBtn && assistant && assistant.textContent.includes('mock streaming response'));
     }, { timeout: 15000 });
 
     const turn1Count = await page.evaluate(() => ({
-      user: document.querySelectorAll('.message-row.user').length,
-      assistant: document.querySelectorAll('.message-row.assistant').length,
-      interrupted: document.querySelectorAll('.interrupted-badge').length
+      user: document.querySelectorAll('[data-message-role="user"]').length,
+      assistant: document.querySelectorAll('[data-message-role="assistant"]').length
     }));
     console.log('Turn 1 Counts:', turn1Count);
-    if (turn1Count.user !== 1 || turn1Count.assistant !== 1 || turn1Count.interrupted !== 0) {
-      throw new Error(`Turn 1 assertion failed: expected 1 user, 1 assistant, 0 interrupted; got ${JSON.stringify(turn1Count)}`);
+    if (turn1Count.user !== 1 || turn1Count.assistant !== 1) {
+      throw new Error(`Turn 1 assertion failed: expected 1 user, 1 assistant; got ${JSON.stringify(turn1Count)}`);
     }
 
     await page.screenshot({ path: SCREENSHOTS.turn1 });
@@ -203,13 +227,13 @@ async function run() {
     // PART 3: Turn 2 (Stop Button -> Cooperative Interruption)
     // -------------------------------------------------------------
     console.log('\n=== Testing Turn 2: Stop Button Cooperative Interruption ===');
-    const TURN2_TEXT = 'Hello Luna 2: Stop Generation Interruption Test';
-    await page.type('.composer-textarea', TURN2_TEXT);
-    await page.click('.send-btn');
+    const TURN2_TEXT = 'Hello Luna 2: Stop Generation Interruption Test [DELAY]';
+    await page.type('textarea', TURN2_TEXT);
+    await page.click('button[aria-label="Send message"]');
 
     // Wait for the second assistant message bubble to appear and capture first non-empty delta
     await page.waitForFunction(() => {
-      const assistants = document.querySelectorAll('.message-row.assistant .assistant-bubble');
+      const assistants = document.querySelectorAll('[data-message-role="assistant"]');
       if (assistants.length < 2) return false;
       const text = assistants[1]?.textContent?.trim() || '';
       return text.length > 0;
@@ -229,29 +253,30 @@ async function run() {
       if (stopBtn) stopBtn.click();
     });
 
-    // Wait until stream finishes and Send button is restored
+    // Wait until stream finishes, Send button is restored, and interrupted banner appears
     await page.waitForFunction(() => {
-      const sendBtn = document.querySelector('.send-btn');
+      const sendBtn = document.querySelector('button[aria-label="Send message"]');
       const stopBtn = document.querySelector('.stop-btn');
-      const badge = document.querySelector('.message-row.assistant:nth-of-type(4) .interrupted-badge');
-      return Boolean(sendBtn && !stopBtn && badge);
+      const banner = document.querySelector('[data-testid="last-interrupted-banner"], .recovering-banner');
+      return Boolean(sendBtn && !stopBtn && banner);
     }, { timeout: 15000 });
 
     const turn2State = await page.evaluate(() => {
-      const rows = document.querySelectorAll('.message-row');
-      const turn2AssistantBubble = document.querySelector('.message-row.assistant:nth-of-type(4) .assistant-bubble');
-      const badge = turn2AssistantBubble?.querySelector('.interrupted-badge');
+      const rows = document.querySelectorAll('[data-message-role]');
+      const assistants = document.querySelectorAll('[data-message-role="assistant"]');
+      const turn2Assistant = assistants[1];
+      const banner = document.querySelector('[data-testid="last-interrupted-banner"], .recovering-banner');
       return {
         totalRows: rows.length,
-        assistantText: turn2AssistantBubble?.textContent?.trim() || '',
-        hasBadge: Boolean(badge),
-        badgeText: badge?.textContent?.trim()
+        assistantText: turn2Assistant?.textContent?.trim() || '',
+        hasBadge: Boolean(banner),
+        badgeText: banner?.textContent?.trim()
       };
     });
     console.log('Turn 2 Interrupted State:', turn2State);
 
-    if (!turn2State.hasBadge || turn2State.badgeText !== '[Interrupted]') {
-      throw new Error(`Turn 2 failed to show [Interrupted] badge: ${JSON.stringify(turn2State)}`);
+    if (!turn2State.hasBadge || !turn2State.badgeText.includes('中斷')) {
+      throw new Error(`Turn 2 failed to show Interrupted banner: ${JSON.stringify(turn2State)}`);
     }
     if (!turn2State.assistantText || turn2State.assistantText.length < 5) {
       throw new Error(`Turn 2 partial content missing: '${turn2State.assistantText}'`);
@@ -265,13 +290,13 @@ async function run() {
     // -------------------------------------------------------------
     console.log('\n=== Testing Page Reload Persistence ===');
     await page.reload({ waitUntil: 'networkidle0' });
-    await page.waitForSelector('.message-row.assistant');
+    await page.waitForSelector('[data-message-role="assistant"]');
 
     const reloadedState = await page.evaluate(() => {
-      const userRows = Array.from(document.querySelectorAll('.message-row.user .user-bubble')).map(el => el.textContent?.trim());
-      const assistantRows = Array.from(document.querySelectorAll('.message-row.assistant .assistant-bubble')).map(el => el.textContent?.trim());
-      const badges = Array.from(document.querySelectorAll('.interrupted-badge')).map(el => el.textContent?.trim());
-      return { userRows, assistantRows, badges };
+      const userRows = Array.from(document.querySelectorAll('[data-message-role="user"]')).map(el => el.textContent?.trim());
+      const assistantRows = Array.from(document.querySelectorAll('[data-message-role="assistant"]')).map(el => el.textContent?.trim());
+      const banner = document.querySelector('[data-testid="last-interrupted-banner"], .recovering-banner');
+      return { userRows, assistantRows, bannerText: banner?.textContent?.trim() };
     });
     console.log('Reloaded State:', reloadedState);
 
@@ -281,9 +306,18 @@ async function run() {
     if (reloadedState.userRows[0] !== TURN1_TEXT || reloadedState.userRows[1] !== TURN2_TEXT) {
       throw new Error(`Reloaded user text mismatch: ${JSON.stringify(reloadedState.userRows)}`);
     }
-    if (reloadedState.badges.length !== 1 || reloadedState.badges[0] !== '[Interrupted]') {
-      throw new Error(`Reloaded interrupted badge mismatch: ${JSON.stringify(reloadedState.badges)}`);
+    if (!reloadedState.bannerText || !reloadedState.bannerText.includes('中斷')) {
+      throw new Error(`Reloaded interrupted banner mismatch: ${reloadedState.bannerText}`);
     }
+
+    // Verify GraphQL authoritative interrupted flag
+    const currentConvId = await page.evaluate(() => localStorage.getItem('bot_active_conversation_id'));
+    const convData = await queryConversationGraphQL(currentConvId);
+    const interruptedMsg = convData?.messages?.find(m => m.role.toUpperCase() === 'ASSISTANT' && m.interrupted);
+    if (!interruptedMsg) {
+      throw new Error('Authoritative GraphQL message must have interrupted: true');
+    }
+    console.log('✓ Verified GraphQL authoritative message.interrupted === true');
 
     await page.screenshot({ path: SCREENSHOTS.reloaded });
     console.log('Saved Reloaded screenshot:', SCREENSHOTS.reloaded);
@@ -293,24 +327,25 @@ async function run() {
     // -------------------------------------------------------------
     console.log('\n=== Testing Turn 3 Continuation ===');
     const TURN3_TEXT = 'Hello Luna 3: Multi-turn Post-Interruption Test';
-    await page.type('.composer-textarea', TURN3_TEXT);
-    await page.click('.send-btn');
+    await page.type('textarea', TURN3_TEXT);
+    await page.click('button[aria-label="Send message"]');
 
     await page.waitForFunction(() => {
-      const assistants = document.querySelectorAll('.message-row.assistant .assistant-bubble');
+      const assistants = document.querySelectorAll('[data-message-role="assistant"]');
       if (assistants.length < 3) return false;
       const thirdAssistant = assistants[2]?.textContent || '';
-      const sendBtn = document.querySelector('.send-btn');
-      return Boolean(sendBtn && thirdAssistant.includes('mock streaming response'));
+      const sendBtn = document.querySelector('button[aria-label="Send message"]');
+      const stopBtn = document.querySelector('.stop-btn');
+      const textarea = document.querySelector('textarea');
+      return Boolean(sendBtn && !stopBtn && textarea && !textarea.disabled && thirdAssistant.includes('mock streaming response'));
     }, { timeout: 15000 });
 
     const turn3Counts = await page.evaluate(() => ({
-      userCount: document.querySelectorAll('.message-row.user').length,
-      assistantCount: document.querySelectorAll('.message-row.assistant').length,
-      interruptedCount: document.querySelectorAll('.interrupted-badge').length
+      userCount: document.querySelectorAll('[data-message-role="user"]').length,
+      assistantCount: document.querySelectorAll('[data-message-role="assistant"]').length
     }));
     console.log('Turn 3 Message Counts:', turn3Counts);
-    if (turn3Counts.userCount !== 3 || turn3Counts.assistantCount !== 3 || turn3Counts.interruptedCount !== 1) {
+    if (turn3Counts.userCount !== 3 || turn3Counts.assistantCount !== 3) {
       throw new Error(`Turn 3 message counts mismatch: ${JSON.stringify(turn3Counts)}`);
     }
 
@@ -352,13 +387,13 @@ async function run() {
     // Assert: header title, restored messages, and active conversation match targetConvId
     await page.waitForFunction((expectedTitle) => {
       const headerTitle = document.querySelector('.header-title')?.textContent?.trim();
-      const message = document.querySelector('.message-row.user .user-bubble')?.textContent?.trim();
+      const message = document.querySelector('[data-message-role="user"]')?.textContent?.trim();
       return headerTitle === expectedTitle && message === 'Initial deep message for restoration';
     }, { timeout: 15000 }, targetConvTitle);
 
     const deepRestoredState = await page.evaluate(() => {
       const title = document.querySelector('.header-title')?.textContent?.trim();
-      const userMsg = document.querySelector('.message-row.user .user-bubble')?.textContent?.trim();
+      const userMsg = document.querySelector('[data-message-role="user"]')?.textContent?.trim();
       const activeSidebarItem = document.querySelector('.conversation-item.active')?.textContent?.trim();
       const hasLoadMoreConvBtn = Boolean(document.querySelector('.load-more-conv-btn'));
       return { title, userMsg, activeSidebarItem, hasLoadMoreConvBtn };
@@ -417,7 +452,7 @@ async function run() {
 
     // Initial page loads 20 messages (Seed Turn 02 through Seed Turn 11 = 20 messages; Seed Turn 01 is older)
     await page.waitForFunction(() => {
-      const rows = document.querySelectorAll('.message-row');
+      const rows = document.querySelectorAll('[data-message-role]');
       const loadMoreBtn = document.querySelector('.load-more-btn');
       return rows.length === 20 && Boolean(loadMoreBtn);
     }, { timeout: 15000 });
@@ -427,14 +462,14 @@ async function run() {
     console.log('Sequentially submitting 11 new turns in UI (UI Turn 12 to 22)...');
     for (let i = 12; i <= 22; i++) {
       const uiTurnText = `UI Turn ${i.toString().padStart(2, '0')}`;
-      await page.type('.composer-textarea', uiTurnText);
-      await page.click('.send-btn');
+      await page.type('textarea', uiTurnText);
+      await page.click('button[aria-label="Send message"]');
 
       // Wait for this turn to complete
       await page.waitForFunction((expectedText) => {
-        const userBubbles = Array.from(document.querySelectorAll('.message-row.user .user-bubble'));
+        const userBubbles = Array.from(document.querySelectorAll('[data-message-role="user"]'));
         const lastUser = userBubbles[userBubbles.length - 1]?.textContent?.trim();
-        const sendBtn = document.querySelector('.send-btn');
+        const sendBtn = document.querySelector('button[aria-label="Send message"]');
         const stopBtn = document.querySelector('.stop-btn');
         return Boolean(sendBtn && !stopBtn && lastUser === expectedText);
       }, { timeout: 15000 }, uiTurnText);
@@ -442,7 +477,7 @@ async function run() {
     console.log('Completed submitting 11 new UI turns.');
 
     // Currently rendered: 20 initial + 22 new (11 turns * 2) = 42 messages
-    const postUiCount = await page.evaluate(() => document.querySelectorAll('.message-row').length);
+    const postUiCount = await page.evaluate(() => document.querySelectorAll('[data-message-role]').length);
     console.log(`Rendered message count after 11 UI turns: ${postUiCount} (expected 42)`);
     if (postUiCount !== 42) {
       throw new Error(`Expected 42 messages after 11 UI turns, got ${postUiCount}`);
@@ -460,7 +495,7 @@ async function run() {
 
     // Wait until all 44 messages are mounted and "Load earlier messages" button disappears
     await page.waitForFunction(() => {
-      const rows = document.querySelectorAll('.message-row');
+      const rows = document.querySelectorAll('[data-message-role]');
       const loadMoreBtn = document.querySelector('.load-more-btn');
       return rows.length === 44 && !loadMoreBtn;
     }, { timeout: 15000 });
@@ -474,7 +509,7 @@ async function run() {
       'UI Turn 21',   'UI Turn 22'
     ];
 
-    const actualUserTexts = await page.$$eval('.message-row.user .user-bubble', els =>
+    const actualUserTexts = await page.$$eval('[data-message-role="user"]', els =>
       els.map(el => el.textContent?.trim())
     );
 

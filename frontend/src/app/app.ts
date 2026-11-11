@@ -4,12 +4,10 @@ import {
   computed,
   forwardRef,
   signal,
-  WritableSignal,
-  ElementRef,
-  ViewChild
+  WritableSignal
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { ChatState, CopilotChatView } from '@copilotkit/angular';
+import { ChatState, CopilotChatView, CopilotChatInput } from '@copilotkit/angular';
 import { Message, UserMessage, AssistantMessage } from '@ag-ui/core';
 import { SseStreamParser } from './sse-parser';
 
@@ -54,7 +52,7 @@ export interface PendingRequestInfo {
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [CommonModule, CopilotChatView],
+  imports: [CommonModule, CopilotChatView, CopilotChatInput],
   providers: [
     /*
      * RATIONALE: CopilotChatView expects a ChatState provider in DI hierarchy.
@@ -68,8 +66,6 @@ export interface PendingRequestInfo {
   styleUrl: './app.css'
 })
 export class App extends ChatState implements OnInit {
-  @ViewChild('messagesContainer') private messagesContainer?: ElementRef<HTMLDivElement>;
-
   // ChatState abstract implementations
   readonly inputValue: WritableSignal<string> = signal('');
 
@@ -81,7 +77,6 @@ export class App extends ChatState implements OnInit {
   readonly isStreaming = signal<boolean>(false);
   readonly isCancelling = signal<boolean>(false);
   readonly activeRunId = signal<string | null>(null);
-  readonly copiedMessageId = signal<string | null>(null);
   readonly pendingRequest = signal<PendingRequestInfo | null>(null);
   readonly streamError = signal<string | null>(null);
   readonly isRecovering = signal<boolean>(false);
@@ -119,6 +114,20 @@ export class App extends ChatState implements OnInit {
   readonly currentTitle = computed<string>(() => {
     const conv = this.currentConversation();
     return conv ? conv.title : 'New Conversation';
+  });
+
+  readonly lastMessageInterrupted = computed<boolean>(() => {
+    const msgs = this.messages();
+    if (msgs.length === 0) return false;
+    const last = msgs[msgs.length - 1];
+    return last.role === 'assistant' && !!last.interrupted && !last.failed;
+  });
+
+  readonly lastMessageFailed = computed<boolean>(() => {
+    const msgs = this.messages();
+    if (msgs.length === 0) return false;
+    const last = msgs[msgs.length - 1];
+    return last.role === 'assistant' && !!last.failed;
   });
 
   async ngOnInit(): Promise<void> {
@@ -346,7 +355,6 @@ export class App extends ChatState implements OnInit {
           }
         });
         this.messages.set(chronological);
-        this.scrollToBottom();
       }
     } catch (err) {
       console.error('Failed to select conversation:', err);
@@ -477,6 +485,8 @@ export class App extends ChatState implements OnInit {
         this.hasMoreMessages.set(false);
         this.streamError.set(null);
         this.isRecovering.set(false);
+        this.isCancelling.set(false);
+        this.pendingRequest.set(null);
       }
     } catch (err) {
       console.error('Failed to create conversation:', err);
@@ -550,7 +560,6 @@ export class App extends ChatState implements OnInit {
     this.streamError.set(null);
 
     this.isStreaming.set(true);
-    this.scrollToBottom();
 
     try {
       /*
@@ -625,7 +634,6 @@ export class App extends ChatState implements OnInit {
     } finally {
       if (this.currentConversationId() === convId) {
         this.isStreaming.set(false);
-        this.scrollToBottom();
       }
     }
   }
@@ -925,7 +933,6 @@ export class App extends ChatState implements OnInit {
       if (isTerminal) {
         this.activeRunId.set(null);
       }
-      this.scrollToBottom();
     }
 
     return {
@@ -989,7 +996,6 @@ export class App extends ChatState implements OnInit {
           return m;
         })
       );
-      this.scrollToBottom();
     } else if (eventType === 'run.completed') {
       const messageId = data.messageId;
       this.messages.update(prev =>
@@ -1037,54 +1043,5 @@ export class App extends ChatState implements OnInit {
         this.streamError.set(data.reason ? `生成失敗: ${data.reason}` : '生成失敗');
       }
     }
-  }
-
-  isFailed(msg: Message): boolean {
-    return !!(msg as any).failed;
-  }
-
-  // --- UI Helpers ---
-
-  isInterrupted(msg: Message): boolean {
-    return !!(msg as any).interrupted;
-  }
-
-  copyMessage(content: string | any, msgId: string): void {
-    const text = typeof content === 'string' ? content : JSON.stringify(content);
-    navigator.clipboard.writeText(text);
-    this.copiedMessageId.set(msgId);
-    setTimeout(() => {
-      if (this.copiedMessageId() === msgId) {
-        this.copiedMessageId.set(null);
-      }
-    }, 2000);
-  }
-
-  onKeydown(event: KeyboardEvent): void {
-    /*
-     * RATIONALE: IME Composition Guard.
-     * When user is composing Chinese/Japanese IME candidates, isComposing is true
-     * and keyCode is 229; pressing Enter to select a candidate must NOT submit the input.
-     */
-    if (event.isComposing || event.keyCode === 229) {
-      return;
-    }
-    if (event.key === 'Enter') {
-      if (event.shiftKey) {
-        // Shift + Enter: standard multiline newline
-        return;
-      }
-      event.preventDefault();
-      this.submitInput(this.inputValue());
-    }
-  }
-
-  private scrollToBottom(): void {
-    setTimeout(() => {
-      if (this.messagesContainer) {
-        const el = this.messagesContainer.nativeElement;
-        el.scrollTop = el.scrollHeight;
-      }
-    }, 50);
   }
 }

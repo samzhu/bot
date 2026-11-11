@@ -25,6 +25,20 @@ java {
 	}
 }
 
+sourceSets {
+	localDevelopment {
+		java.srcDirs = ['src/local/java']
+		resources.srcDirs = ['src/local/resources']
+		compileClasspath += sourceSets.main.output + configurations.compileClasspath
+		runtimeClasspath += output + compileClasspath + configurations.runtimeClasspath
+	}
+}
+
+configurations {
+	localDevelopmentImplementation.extendsFrom implementation
+	localDevelopmentRuntimeOnly.extendsFrom runtimeOnly
+}
+
 repositories {
 	mavenCentral()
 }
@@ -92,7 +106,19 @@ dependencies {
 	testImplementation 'org.testcontainers:testcontainers-grafana'
 	testImplementation 'org.testcontainers:testcontainers-junit-jupiter'
 	testImplementation 'org.testcontainers:testcontainers-postgresql'
+	testImplementation sourceSets.localDevelopment.output
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+bootRun {
+	/*
+	 * WHY / ARCHITECTURAL TRADE-OFF:
+	 * Local development seed initializers and demonstration resources are isolated in the
+	 * 'localDevelopment' sourceSet (src/local/java and src/local/resources) so they are
+	 * available exclusively during local bootRun development execution, and are never compiled
+	 * into or packaged within the production bootJar or container image.
+	 */
+	classpath += sourceSets.localDevelopment.output + sourceSets.localDevelopment.runtimeClasspath
 }
 
 dependencyManagement {
