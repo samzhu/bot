@@ -1,27 +1,13 @@
 import puppeteer from 'puppeteer-core';
 import path from 'node:path';
+import { installBrowserGuard, getGuardStats, getVerificationOrigins } from './test/verification-harness.mjs';
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const BASE_URL = 'http://localhost:4200';
-const BACKEND_URL = 'http://localhost:8080';
-
-async function createConversationViaBackend(title) {
-  const res = await fetch(`${BACKEND_URL}/graphql`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      query: `mutation CreateConv($botId: ID!, $title: String) {
-        createConversation(botId: $botId, title: $title) { id title }
-      }`,
-      variables: { botId: 'bot-general', title }
-    })
-  });
-  const json = await res.json();
-  return json.data?.createConversation?.id;
-}
+const { frontendUrl: BASE_URL } = getVerificationOrigins();
+const SEED_CONV_ID = 'seed-conv-completed-01';
 
 async function run() {
-  console.log('--- Starting Real Browser Clipboard Copy Verification ---');
+  console.log('--- Starting Safe Real Browser Clipboard Copy Verification (Zero Paid Model Calls) ---');
   const browser = await puppeteer.launch({
     executablePath: CHROME_PATH,
     headless: true,
@@ -35,7 +21,11 @@ async function run() {
     console.log('[Console]', msg.type(), msg.text());
   });
 
-  // Grant clipboard read & write permissions to page context via CDP
+  // 1. Install Fail-Closed Browser Interception Guard
+  // Guarantees that any accidental prompt dispatch immediately fails closed (0 live model calls)
+  await installBrowserGuard(page, { mode: 'fail-closed' });
+
+  // 2. Grant clipboard read & write permissions to page context via CDP
   const cdp = await page.target().createCDPSession();
   await cdp.send('Browser.grantPermissions', {
     permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'],
@@ -43,48 +33,58 @@ async function run() {
   });
 
   try {
-    const convId = await createConversationViaBackend('Clipboard-Test-Conv');
+    // 3. Navigate to frontend using existing synthetic seed conversation
+    console.log(`Navigating to ${BASE_URL}...`);
     await page.goto(BASE_URL, { waitUntil: 'networkidle0' });
 
+    console.log(`Selecting completed seed conversation: ${SEED_CONV_ID}...`);
     await page.evaluate(id => {
       localStorage.setItem('bot_active_conversation_id', id);
-    }, convId);
+    }, SEED_CONV_ID);
     await page.reload({ waitUntil: 'networkidle0' });
 
-    const promptText = 'Test message for browser clipboard copy verification';
-    await page.waitForSelector('.composer-textarea, textarea');
-    await page.type('.composer-textarea, textarea', promptText);
-    await page.click('.send-btn, button[aria-label="Send message"]');
+    // Wait for the seeded assistant message to mount
+    console.log('Waiting for seeded assistant message...');
+    await page.waitForSelector('.message-row.assistant, [data-message-role="assistant"]', { timeout: 10000 });
 
-    // Wait until assistant completes reply
-    await page.waitForFunction(() => {
-      const assistant = document.querySelector('.message-row.assistant .assistant-bubble span, [data-message-role="assistant"]');
-      const stopBtn = Array.from(document.querySelectorAll('header button, .stop-btn')).find(b => b.textContent.includes('Stop'));
-      return Boolean(assistant && !stopBtn);
-    }, { timeout: 15000 });
-
-    // 1. Verify Assistant Message Copy (Native CopilotKit or Custom)
-    console.log('Testing Assistant Message Copy button...');
-    const assistantCopyBtn = await page.waitForSelector('copilot-chat-assistant-message-copy-button button, .message-row.assistant .copy-btn', { timeout: 5000 });
+    // 4. Verify Assistant Message Copy Button
+    console.log('Testing Assistant Message Copy button on pre-seeded message...');
+    const assistantCopyBtn = await page.waitForSelector(
+      'copilot-chat-assistant-message-copy-button button, .message-row.assistant .copy-btn',
+      { timeout: 5000 }
+    );
     await assistantCopyBtn.click();
     await new Promise(r => setTimeout(r, 500));
 
+    // 5. Read back clipboard text
     const assistantClipboardText = await page.evaluate(() => navigator.clipboard.readText());
     console.log('Read assistant message from clipboard:', JSON.stringify(assistantClipboardText));
     if (!assistantClipboardText || assistantClipboardText.trim().length === 0) {
       throw new Error('Clipboard text is empty after assistant copy click');
     }
 
+    // Verify it contains expected content from seed
+    if (!assistantClipboardText.includes('Spring AI') && !assistantClipboardText.includes('ChatClient')) {
+      throw new Error(`Clipboard text did not match expected seed content: ${assistantClipboardText.substring(0, 50)}...`);
+    }
+
     const screenshotPath = '/tmp/verify-clipboard-passed.png';
     await page.screenshot({ path: screenshotPath });
     console.log('Saved clipboard verification screenshot:', screenshotPath);
 
-    console.log('=== REAL BROWSER CLIPBOARD COPY VERIFICATION PASSED ===');
+    // Assert Guard Statistics: 0 generation calls attempted or dispatched
+    const stats = getGuardStats();
+    if (stats.blockedCalls > 0) {
+      throw new Error(`UNEXPECTED GENERATION: Attempted ${stats.blockedCalls} generation calls during pure clipboard verification!`);
+    }
+
+    console.log('=== REAL BROWSER CLIPBOARD COPY VERIFICATION PASSED (0 MODEL CALLS) ===');
     console.log(JSON.stringify({
       status: 'SUCCESS',
       assistantClipboardMatch: true,
       clipboardLength: assistantClipboardText.length,
-      screenshot: screenshotPath
+      screenshot: screenshotPath,
+      guardStats: stats
     }, null, 2));
 
   } catch (err) {

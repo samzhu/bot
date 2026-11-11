@@ -97,8 +97,8 @@ public class LocalDataSeedInitializer implements ApplicationRunner {
         Instant t1 = t0.plusSeconds(2);
 
         jdbcTemplate.update("""
-            INSERT INTO conversation (id, bot_id, title, user_id, created_at, updated_at)
-            VALUES (?, 'bot-general', '示範：成功問答 (COMPLETED)', ?, ?, ?)
+            INSERT INTO conversation (id, bot_id, title, user_id, pinned, created_at, updated_at)
+            VALUES (?, 'bot-general', '示範：成功問答 (COMPLETED)', ?, TRUE, ?, ?)
         """, convId, userId, Timestamp.from(t0), Timestamp.from(t1));
 
         String userPrompt = "請用一句話介紹什麼是 Spring AI？";

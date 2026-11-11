@@ -66,19 +66,32 @@ dependencies {
 	implementation 'org.springframework.ai:spring-ai-pdf-document-reader'
 	// implementation 'org.springframework.ai:spring-ai-starter-mcp-client'
 	// implementation 'org.springframework.ai:spring-ai-starter-model-chat-memory-repository-jdbc'
-	implementation 'org.springframework.ai:spring-ai-session-jdbc:2.1.0-RC2'
+	implementation 'org.springframework.ai:spring-ai-session-jdbc'
 	implementation 'org.springframework.ai:spring-ai-client-chat'
 	// implementation 'org.springframework.ai:spring-ai-starter-model-google-genai'
 	implementation 'org.springframework.ai:spring-ai-google-genai'
 	// implementation 'org.springframework.ai:spring-ai-starter-model-google-genai-embedding'
 	implementation 'org.springframework.ai:spring-ai-google-genai-embedding'
 	// implementation 'org.springframework.ai:spring-ai-starter-tool-search-advisor'
-	implementation 'org.springframework.ai:spring-ai-starter-vector-store-pgvector'
+	/*
+	 * WHY / ARCHITECTURAL DEPENDENCY SEAM:
+	 * 1. Prioritize raw modules over starters: starters (e.g. spring-ai-starter-vector-store-pgvector and
+	 *    spring-ai-starter-model-google-genai-tts) bring in auto-configuration jars
+	 *    (spring-ai-autoconfigure-vector-store-pgvector and spring-ai-autoconfigure-model-google-genai).
+	 *    Because auto-configuration classes use @ConditionalOnProperty with matchIfMissing = true
+	 *    or @ConditionalOnClass without property guards, having those jars on the classpath triggers
+	 *    unwanted bean creation or context failures unless manually excluded.
+	 * 2. By replacing starters with their corresponding raw modules (spring-ai-pgvector-store and
+	 *    spring-ai-google-genai-tts), all Spring AI auto-configuration modules are removed from the classpath,
+	 *    allowing clean programmatic configuration (e.g. GoogleGenAiManualConfig) with zero accidental beans.
+	 * 3. spring-ai-vector-store-advisor is a raw library (depends only on spring-ai-client-chat and spring-ai-vector-store)
+	 *    retained as a raw dependency seam for vector RAG without dragging in any starter or auto-config.
+	 * 4. All Spring AI dependency versions are consistently governed by spring-ai-bom:${springAiVersion}.
+	 */
+	implementation 'org.springframework.ai:spring-ai-pgvector-store'
 	implementation 'org.springframework.ai:spring-ai-vector-store-advisor'
-
-
-	implementation 'org.springframework.ai:spring-ai-google-genai-transcription:2.1.0-RC2'
-	implementation 'org.springframework.ai:spring-ai-starter-model-google-genai-tts:2.1.0-RC2'
+	implementation 'org.springframework.ai:spring-ai-google-genai-transcription'
+	implementation 'org.springframework.ai:spring-ai-google-genai-tts'
 	// implementation 'org.springframework.modulith:spring-modulith-observability-api'
 	// implementation 'org.springframework.modulith:spring-modulith-starter-core'
 	// implementation 'org.springframework.modulith:spring-modulith-starter-jdbc'

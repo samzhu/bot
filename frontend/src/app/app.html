@@ -11,35 +11,171 @@
       <div class="seed-bot-name">{{ seedBot()?.name || 'General Assistant' }}</div>
     </div>
 
-    <!-- Recent Conversations List -->
-    <div class="sidebar-section-title">Recent Conversations</div>
-    <div class="conversation-list">
-      @for (conv of conversations(); track conv.id) {
-        <div
-          class="conversation-item"
-          [attr.data-id]="conv.id"
-          [class.active]="conv.id === currentConversationId()"
-          [class.disabled]="isStreaming()"
-          (click)="!isStreaming() && selectConversation(conv.id)"
-          [title]="conv.title"
-        >
-          <span>{{ conv.title || 'Untitled' }}</span>
-        </div>
-      }
 
-      @if (hasMoreConversations()) {
-        <div class="load-more-conv-container">
-          <button
-            class="load-more-conv-btn"
-            type="button"
-            (click)="loadMoreConversations()"
-            [disabled]="isLoadingMoreConversations() || isStreaming()"
+
+    <!-- Deep Active Conversation Section (if current active conversation is outside loaded 20-item lists) -->
+    @if (isDeepActiveConversation()) {
+      <div class="sidebar-section-header">
+        <div class="sidebar-section-title">目前對話</div>
+      </div>
+      <div class="pinned-list-container">
+        <div
+          class="conversation-item active deep-active-item"
+          [attr.data-id]="activeConversation()!.id"
+          [title]="activeConversation()!.title"
+        >
+          <span class="conversation-item-title">{{ activeConversation()!.title || 'Untitled' }}</span>
+          <copilot-chat-toolbar-button
+            variant="secondary"
+            [title]="activeConversation()!.pinned ? '取消釘選' : '釘選對話'"
+            [attr.aria-label]="activeConversation()!.pinned ? '取消釘選' : '釘選對話'"
+            [attr.data-testid]="'pin-btn-' + activeConversation()!.id"
+            class="pin-toolbar-btn"
+            [disabled]="isPinDisabled(activeConversation()!.id)"
+            (click)="$event.stopPropagation()"
+            (clicked)="togglePin(activeConversation()!)"
           >
-            {{ isLoadingMoreConversations() ? 'Loading...' : 'Load more conversations' }}
-          </button>
+            <svg width="16" height="16" viewBox="0 0 16 16" [attr.fill]="activeConversation()!.pinned ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+              <path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1 0 .707c-.48.48-1.072.588-1.503.588-.177 0-.335-.018-.46-.039l-3.134 3.134a5.927 5.927 0 0 1 .16 1.013c.046.702-.032 1.687-.72 2.375a.5.5 0 0 1-.707 0l-2.829-2.828-3.182 3.182c-.195.195-1.219.92-1.414.725-.195-.195.53-1.219.725-1.414l3.182-3.182-2.828-2.829a.5.5 0 0 1 0-.707c.688-.688 1.673-.767 2.375-.72a5.922 5.922 0 0 1 1.013.16l3.134-3.133a2.772 2.772 0 0 1-.04-.461c0-.43.108-1.022.589-1.503a.5.5 0 0 1 .353-.146z"/>
+            </svg>
+          </copilot-chat-toolbar-button>
         </div>
-      }
+      </div>
+    }
+
+    <!-- Pinned Conversations Section -->
+    <div class="sidebar-section-header sidebar-pinned-section" (click)="togglePinnedSection()">
+      <div class="sidebar-section-title">釘選對話 ({{ pinnedConversations().length }})</div>
+      <copilot-chat-toolbar-button
+        variant="secondary"
+        [title]="isPinnedCollapsed() ? '展開釘選對話' : '收合釘選對話'"
+        [attr.aria-label]="isPinnedCollapsed() ? '展開釘選對話' : '收合釘選對話'"
+        (click)="$event.stopPropagation()"
+        (clicked)="togglePinnedSection()"
+      >
+        <svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" [style.transform]="isPinnedCollapsed() ? 'rotate(-90deg)' : 'rotate(0deg)'">
+          <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd" />
+        </svg>
+      </copilot-chat-toolbar-button>
     </div>
+
+    @if (!isPinnedCollapsed()) {
+      <div class="pinned-list-container">
+        @if (pinnedConversations().length === 0) {
+          <div class="sidebar-empty" data-testid="pinned-empty">尚無釘選對話</div>
+        }
+        @for (conv of pinnedConversations(); track conv.id) {
+          <div
+            class="conversation-item"
+            [attr.data-id]="conv.id"
+            [class.active]="conv.id === currentConversationId()"
+            [class.disabled]="isStreaming() || isSubmitting()"
+            (click)="!isStreaming() && !isSubmitting() && selectConversation(conv.id)"
+            [title]="conv.title"
+          >
+            <span class="conversation-item-title">{{ conv.title || 'Untitled' }}</span>
+            <copilot-chat-toolbar-button
+              variant="secondary"
+              [title]="conv.pinned ? '取消釘選' : '釘選對話'"
+              [attr.aria-label]="conv.pinned ? '取消釘選' : '釘選對話'"
+              [attr.data-testid]="'pin-btn-' + conv.id"
+              class="pin-toolbar-btn"
+              [disabled]="isPinDisabled(conv.id)"
+              (click)="$event.stopPropagation()"
+              (clicked)="togglePin(conv)"
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" [attr.fill]="conv.pinned ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1 0 .707c-.48.48-1.072.588-1.503.588-.177 0-.335-.018-.46-.039l-3.134 3.134a5.927 5.927 0 0 1 .16 1.013c.046.702-.032 1.687-.72 2.375a.5.5 0 0 1-.707 0l-2.829-2.828-3.182 3.182c-.195.195-1.219.92-1.414.725-.195-.195.53-1.219.725-1.414l3.182-3.182-2.828-2.829a.5.5 0 0 1 0-.707c.688-.688 1.673-.767 2.375-.72a5.922 5.922 0 0 1 1.013.16l3.134-3.133a2.772 2.772 0 0 1-.04-.461c0-.43.108-1.022.589-1.503a.5.5 0 0 1 .353-.146z"/>
+              </svg>
+            </copilot-chat-toolbar-button>
+          </div>
+        }
+
+        @if (hasMorePinned()) {
+          <div class="load-more-conv-container">
+            <copilot-chat-toolbar-button
+              variant="secondary"
+              title="Load more pinned conversations"
+              data-testid="load-more-pinned-btn"
+              [disabled]="isLoadingMorePinned() || isStreaming()"
+              (clicked)="loadMorePinned()"
+            >
+              <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd" />
+              </svg>
+            </copilot-chat-toolbar-button>
+            <span class="action-btn-text">{{ isLoadingMorePinned() ? 'Loading...' : 'Load more pinned' }}</span>
+          </div>
+        }
+      </div>
+    }
+
+    <!-- Recent / Unpinned Conversations Section -->
+    <div class="sidebar-section-header sidebar-unpinned-section" (click)="toggleUnpinnedSection()">
+      <div class="sidebar-section-title">近期對話 ({{ unpinnedConversations().length }})</div>
+      <copilot-chat-toolbar-button
+        variant="secondary"
+        [title]="isUnpinnedCollapsed() ? '展開近期對話' : '收合近期對話'"
+        [attr.aria-label]="isUnpinnedCollapsed() ? '展開近期對話' : '收合近期對話'"
+        (click)="$event.stopPropagation()"
+        (clicked)="toggleUnpinnedSection()"
+      >
+        <svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" [style.transform]="isUnpinnedCollapsed() ? 'rotate(-90deg)' : 'rotate(0deg)'">
+          <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd" />
+        </svg>
+      </copilot-chat-toolbar-button>
+    </div>
+
+    @if (!isUnpinnedCollapsed()) {
+      <div class="conversation-list unpinned-list-container">
+        @if (unpinnedConversations().length === 0) {
+          <div class="sidebar-empty" data-testid="unpinned-empty">尚無近期對話</div>
+        }
+        @for (conv of unpinnedConversations(); track conv.id) {
+          <div
+            class="conversation-item"
+            [attr.data-id]="conv.id"
+            [class.active]="conv.id === currentConversationId()"
+            [class.disabled]="isStreaming() || isSubmitting()"
+            (click)="!isStreaming() && !isSubmitting() && selectConversation(conv.id)"
+            [title]="conv.title"
+          >
+            <span class="conversation-item-title">{{ conv.title || 'Untitled' }}</span>
+            <copilot-chat-toolbar-button
+              variant="secondary"
+              [title]="conv.pinned ? '取消釘選' : '釘選對話'"
+              [attr.aria-label]="conv.pinned ? '取消釘選' : '釘選對話'"
+              [attr.data-testid]="'pin-btn-' + conv.id"
+              class="pin-toolbar-btn"
+              [disabled]="isPinDisabled(conv.id)"
+              (click)="$event.stopPropagation()"
+              (clicked)="togglePin(conv)"
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" [attr.fill]="conv.pinned ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1 0 .707c-.48.48-1.072.588-1.503.588-.177 0-.335-.018-.46-.039l-3.134 3.134a5.927 5.927 0 0 1 .16 1.013c.046.702-.032 1.687-.72 2.375a.5.5 0 0 1-.707 0l-2.829-2.828-3.182 3.182c-.195.195-1.219.92-1.414.725-.195-.195.53-1.219.725-1.414l3.182-3.182-2.828-2.829a.5.5 0 0 1 0-.707c.688-.688 1.673-.767 2.375-.72a5.922 5.922 0 0 1 1.013.16l3.134-3.133a2.772 2.772 0 0 1-.04-.461c0-.43.108-1.022.589-1.503a.5.5 0 0 1 .353-.146z"/>
+              </svg>
+            </copilot-chat-toolbar-button>
+          </div>
+        }
+
+        @if (hasMoreConversations()) {
+          <div class="load-more-conv-container">
+            <copilot-chat-toolbar-button
+              variant="secondary"
+              title="Load more conversations"
+              data-testid="load-more-conv-btn"
+              [disabled]="isLoadingMoreConversations() || isStreaming()"
+              (clicked)="loadMoreConversations()"
+            >
+              <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd" />
+              </svg>
+            </copilot-chat-toolbar-button>
+            <span class="action-btn-text">{{ isLoadingMoreConversations() ? 'Loading...' : 'Load more conversations' }}</span>
+          </div>
+        }
+      </div>
+    }
   </aside>
 
   <!-- Main Chat Area -->
@@ -48,36 +184,82 @@
     <header class="header">
       <div class="header-title">{{ currentTitle() }}</div>
       <div class="header-actions">
-        @if (isStreaming()) {
-          <button
-            class="stop-btn"
-            data-testid="stop-btn"
-            type="button"
-            (click)="cancelRun()"
-            [disabled]="isCancelling() || !activeRunId()"
-          >
-            {{ isCancelling() ? 'Stopping...' : 'Stop' }}
-          </button>
-        }
-        <button class="new-chat-btn" (click)="newConversation()" [disabled]="isStreaming()" type="button">
-          + New Chat
-        </button>
+        <copilot-chat-toolbar-button
+          variant="primary"
+          title="+ New Chat"
+          data-testid="new-chat-btn"
+          [disabled]="isStreaming() || isSubmitting()"
+          (clicked)="newConversation()"
+        >
+          <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path d="M10.75 4.75a.75.75 0 00-1.5 0v4.5h-4.5a.75.75 0 000 1.5h4.5v4.5a.75.75 0 001.5 0v-4.5h4.5a.75.75 0 000-1.5h-4.5v-4.5z" />
+          </svg>
+        </copilot-chat-toolbar-button>
+        <span class="action-btn-text">New Chat</span>
       </div>
     </header>
+
+    <!-- Pin Error Banners (placed in main area below header, outside scrollable sidebar & chat view) -->
+    @if (pinMutationError()) {
+      <div class="pin-error-banner" data-testid="pin-mutation-error" role="alert">
+        <span class="pin-error-text">{{ pinMutationError()?.message }}</span>
+        <div class="retry-action-container">
+          <copilot-chat-toolbar-button
+            variant="secondary"
+            title="重試"
+            data-testid="pin-mutation-retry-btn"
+            [disabled]="isPinDisabled()"
+            (click)="$event.stopPropagation()"
+            (clicked)="retryPinMutation()"
+          >
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path fill-rule="evenodd" d="M15.312 11.424a5.5 5.5 0 01-9.201 2.466l-.312-.312h2.451a.75.75 0 010 1.5H4.5a.75.75 0 01-.75-.75v-3.75a.75.75 0 011.5 0v2.172l.435.435a7 7 0 0011.877-3.138.75.75 0 111.45.387zM4.688 8.576a5.5 5.5 0 019.201-2.466l.312.312H11.75a.75.75 0 010-1.5H15.5a.75.75 0 01.75.75v3.75a.75.75 0 01-1.5 0V7.278l-.435-.435a7 7 0 00-11.877 3.138.75.75 0 01-1.45-.387z" clip-rule="evenodd" />
+            </svg>
+          </copilot-chat-toolbar-button>
+          <span class="action-btn-text">重試</span>
+        </div>
+      </div>
+    }
+    @if (pinRefreshError()) {
+      <div class="pin-error-banner" data-testid="pin-refresh-error" role="alert">
+        <span class="pin-error-text">{{ pinRefreshError()?.message }}</span>
+        <div class="retry-action-container">
+          <copilot-chat-toolbar-button
+            variant="secondary"
+            title="重新載入"
+            data-testid="pin-refresh-retry-btn"
+            [disabled]="isPinRefreshRetryDisabled()"
+            (click)="$event.stopPropagation()"
+            (clicked)="retryPinRefetch()"
+          >
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path fill-rule="evenodd" d="M15.312 11.424a5.5 5.5 0 01-9.201 2.466l-.312-.312h2.451a.75.75 0 010 1.5H4.5a.75.75 0 01-.75-.75v-3.75a.75.75 0 011.5 0v2.172l.435.435a7 7 0 0011.877-3.138.75.75 0 111.45.387zM4.688 8.576a5.5 5.5 0 019.201-2.466l.312.312H11.75a.75.75 0 010-1.5H15.5a.75.75 0 01.75.75v3.75a.75.75 0 01-1.5 0V7.278l-.435-.435a7 7 0 00-11.877 3.138.75.75 0 01-1.45-.387z" clip-rule="evenodd" />
+            </svg>
+          </copilot-chat-toolbar-button>
+          <span class="action-btn-text">重新載入</span>
+        </div>
+      </div>
+    }
 
     <!-- Stream Error / Retry Banner -->
     @if (streamError()) {
       <div class="stream-error-banner" data-testid="stream-error-banner">
         <span class="stream-error-text">{{ streamError() }}</span>
         @if (pendingRequest() && !isStreaming() && !isRecovering()) {
-          <button
-            class="retry-btn"
-            data-testid="retry-btn"
-            type="button"
-            (click)="retryPending()"
-          >
-            重試
-          </button>
+          <div class="retry-action-container">
+            <copilot-chat-toolbar-button
+              variant="secondary"
+              title="重試"
+              data-testid="retry-btn"
+              [disabled]="isStreaming() || isRecovering()"
+              (clicked)="retryPending()"
+            >
+              <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path fill-rule="evenodd" d="M15.312 11.424a5.5 5.5 0 01-9.201 2.466l-.312-.312h2.451a.75.75 0 010 1.5H4.5a.75.75 0 01-.75-.75v-3.75a.75.75 0 011.5 0v2.172l.435.435a7 7 0 0011.877-3.138.75.75 0 111.45.387zM4.688 8.576a5.5 5.5 0 019.201-2.466l.312.312H11.75a.75.75 0 010-1.5H15.5a.75.75 0 01.75.75v3.75a.75.75 0 01-1.5 0V7.278l-.435-.435a7 7 0 00-11.877 3.138.75.75 0 01-1.45-.387z" clip-rule="evenodd" />
+              </svg>
+            </copilot-chat-toolbar-button>
+            <span class="action-btn-text">重試</span>
+          </div>
         }
       </div>
     }
@@ -100,14 +282,18 @@
     <!-- Bounded Pagination Bar -->
     @if (hasMoreMessages()) {
       <div class="load-more-container">
-        <button
-          class="load-more-btn"
-          type="button"
-          (click)="loadEarlierMessages()"
+        <copilot-chat-toolbar-button
+          variant="secondary"
+          title="Load earlier messages"
+          data-testid="load-more-btn"
           [disabled]="isLoadingEarlier() || isStreaming()"
+          (clicked)="loadEarlierMessages()"
         >
-          {{ isLoadingEarlier() ? 'Loading earlier messages...' : 'Load earlier messages' }}
-        </button>
+          <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path fill-rule="evenodd" d="M14.77 12.79a.75.75 0 01-1.06-.02L10 8.832 6.29 12.77a.75.75 0 11-1.08-1.04l4.25-4.5a.75.75 0 011.08 0l4.25 4.5a.75.75 0 01-.02 1.06z" clip-rule="evenodd" />
+          </svg>
+        </copilot-chat-toolbar-button>
+        <span class="action-btn-text">{{ isLoadingEarlier() ? 'Loading earlier messages...' : 'Load earlier messages' }}</span>
       </div>
     }
 
@@ -116,10 +302,64 @@
       [messages]="messages()"
       [showCursor]="isStreaming()"
       [inputTemplate]="nativeInputTpl"
+      [assistantMessageTemplate]="customAssistantTpl"
       class="chat-view-container"
     >
+      <ng-template #customAssistantTpl let-message="message" let-messages="messages" let-isLoading="isLoading">
+        <copilot-chat-assistant-message
+          [message]="message"
+          [messages]="messages"
+          [isLoading]="isLoading"
+        >
+          <ng-template #toolbar>
+            <div copilotChatAssistantMessageToolbar>
+              <div class="cpk:flex cpk:items-center cpk:gap-1">
+                @if ((message?.content || '').trim().length > 0) {
+                  <copilot-chat-assistant-message-copy-button
+                    [content]="message?.content"
+                  ></copilot-chat-assistant-message-copy-button>
+                }
+              </div>
+            </div>
+          </ng-template>
+        </copilot-chat-assistant-message>
+      </ng-template>
+
       <ng-template #nativeInputTpl>
-        <copilot-chat-input [mode]="isStreaming() ? 'processing' : 'input'"></copilot-chat-input>
+        <copilot-chat-input [mode]="isStreaming() ? 'processing' : 'input'">
+          <!-- Send button slot: Stop generation during streaming, native send button when idle -->
+          <ng-template #sendButton let-disabled="disabled" let-send="send">
+            @if (isStreaming()) {
+              <div class="stop-action-container">
+                <copilot-chat-toolbar-button
+                  variant="primary"
+                  [title]="isCancelling() ? 'Stopping generation...' : 'Stop generation'"
+                  data-testid="stop-btn"
+                  [disabled]="isCancelling() || !activeRunId()"
+                  (clicked)="cancelRun()"
+                >
+                  <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                    <rect x="5" y="5" width="10" height="10" rx="1.5" />
+                  </svg>
+                </copilot-chat-toolbar-button>
+                <span class="action-btn-text">{{ isCancelling() ? 'Stopping...' : 'Stop' }}</span>
+              </div>
+            } @else {
+              <copilot-chat-send-button
+                [disabled]="disabled || isSubmitting()"
+                data-testid="send-message-btn"
+                (clicked)="send()"
+              ></copilot-chat-send-button>
+            }
+          </ng-template>
+
+          <!--
+            WHY: The MVP backend does not yet support external MCP tools, actions, or attachments.
+            Providing an empty #toolsButton slot prevents the stock disabled '+' menu button from rendering.
+            This slot can be re-enabled once backend tool discovery/calling protocol is ready.
+          -->
+          <ng-template #toolsButton></ng-template>
+        </copilot-chat-input>
       </ng-template>
     </copilot-chat-view>
   </main>

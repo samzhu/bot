@@ -11,6 +11,7 @@ public record Conversation(
     String botId,
     String title,
     String userId,
+    boolean pinned,
     Instant createdAt,
     Instant updatedAt
 ) {}

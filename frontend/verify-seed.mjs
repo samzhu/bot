@@ -1,6 +1,7 @@
 import puppeteer from 'puppeteer-core';
+import { installBrowserGuard, getVerificationOrigins } from './test/verification-harness.mjs';
 
-const BASE_URL = 'http://localhost:4200';
+const { frontendUrl: BASE_URL } = getVerificationOrigins();
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
 const SEED_IDS = [
@@ -19,6 +20,7 @@ async function run() {
   try {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
+    await installBrowserGuard(page, { mode: 'fail-closed' });
 
     page.on('console', msg => {
       if (msg.type() === 'error') {
@@ -37,14 +39,14 @@ async function run() {
       while (attempts < 10) {
         const exists = await page.$(`[data-id="${seedId}"]`);
         if (exists) return true;
-        const loadMoreBtn = await page.$('.load-more-conv-btn');
+        const loadMoreBtn = await page.$('[data-testid="load-more-conv-btn"] button, button[aria-label="Load more conversations"], .load-more-conv-btn');
         if (!loadMoreBtn) break;
-        const disabled = await page.evaluate(el => el.disabled, loadMoreBtn);
+        const disabled = await page.evaluate(el => el.disabled || Boolean(el.closest('[disabled]')), loadMoreBtn);
         if (disabled) break;
         const prevCount = await page.$$eval('.conversation-item', els => els.length);
         await loadMoreBtn.click();
         await page.waitForFunction(
-          prev => document.querySelectorAll('.conversation-item').length > prev || !document.querySelector('.load-more-conv-btn'),
+          prev => document.querySelectorAll('.conversation-item').length > prev || !document.querySelector('[data-testid="load-more-conv-btn"], .load-more-conv-btn'),
           { timeout: 5000 },
           prevCount
         );
@@ -193,16 +195,16 @@ async function run() {
     await page.screenshot({ path: '/tmp/browser-seed-cancelled.png' });
     console.log('✓ CANCELLED view assertions passed. Screenshot saved.');
 
-    // 5. Test New Chat button contract (eagerly creates a fresh blank conversation on backend: baselineCount + 1)
-    console.log('\n5. Testing + New Chat button contract (eager creation: baseline + 1)...');
-    await page.click('.new-chat-btn');
+    // 5. Test New Chat button contract (deferred creation: switches to draft without adding sidebar item)
+    console.log('\n5. Testing + New Chat button contract (deferred creation: baseline preserved)...');
+    await page.click('[data-testid="new-chat-btn"] button, button[aria-label="+ New Chat"], .new-chat-btn');
     await page.waitForFunction((expectedCount) => {
       const title = document.querySelector('.header-title')?.textContent?.trim();
       const rows = document.querySelectorAll('[data-message-role]');
       const textarea = document.querySelector('textarea');
       const sidebarItems = document.querySelectorAll('.conversation-item');
       return title === 'New Conversation' && rows.length === 0 && textarea && !textarea.disabled && sidebarItems.length === expectedCount;
-    }, { timeout: 10000 }, baselineCount + 1);
+    }, { timeout: 10000 }, baselineCount);
 
     const newChatState = await page.evaluate(() => {
       return {
@@ -220,17 +222,17 @@ async function run() {
     if (newChatState.messageCount !== 0) {
       throw new Error(`Expected 0 messages in new conversation view, got ${newChatState.messageCount}`);
     }
-    if (newChatState.sidebarCount !== baselineCount + 1) {
-      throw new Error(`Sidebar conversation count must expand to ${baselineCount + 1} upon eager creation, got ${newChatState.sidebarCount}`);
+    if (newChatState.sidebarCount !== baselineCount) {
+      throw new Error(`Sidebar conversation count must remain ${baselineCount} in draft mode, got ${newChatState.sidebarCount}`);
     }
     if (newChatState.textareaDisabled) {
       throw new Error('Textarea must be enabled in new conversation view');
     }
     await page.screenshot({ path: '/tmp/browser-new-chat-empty.png' });
-    console.log('✓ New Chat eager creation contract passed.');
+    console.log('✓ New Chat deferred creation draft contract passed.');
 
-    // 6. Reload page and verify baseline conversations, newly created conversation, and seed IDs remain intact
-    console.log('\n6. Reloading page to verify persistence of baseline conversations and newly created conversation...');
+    // 6. Reload page and verify baseline conversations and seed IDs remain intact
+    console.log('\n6. Reloading page to verify persistence of baseline conversations...');
     await page.reload({ waitUntil: 'networkidle0' });
     await page.waitForSelector('.conversation-item', { timeout: 10000 });
 
@@ -243,9 +245,9 @@ async function run() {
     }
 
     const reloadedCount = await page.$$eval('.conversation-item', els => els.length);
-    console.log(`Sidebar conversation count after reload: ${reloadedCount} (expected ${baselineCount + 1})`);
-    if (reloadedCount !== baselineCount + 1) {
-      throw new Error(`Expected sidebar count ${baselineCount + 1} after reload, got ${reloadedCount}`);
+    console.log(`Sidebar conversation count after reload: ${reloadedCount} (expected ${baselineCount})`);
+    if (reloadedCount !== baselineCount) {
+      throw new Error(`Expected sidebar count ${baselineCount} after reload, got ${reloadedCount}`);
     }
 
     console.log('\n=== ALL BROWSER SEED AND CONTRACT VERIFICATIONS STRICTLY PASSED! ===');

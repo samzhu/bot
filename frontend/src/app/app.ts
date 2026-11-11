@@ -3,26 +3,38 @@ import {
   OnInit,
   computed,
   forwardRef,
+  inject,
   signal,
+  ElementRef,
+  viewChild,
   WritableSignal
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { ChatState, CopilotChatView, CopilotChatInput } from '@copilotkit/angular';
+import {
+  ChatState,
+  CopilotChatView,
+  CopilotChatInput,
+  CopilotChatToolbarButton,
+  CopilotChatSendButton,
+  CopilotChatAssistantMessage,
+  CopilotChatAssistantMessageToolbar,
+  CopilotChatAssistantMessageCopyButton
+} from '@copilotkit/angular';
 import { Message, UserMessage, AssistantMessage } from '@ag-ui/core';
 import { SseStreamParser } from './sse-parser';
+import { DraftStore } from './draft-store';
+import {
+  ConversationListStore,
+  ConversationView,
+  PinMutationError,
+  PinRefreshError
+} from './conversation-list-store';
+export type { ConversationView, PinMutationError, PinRefreshError };
 
 export interface BotView {
   id: string;
   name: string;
   createdAt: string;
-}
-
-export interface ConversationView {
-  id: string;
-  botId: string;
-  title: string;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export interface GraphQLMessageView {
@@ -47,12 +59,23 @@ export interface PendingRequestInfo {
   runId?: string;
   tempUserId: string;
   tempAssistantId: string;
+  isFromNewDraft?: boolean;
+  submittedSnapshot?: string;
 }
 
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [CommonModule, CopilotChatView, CopilotChatInput],
+  imports: [
+    CommonModule,
+    CopilotChatView,
+    CopilotChatInput,
+    CopilotChatToolbarButton,
+    CopilotChatSendButton,
+    CopilotChatAssistantMessage,
+    CopilotChatAssistantMessageToolbar,
+    CopilotChatAssistantMessageCopyButton
+  ],
   providers: [
     /*
      * RATIONALE: CopilotChatView expects a ChatState provider in DI hierarchy.
@@ -66,12 +89,47 @@ export interface PendingRequestInfo {
   styleUrl: './app.css'
 })
 export class App extends ChatState implements OnInit {
+  private readonly elementRef = inject(ElementRef);
+  readonly chatInputRef = viewChild(CopilotChatInput);
+
+  // Injected feature stores
+  readonly draftStore = inject(DraftStore);
+  readonly conversationStore = inject(ConversationListStore);
+
+  // Concurrency lock for creation and submission
+  readonly isSubmitting = signal<boolean>(false);
+
+  // Generation counter to guard against late async responses overwriting current selection
+  private selectionGeneration = 0;
+
   // ChatState abstract implementations
   readonly inputValue: WritableSignal<string> = signal('');
 
   // Application State
   readonly bots = signal<BotView[]>([]);
-  readonly conversations = signal<ConversationView[]>([]);
+
+  // Delegated Conversation List & Pinning State (managed authoritatively by ConversationListStore)
+  readonly pinnedConversations = this.conversationStore.pinnedConversations;
+  readonly unpinnedConversations = this.conversationStore.unpinnedConversations;
+  readonly conversations = this.conversationStore.conversations;
+  readonly isPinnedCollapsed = this.conversationStore.isPinnedCollapsed;
+  readonly isUnpinnedCollapsed = this.conversationStore.isUnpinnedCollapsed;
+  readonly activeConversation = this.conversationStore.activeConversation;
+  readonly pinPendingIds = this.conversationStore.pinPendingIds;
+  readonly pinMutationError = this.conversationStore.pinMutationError;
+  readonly pinRefreshError = this.conversationStore.pinRefreshError;
+  readonly conversationOffset = this.conversationStore.conversationOffset;
+  readonly hasMoreConversations = this.conversationStore.hasMoreConversations;
+  readonly isLoadingMoreConversations = this.conversationStore.isLoadingMoreConversations;
+
+  // Independent Dual-Section Pagination State
+  readonly pinnedOffset = this.conversationStore.pinnedOffset;
+  readonly hasMorePinned = this.conversationStore.hasMorePinned;
+  readonly isLoadingMorePinned = this.conversationStore.isLoadingMorePinned;
+  readonly unpinnedOffset = this.conversationStore.unpinnedOffset;
+  readonly hasMoreUnpinned = this.conversationStore.hasMoreUnpinned;
+  readonly isLoadingMoreUnpinned = this.conversationStore.isLoadingMoreUnpinned;
+
   readonly currentConversationId = signal<string | null>(null);
   readonly messages = signal<ExtendedMessage[]>([]);
   readonly isStreaming = signal<boolean>(false);
@@ -85,10 +143,6 @@ export class App extends ChatState implements OnInit {
   readonly messageOffset = signal<number>(20);
   readonly hasMoreMessages = signal<boolean>(false);
   readonly isLoadingEarlier = signal<boolean>(false);
-
-  readonly conversationOffset = signal<number>(0);
-  readonly hasMoreConversations = signal<boolean>(false);
-  readonly isLoadingMoreConversations = signal<boolean>(false);
 
   private readonly completedRunIds = new Set<string>();
 
@@ -108,12 +162,20 @@ export class App extends ChatState implements OnInit {
   readonly currentConversation = computed<ConversationView | null>(() => {
     const id = this.currentConversationId();
     if (!id) return null;
-    return this.conversations().find(c => c.id === id) || null;
+    return this.conversationStore.findConversation(id);
+  });
+
+  readonly isDeepActiveConversation = computed<boolean>(() => {
+    const active = this.activeConversation();
+    const id = this.currentConversationId();
+    if (!active || !id || active.id !== id) return false;
+    return !this.pinnedConversations().some(c => c.id === id)
+        && !this.unpinnedConversations().some(c => c.id === id);
   });
 
   readonly currentTitle = computed<string>(() => {
     const conv = this.currentConversation();
-    return conv ? conv.title : 'New Conversation';
+    return conv ? (conv.title || 'Untitled') : 'New Conversation';
   });
 
   readonly lastMessageInterrupted = computed<boolean>(() => {
@@ -175,6 +237,14 @@ export class App extends ChatState implements OnInit {
     } catch (_) {}
   }
 
+  private removeStorageItem(key: string): void {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.removeItem(key);
+      }
+    } catch (_) {}
+  }
+
   // --- GraphQL Operations ---
 
   async loadBots(): Promise<void> {
@@ -195,74 +265,75 @@ export class App extends ChatState implements OnInit {
     }
   }
 
-  async loadConversations(): Promise<void> {
-    try {
-      const limit = 20;
-      const res = await fetch('/graphql', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: `query GetConversations($limit: Int, $offset: Int) {
-            conversations(limit: $limit, offset: $offset) { id botId title createdAt updatedAt }
-          }`,
-          variables: { limit, offset: 0 }
-        })
-      });
-      const json = await res.json();
-      if (json.data && json.data.conversations) {
-        const list: ConversationView[] = json.data.conversations;
-        this.conversations.set(list);
-        this.conversationOffset.set(list.length);
-        this.hasMoreConversations.set(list.length >= limit);
-      }
-    } catch (err) {
-      console.error('Failed to load conversations:', err);
-    }
+  loadConversations(): Promise<void> {
+    return this.conversationStore.loadConversations(true);
   }
 
-  async loadMoreConversations(): Promise<void> {
-    if (this.isLoadingMoreConversations() || !this.hasMoreConversations()) return;
-    this.isLoadingMoreConversations.set(true);
-    try {
-      const limit = 20;
-      const offset = this.conversationOffset();
-      const res = await fetch('/graphql', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: `query GetConversations($limit: Int, $offset: Int) {
-            conversations(limit: $limit, offset: $offset) { id botId title createdAt updatedAt }
-          }`,
-          variables: { limit, offset }
-        })
-      });
-      const json = await res.json();
-      if (json.data && json.data.conversations) {
-        const more: ConversationView[] = json.data.conversations;
-        if (more.length > 0) {
-          const existingIds = new Set(this.conversations().map(c => c.id));
-          const unique = more.filter(c => !existingIds.has(c.id));
-          this.conversations.update(prev => [...prev, ...unique]);
-          this.conversationOffset.update(o => o + more.length);
-        }
-        if (more.length < limit) {
-          this.hasMoreConversations.set(false);
-        }
-      }
-    } catch (err) {
-      console.error('Failed to load more conversations:', err);
-    } finally {
-      this.isLoadingMoreConversations.set(false);
+  loadMoreConversations(): Promise<void> {
+    return this.conversationStore.loadMoreConversations();
+  }
+
+  loadMorePinned(): Promise<void> {
+    return this.conversationStore.loadMorePinned();
+  }
+
+  loadMoreUnpinned(): Promise<void> {
+    return this.conversationStore.loadMoreUnpinned();
+  }
+
+  togglePinnedSection(): void {
+    this.conversationStore.togglePinnedSection();
+  }
+
+  toggleUnpinnedSection(): void {
+    this.conversationStore.toggleUnpinnedSection();
+  }
+
+  isPinDisabled(convId?: string): boolean {
+    return this.isStreaming() || this.isSubmitting() || this.conversationStore.isPinDisabled(convId);
+  }
+
+  isPinRefreshRetryDisabled(): boolean {
+    return this.isStreaming() || this.isSubmitting() || this.conversationStore.isAnyPinPending() || this.conversationStore.isRetryingRefetch();
+  }
+
+  isPinPending(convId: string): boolean {
+    return this.conversationStore.isPinPending(convId);
+  }
+
+  togglePin(conv: ConversationView): Promise<void> {
+    if (this.isStreaming() || this.isSubmitting() || this.isPinDisabled(conv?.id)) {
+      return Promise.resolve();
     }
+    return this.conversationStore.togglePin(conv);
+  }
+
+  retryPinRefetch(): Promise<void> {
+    if (this.isStreaming() || this.isSubmitting() || this.conversationStore.isAnyPinPending() || this.conversationStore.isRetryingRefetch()) {
+      return Promise.resolve();
+    }
+    return this.conversationStore.retryPinRefetch();
+  }
+
+  retryPinMutation(): Promise<void> {
+    if (this.isStreaming() || this.isSubmitting() || this.isPinDisabled()) {
+      return Promise.resolve();
+    }
+    return this.conversationStore.retryPinMutation();
   }
 
   async selectConversation(id: string): Promise<void> {
-    /*
-     * RATIONALE: In Ticket 01, switching conversation while actively streaming is disallowed
-     * to prevent corrupted UI message state and concurrent stream interference.
-     */
-    if (this.isStreaming()) return;
+    if (this.isStreaming() || this.isSubmitting()) return;
 
+    // Save unsent input of current conversation or draft before switching
+    const prevId = this.currentConversationId();
+    if (prevId) {
+      this.draftStore.setConversationDraft(prevId, this.inputValue());
+    } else {
+      this.draftStore.setDraft(this.inputValue());
+    }
+
+    const currentGen = ++this.selectionGeneration;
     this.currentConversationId.set(id);
     this.setStorageItem('bot_active_conversation_id', id);
     this.completedRunIds.clear();
@@ -270,6 +341,9 @@ export class App extends ChatState implements OnInit {
     this.hasMoreMessages.set(false);
     this.streamError.set(null);
     this.isRecovering.set(false);
+
+    // Restore unsent draft input for this conversation (if any) to signal and DOM
+    this.restoreInput(this.draftStore.getConversationDraft(id));
 
     try {
       const limit = 20;
@@ -305,24 +379,24 @@ export class App extends ChatState implements OnInit {
 
       /*
        * RATIONALE: Asynchronous Race Guard.
-       * If user rapidly switches conversations before this fetch completes,
-       * discard the outdated response so it doesn't overwrite the newly selected conversation.
+       * If user rapidly switches conversations or clicks + New Chat before this fetch completes,
+       * discard the outdated response so it doesn't overwrite the newly selected conversation or draft.
        */
-      if (this.currentConversationId() !== id) {
+      if (this.selectionGeneration !== currentGen || this.currentConversationId() !== id) {
         return;
       }
 
       if (json.data && json.data.conversation) {
         const conv = json.data.conversation;
-        if (!this.conversations().some(c => c.id === id)) {
-          this.conversations.update(prev => [{
-            id: conv.id,
-            botId: conv.botId,
-            title: conv.title,
-            createdAt: conv.createdAt || '',
-            updatedAt: conv.updatedAt || ''
-          }, ...prev]);
-        }
+        const view: ConversationView = {
+          id: conv.id,
+          botId: conv.botId,
+          title: conv.title,
+          pinned: !!conv.pinned,
+          createdAt: conv.createdAt || '',
+          updatedAt: conv.updatedAt || ''
+        };
+        this.conversationStore.setActiveConversation(view);
         const rawMessages: GraphQLMessageView[] = conv.messages || [];
         const runs: any[] = conv.runs || [];
         const failedRunIds = new Set(runs.filter(r => r.status === 'FAILED').map(r => r.id));
@@ -443,53 +517,81 @@ export class App extends ChatState implements OnInit {
     }
   }
 
+  /*
+   * WHY / ARCHITECTURAL RATIONALE:
+   * Deferred Conversation Creation.
+   * Clicking "+ New Chat" switches the UI to an in-memory draft session without calling
+   * the backend or adding an empty record to the database or sidebar.
+   * Creation is deferred until the user submits their first valid non-empty message.
+   * This prevents database pollution with empty/abandoned conversations while preserving instant client responsiveness.
+   * Unsent draft text is preserved in DraftStore and restored when switching back.
+   */
   async newConversation(): Promise<void> {
-    if (this.isStreaming()) return;
+    if (this.isStreaming() || this.isSubmitting()) return;
 
-    let bot = this.seedBot();
-    if (!bot) {
-      await this.loadBots();
-      bot = this.seedBot();
+    // Invalidate any in-flight asynchronous conversation selection
+    this.selectionGeneration++;
+
+    const prevId = this.currentConversationId();
+    if (prevId) {
+      this.draftStore.setConversationDraft(prevId, this.inputValue());
+    } else {
+      this.draftStore.setDraft(this.inputValue());
     }
-    if (!bot) return;
 
-    try {
-      const res = await fetch('/graphql', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: `mutation CreateConversation($botId: ID!, $title: String) {
-            createConversation(botId: $botId, title: $title) {
-              id
-              botId
-              title
-              createdAt
-              updatedAt
-            }
-          }`,
-          variables: {
-            botId: bot.id,
-            title: 'New Conversation'
-          }
-        })
-      });
+    this.currentConversationId.set(null);
+    this.conversationStore.setActiveConversation(null);
+    this.removeStorageItem('bot_active_conversation_id');
+    this.messages.set([]);
+    this.messageOffset.set(20);
+    this.hasMoreMessages.set(false);
+    this.streamError.set(null);
+    this.isRecovering.set(false);
+    this.isCancelling.set(false);
+    this.pendingRequest.set(null);
 
-      const json = await res.json();
-      if (json.data && json.data.createConversation) {
-        const newConv = json.data.createConversation;
-        this.conversations.update(prev => [newConv, ...prev]);
-        this.currentConversationId.set(newConv.id);
-        this.setStorageItem('bot_active_conversation_id', newConv.id);
-        this.messages.set([]);
-        this.messageOffset.set(20);
-        this.hasMoreMessages.set(false);
-        this.streamError.set(null);
-        this.isRecovering.set(false);
-        this.isCancelling.set(false);
-        this.pendingRequest.set(null);
+    // Restore unsent draft text to signal and DOM
+    this.restoreInput(this.draftStore.getDraft());
+  }
+
+  /*
+   * WHY: CopilotKit's CopilotChatInput.send() synchronously wipes input state:
+   * 1) chatState.submitInput(trimmed) [fire & forget, not awaited]
+   * 2) chatState.changeInput("") [synchronous]
+   * 3) textAreaRef.setValue("") [synchronous native DOM wipe]
+   * Because submitInput is async (awaiting conversation creation or run initiation),
+   * a server error during create/submit requires restoring both the Angular signal and the
+   * textarea DOM value. We prefer CopilotChatInput's official textAreaRef.setValue() API,
+   * falling back to elementRef-scoped DOM query (ensuring no other textareas on the page are touched).
+   */
+  restoreInput(text: string): void {
+    this.inputValue.set(text);
+
+    // 1. Try official SDK controlled component API via ViewChild
+    const inputCmp = this.chatInputRef();
+    if (inputCmp && typeof inputCmp.textAreaRef === 'function') {
+      const textAreaCmp = inputCmp.textAreaRef();
+      if (textAreaCmp && typeof textAreaCmp.setValue === 'function') {
+        textAreaCmp.setValue(text);
+        return;
       }
-    } catch (err) {
-      console.error('Failed to create conversation:', err);
+    }
+
+    // 2. Fallback scoped strictly to this App component's DOM tree (never global document)
+    if (typeof this.elementRef?.nativeElement?.querySelector === 'function') {
+      const applyToHostDom = () => {
+        const textarea = this.elementRef.nativeElement.querySelector(
+          'textarea[copilotChatTextarea], textarea[data-testid="copilot-chat-textarea"], textarea'
+        ) as HTMLTextAreaElement | null;
+        if (textarea && textarea.value !== text) {
+          textarea.value = text;
+          textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      };
+      applyToHostDom();
+      if (typeof queueMicrotask === 'function') {
+        queueMicrotask(applyToHostDom);
+      }
     }
   }
 
@@ -497,76 +599,182 @@ export class App extends ChatState implements OnInit {
 
   override changeInput(value: string): void {
     this.inputValue.set(value);
+    const id = this.currentConversationId();
+    if (!id) {
+      if (!this.isSubmitting() || value.trim().length > 0) {
+        this.draftStore.setDraft(value);
+      }
+    } else {
+      if (!this.isSubmitting() || value.trim().length > 0) {
+        this.draftStore.setConversationDraft(id, value);
+      }
+    }
   }
 
   override async submitInput(value?: string, retryClientRequestId?: string, targetConvId?: string): Promise<void> {
-    const text = (value || this.inputValue()).trim();
-    if (!text || this.isStreaming()) return;
+    const rawInput = this.inputValue();
+    const text = (value !== undefined && value.trim() ? value : rawInput).trim();
+    if (!text || this.isStreaming() || this.isSubmitting()) return;
 
-    let convId = targetConvId || this.currentConversationId();
-    if (!convId) {
-      await this.newConversation();
-      convId = this.currentConversationId();
-      if (!convId) return;
-    }
+    // Snapshot exact raw input before submission so trailing whitespace/newlines are preserved on create/run failure
+    const draftSnapshot = (rawInput && rawInput.trim() === text) ? rawInput : (value !== undefined ? value : text);
 
+    /*
+     * WHY: Concurrency lock for creation and submission.
+     * Keeping NewChat and conversation selection disabled while isSubmitting is true
+     * prevents split-brain state, duplicate conversation creation, and race conditions during in-flight network requests.
+     */
+    this.isSubmitting.set(true);
+
+    const pending = this.pendingRequest();
+    const isNewDraft = !targetConvId && !this.currentConversationId();
+    // Preserve draft ownership across retries (e.g. if initial run returns 500 after successful create)
+    const isFromNewDraft = retryClientRequestId ? (pending?.isFromNewDraft ?? false) : isNewDraft;
+    const sourceConvId = targetConvId || this.currentConversationId();
+    let convId = sourceConvId;
+    const submitGen = this.selectionGeneration;
     const clientRequestId = retryClientRequestId || ('req-' + crypto.randomUUID());
-
     let tempUserId = 'temp-u-' + Date.now();
     let tempAssistantId = 'temp-a-' + Date.now();
 
-    if (!retryClientRequestId) {
-      const userMessage: ExtendedMessage = {
-        id: tempUserId,
-        role: 'user',
-        content: text
-      };
-
-      const assistantMessage: ExtendedMessage = {
-        id: tempAssistantId,
-        role: 'assistant',
-        content: ''
-      };
-
-      this.messages.update(prev => [...prev, userMessage, assistantMessage]);
-      this.inputValue.set('');
-    } else {
-      const pending = this.pendingRequest();
-      if (pending && pending.tempUserId) {
-        tempUserId = pending.tempUserId;
-      } else {
-        const existingUser = this.messages().find(
-          m => m.role === 'user' && m.id.startsWith('temp-u-')
-        );
-        if (existingUser) tempUserId = existingUser.id;
-      }
-      if (pending && pending.tempAssistantId) {
-        tempAssistantId = pending.tempAssistantId;
-      } else {
-        const existingAssistant = this.messages().find(
-          m => m.role === 'assistant' && (m.id.startsWith('temp-a-') || !m.content)
-        );
-        if (existingAssistant) tempAssistantId = existingAssistant.id;
-      }
-    }
-
-    this.pendingRequest.set({
-      conversationId: convId,
-      clientRequestId,
-      message: text,
-      tempUserId,
-      tempAssistantId
-    });
-    this.streamError.set(null);
-
-    this.isStreaming.set(true);
-
     try {
-      /*
-       * RATIONALE: Content-Type First Inspection.
-       * If backend returns application/json (200 duplicate run or 409 conflict),
-       * process synchronously as metadata rather than treating it as an SSE stream.
-       */
+      // 1. Deferred Creation: create conversation on first valid submission if starting from draft
+      if (!convId) {
+        let bot = this.seedBot();
+        if (!bot) {
+          await this.loadBots();
+          bot = this.seedBot();
+        }
+        if (!bot) {
+          this.streamError.set('No active bot available to start conversation');
+          this.draftStore.setDraft(draftSnapshot);
+          this.restoreInput(draftSnapshot);
+          return;
+        }
+
+        try {
+          const res = await fetch('/graphql', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              query: `mutation CreateConversation($botId: ID!, $title: String) {
+                createConversation(botId: $botId, title: $title) {
+                  id
+                  botId
+                  title
+                  createdAt
+                  updatedAt
+                }
+              }`,
+              variables: {
+                botId: bot.id,
+                title: 'New Conversation'
+              }
+            })
+          });
+
+          if (!res.ok) {
+            this.streamError.set(`建立對話失敗：HTTP ${res.status}`);
+            this.draftStore.setDraft(draftSnapshot);
+            this.restoreInput(draftSnapshot);
+            return;
+          }
+
+          const json = await res.json();
+          if (json.errors && json.errors.length > 0) {
+            const errorMsg = json.errors[0]?.message || 'Failed to create conversation';
+            this.streamError.set(`建立對話失敗：${errorMsg}`);
+            this.draftStore.setDraft(draftSnapshot);
+            this.restoreInput(draftSnapshot);
+            return;
+          }
+
+          if (json.data && json.data.createConversation) {
+            const newConv = json.data.createConversation;
+            const createdView: ConversationView = {
+              id: newConv.id,
+              botId: newConv.botId,
+              title: newConv.title,
+              pinned: false,
+              createdAt: newConv.createdAt || '',
+              updatedAt: newConv.updatedAt || ''
+            };
+            this.conversationStore.addCreatedConversation(createdView);
+            convId = newConv.id;
+
+            // Selection guard: if user navigated away while create was in-flight, do not override current selection
+            if (this.selectionGeneration !== submitGen) {
+              return;
+            }
+
+            this.currentConversationId.set(newConv.id);
+            this.setStorageItem('bot_active_conversation_id', newConv.id);
+          } else {
+            this.streamError.set('建立對話失敗：無回應資料');
+            this.draftStore.setDraft(draftSnapshot);
+            this.restoreInput(draftSnapshot);
+            return;
+          }
+        } catch (err: any) {
+          console.error('Failed to create conversation on backend:', err);
+          this.streamError.set(`建立對話失敗，請重試：${err?.message || err}`);
+          this.draftStore.setDraft(draftSnapshot);
+          this.restoreInput(draftSnapshot);
+          return;
+        }
+      }
+
+      if (!convId) {
+        return;
+      }
+
+      if (!retryClientRequestId) {
+        const userMessage: ExtendedMessage = {
+          id: tempUserId,
+          role: 'user',
+          content: text
+        };
+
+        const assistantMessage: ExtendedMessage = {
+          id: tempAssistantId,
+          role: 'assistant',
+          content: ''
+        };
+
+        this.messages.update(prev => [...prev, userMessage, assistantMessage]);
+      } else {
+        const pending = this.pendingRequest();
+        if (pending && pending.tempUserId) {
+          tempUserId = pending.tempUserId;
+        } else {
+          const existingUser = this.messages().find(
+            m => m.role === 'user' && m.id.startsWith('temp-u-')
+          );
+          if (existingUser) tempUserId = existingUser.id;
+        }
+        if (pending && pending.tempAssistantId) {
+          tempAssistantId = pending.tempAssistantId;
+        } else {
+          const existingAssistant = this.messages().find(
+            m => m.role === 'assistant' && (m.id.startsWith('temp-a-') || !m.content)
+          );
+          if (existingAssistant) tempAssistantId = existingAssistant.id;
+        }
+      }
+
+      this.pendingRequest.set({
+        conversationId: convId,
+        clientRequestId,
+        message: text,
+        tempUserId,
+        tempAssistantId,
+        isFromNewDraft,
+        submittedSnapshot: draftSnapshot
+      });
+      this.streamError.set(null);
+
+      this.isStreaming.set(true);
+
       const response = await fetch(`/api/conversations/${convId}/runs`, {
         method: 'POST',
         headers: {
@@ -581,13 +789,29 @@ export class App extends ChatState implements OnInit {
 
       if (this.currentConversationId() !== convId) return;
 
-      const contentType = response.headers.get('content-type') || '';
+      const contentType = response.headers?.get?.('content-type') || '';
 
       if (contentType.includes('application/json')) {
         const json = await response.json().catch(() => ({}));
         if (this.currentConversationId() !== convId) return;
 
         if (response.ok) {
+          // Clear draft only for the submission source once officially accepted by server
+          if (isFromNewDraft) {
+            const curDraft = this.draftStore.getDraft();
+            if (!curDraft || curDraft === draftSnapshot || curDraft.trim() === text) {
+              this.draftStore.clearDraft();
+            }
+          } else if (sourceConvId) {
+            const convDraft = this.draftStore.getConversationDraft(sourceConvId);
+            if (!convDraft || convDraft === draftSnapshot || convDraft.trim() === text) {
+              this.draftStore.deleteConversationDraft(sourceConvId);
+            }
+          }
+          if (this.inputValue().trim() === text) {
+            this.inputValue.set('');
+          }
+
           // EXISTING duplicate run (200 JSON with authoritative run metadata)
           const runId = json.runId || json.id;
           const result = await this.reconcileAuthoritativeMessages(convId, runId, tempUserId, tempAssistantId);
@@ -608,10 +832,11 @@ export class App extends ChatState implements OnInit {
           }
           return;
         } else if (response.status === 409) {
-          // 409 Conflict: rejected by server, clear optimistic rows and pending retry state
+          // 409 Conflict: rejected by server, clear optimistic rows and restore input
           this.removeOptimisticMessages(tempUserId, tempAssistantId);
           this.pendingRequest.set(null);
           this.streamError.set(json.error || 'Another active run is in progress for this conversation');
+          this.restoreInput(draftSnapshot);
           return;
         } else {
           throw new Error(json.error || `Request failed with status ${response.status}`);
@@ -622,17 +847,34 @@ export class App extends ChatState implements OnInit {
         throw new Error(`Stream request failed with status ${response.status}`);
       }
 
+      // Clear draft only for the submission source once officially accepted by server (200 SSE Stream)
+      if (isFromNewDraft) {
+        const curDraft = this.draftStore.getDraft();
+        if (!curDraft || curDraft === draftSnapshot || curDraft.trim() === text) {
+          this.draftStore.clearDraft();
+        }
+      } else if (sourceConvId) {
+        const convDraft = this.draftStore.getConversationDraft(sourceConvId);
+        if (!convDraft || convDraft === draftSnapshot || convDraft.trim() === text) {
+          this.draftStore.deleteConversationDraft(sourceConvId);
+        }
+      }
+      if (this.inputValue().trim() === text) {
+        this.inputValue.set('');
+      }
+
       await this.readSseStream(response.body, tempUserId, tempAssistantId, convId);
       if (this.currentConversationId() !== convId) return;
       this.pendingRequest.set(null);
     } catch (err: any) {
       console.error('Streaming or network error:', err);
-      if (this.currentConversationId() === convId) {
+      if (convId && this.currentConversationId() === convId) {
         this.isStreaming.set(false);
         await this.reconcileOrRecoverRun(convId, clientRequestId, tempUserId, tempAssistantId);
       }
     } finally {
-      if (this.currentConversationId() === convId) {
+      this.isSubmitting.set(false);
+      if (convId && this.currentConversationId() === convId) {
         this.isStreaming.set(false);
       }
     }

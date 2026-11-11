@@ -1,9 +1,11 @@
 import puppeteer from 'puppeteer-core';
 import path from 'node:path';
+import { installNodeFetchGuard, installBrowserGuard, getVerificationOrigins, assertSafeExecutionEnvironment } from './test/verification-harness.mjs';
+
+installNodeFetchGuard({ mode: 'verified-backend' });
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const BASE_URL = 'http://localhost:4200';
-const BACKEND_URL = 'http://localhost:8080';
+const { frontendUrl: BASE_URL, backendUrl: BACKEND_URL } = getVerificationOrigins();
 
 const SCREENSHOT_DIR = '/tmp';
 const SCREENSHOTS = {
@@ -66,6 +68,8 @@ async function queryConversationMessages(convId) {
 
 async function run() {
   console.log('--- Starting Ticket 03 Deterministic Browser Automation Verification ---');
+  await assertSafeExecutionEnvironment(BACKEND_URL);
+
   const browser = await puppeteer.launch({
     executablePath: CHROME_PATH,
     headless: true,
@@ -74,6 +78,7 @@ async function run() {
 
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 900 });
+  await installBrowserGuard(page, { mode: 'verified-backend' });
 
   page.on('console', msg => {
     if (msg.type() === 'error') {
@@ -208,9 +213,9 @@ async function run() {
       await page.type('textarea', discPrompt);
       await page.click('button[aria-label="Send message"]');
 
-      // 1. Wait until run has actually started in UI (.stop-btn is rendered)
-      console.log('Waiting for active stream to start (.stop-btn visible)...');
-      await page.waitForSelector('.stop-btn', { timeout: 10000 });
+      // 1. Wait until run has actually started in UI (Stop button is rendered)
+      console.log('Waiting for active stream to start (Stop button visible)...');
+      await page.waitForSelector('[data-testid="stop-btn"] button, button[aria-label="Stop generation"], .stop-btn', { timeout: 10000 });
 
       // 2. Wait until transport fault has been injected by CDP
       console.log('Waiting for SSE transport fault injection...');
@@ -324,7 +329,7 @@ async function run() {
         (count) => {
           const rows = document.querySelectorAll('[data-message-role="assistant"]');
           const last = rows[rows.length - 1];
-          const stopBtn = document.querySelector('.stop-btn');
+          const stopBtn = document.querySelector('[data-testid="stop-btn"] button, button[aria-label="Stop generation"], .stop-btn');
           return Boolean(rows.length === count && last && last.textContent.includes('Next turn after in-page recovery') && !stopBtn);
         },
         { timeout: 10000 },
@@ -415,7 +420,7 @@ async function run() {
 
       // UI catches ConnectionReset and failed recovery, shows error banner with Retry button
       console.log('Waiting for stream error banner and retry button...');
-      await page.waitForSelector('[data-testid="retry-btn"], .retry-btn', { timeout: 10000 });
+      await page.waitForSelector('[data-testid="retry-btn"] button, button[aria-label="重試"], [data-testid="retry-btn"], .retry-btn', { timeout: 10000 });
       console.log('Retry button is visible and ready for manual retry.');
 
       // Lift fault BEFORE clicking retry so the retry request reaches backend
@@ -436,12 +441,12 @@ async function run() {
 
       // Click "重試"
       console.log('Clicking "重試" button...');
-      await page.click('[data-testid="retry-btn"], .retry-btn');
+      await page.click('[data-testid="retry-btn"] button, button[aria-label="重試"], [data-testid="retry-btn"], .retry-btn');
 
       // Wait until UI reconciles: assistant has content and stop button is gone
       await page.waitForFunction(() => {
         const assistant = document.querySelector('[data-message-role="assistant"]');
-        const stopBtn = document.querySelector('.stop-btn');
+        const stopBtn = document.querySelector('[data-testid="stop-btn"] button, button[aria-label="Stop generation"], .stop-btn');
         return Boolean(assistant && assistant.textContent.includes('deterministic mock') && !stopBtn);
       }, { timeout: 10000 });
 
@@ -519,7 +524,7 @@ async function run() {
       await page.click('button[aria-label="Send message"]');
 
       // UI shows error banner and Retry button; optimistic user row is rendered with temp ID
-      await page.waitForSelector('[data-testid="retry-btn"], .retry-btn', { timeout: 8000 });
+      await page.waitForSelector('[data-testid="retry-btn"] button, button[aria-label="重試"], [data-testid="retry-btn"], .retry-btn', { timeout: 8000 });
 
       // Verify DB has 0 runs and 0 messages
       const dbBeforeRetry = await queryConversationMessages(convId4);
@@ -534,12 +539,12 @@ async function run() {
 
       // Now click Retry: this should initiate a fresh SSE connection to backend
       console.log('Clicking Retry to initiate fresh SSE run...');
-      await page.click('[data-testid="retry-btn"], .retry-btn');
+      await page.click('[data-testid="retry-btn"] button, button[aria-label="重試"], [data-testid="retry-btn"], .retry-btn');
 
       // Wait until run completes
       await page.waitForFunction(() => {
         const assistant = document.querySelector('[data-message-role="assistant"]');
-        const stopBtn = document.querySelector('.stop-btn');
+        const stopBtn = document.querySelector('[data-testid="stop-btn"] button, button[aria-label="Stop generation"], .stop-btn');
         return Boolean(assistant && assistant.textContent.includes('deterministic mock') && !stopBtn);
       }, { timeout: 10000 });
 
@@ -601,12 +606,12 @@ async function run() {
       await page.click('button[aria-label="Send message"]');
 
       // Immediately click Stop before any delta is emitted
-      await page.waitForSelector('.stop-btn', { timeout: 5000 });
-      await page.click('.stop-btn');
+      await page.waitForSelector('[data-testid="stop-btn"] button, button[aria-label="Stop generation"], .stop-btn', { timeout: 5000 });
+      await page.click('[data-testid="stop-btn"] button, button[aria-label="Stop generation"], .stop-btn');
 
       // Wait until stream terminates and Stop button disappears
       await page.waitForFunction(() => {
-        return !document.querySelector('.stop-btn') && !document.querySelector('textarea')?.disabled;
+        return !document.querySelector('[data-testid="stop-btn"] button, button[aria-label="Stop generation"], .stop-btn') && !document.querySelector('textarea')?.disabled;
       }, { timeout: 10000 });
 
       const userCount5 = await page.$$eval('[data-message-role="user"]', els => els.length);
@@ -696,7 +701,7 @@ async function run() {
       }
 
       // Verify 409 conflict cleared pendingRequest: no retry button in DOM
-      const retryBtnAfter409 = await page.$('[data-testid="retry-btn"], .retry-btn');
+      const retryBtnAfter409 = await page.$('[data-testid="retry-btn"] button, button[aria-label="重試"], [data-testid="retry-btn"], .retry-btn');
       console.log(`Retry button present after 409: ${Boolean(retryBtnAfter409)} (must be false)`);
       if (retryBtnAfter409) {
         throw new Error('409 Conflict should clear pendingRequest and NOT display Retry button');
@@ -724,7 +729,7 @@ async function run() {
 
       await page.waitForFunction(() => {
         const assistant = document.querySelector('[data-message-role="assistant"]');
-        const stopBtn = document.querySelector('.stop-btn');
+        const stopBtn = document.querySelector('[data-testid="stop-btn"] button, button[aria-label="Stop generation"], .stop-btn');
         return Boolean(assistant && assistant.textContent.includes('deterministic mock') && !stopBtn);
       }, { timeout: 10000 });
 

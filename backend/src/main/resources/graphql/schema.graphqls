@@ -36,6 +36,7 @@ type Conversation {
   id: ID!
   botId: ID!
   title: String!
+  pinned: Boolean!
   createdAt: String!
   updatedAt: String!
   messages(limit: Int = 20, offset: Int = 0): [Message!]!
@@ -45,11 +46,12 @@ type Conversation {
 type Query {
   bots(limit: Int = 20, offset: Int = 0): [Bot!]!
   bot(id: ID!): Bot
-  conversations(limit: Int = 20, offset: Int = 0): [Conversation!]!
+  conversations(pinned: Boolean, limit: Int = 20, offset: Int = 0): [Conversation!]!
   conversation(id: ID!): Conversation
   run(id: ID!): Run
 }
 
 type Mutation {
   createConversation(botId: ID!, title: String): Conversation!
+  setConversationPinned(id: ID!, pinned: Boolean!): Conversation!
 }

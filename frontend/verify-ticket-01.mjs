@@ -1,8 +1,9 @@
 import puppeteer from 'puppeteer-core';
 import path from 'node:path';
+import { installBrowserGuard, getVerificationOrigins, assertSafeExecutionEnvironment } from './test/verification-harness.mjs';
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const BASE_URL = 'http://localhost:4200';
+const { frontendUrl: BASE_URL, backendUrl: BACKEND_URL } = getVerificationOrigins();
 const SENT_MESSAGE = '請用繁體中文回答：這是一次本機最小聊天閉環驗證。';
 
 const SCREENSHOT_DIR = '/tmp';
@@ -15,6 +16,8 @@ const SCREENSHOTS = {
 
 async function run() {
   console.log('--- Starting Ticket 01 Deterministic Browser Automation Verification ---');
+  await assertSafeExecutionEnvironment(BACKEND_URL);
+
   const browser = await puppeteer.launch({
     executablePath: CHROME_PATH,
     headless: true,
@@ -23,6 +26,7 @@ async function run() {
 
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 800 });
+  await installBrowserGuard(page, { mode: 'verified-backend' });
 
   try {
     // 1. Navigate to Web UI
@@ -48,27 +52,21 @@ async function run() {
     console.log('Initial Active Conversation ID:', prevConvId);
 
     console.log('Clicking "+ New Chat"...');
-    await page.click('.new-chat-btn');
+    await page.click('[data-testid="new-chat-btn"] button, button[aria-label="+ New Chat"], .new-chat-btn');
 
-    // Deterministic wait: wait until active conversation ID changes and message view is empty
+    // Deterministic wait: wait until active conversation switches to draft and message view is empty
     await page.waitForFunction(
       (oldId) => {
         const currentId = localStorage.getItem('bot_active_conversation_id');
         const rows = document.querySelectorAll('.message-row, [data-message-role]');
-        return Boolean(currentId && currentId !== oldId && rows.length === 0);
+        return Boolean(currentId !== oldId && rows.length === 0);
       },
       { timeout: 10000 },
       prevConvId
     );
 
-    const convId = await page.evaluate(() => localStorage.getItem('bot_active_conversation_id'));
-    console.log('Newly Established Conversation ID:', convId);
-    if (!convId || convId === prevConvId) {
-      throw new Error(`Failed to establish a new distinct conversation ID: got ${convId}`);
-    }
-
     await page.screenshot({ path: SCREENSHOTS.initial });
-    console.log('Saved initial screenshot:', SCREENSHOTS.initial);
+    console.log('Saved initial draft screenshot:', SCREENSHOTS.initial);
 
     // 4. Type Traditional Chinese message into composer
     console.log('Typing message into composer...');
@@ -84,28 +82,42 @@ async function run() {
     console.log('Submitting message...');
     await page.click('.send-btn, button[aria-label="Send message"]');
 
+    // Wait until conversation is established and messages mount
+    await page.waitForFunction(() => {
+      const curId = localStorage.getItem('bot_active_conversation_id');
+      const userMsg = document.querySelector('.message-row.user, [data-message-role="user"]');
+      return Boolean(curId && userMsg);
+    }, { timeout: 10000 });
+
+    const convId = await page.evaluate(() => localStorage.getItem('bot_active_conversation_id'));
+    console.log('Established Conversation ID after send:', convId);
+    if (!convId || convId === prevConvId) {
+      throw new Error(`Failed to establish a new distinct conversation ID: got ${convId}`);
+    }
+
     // Wait for message rows to mount
     await page.waitForSelector('.message-row.user, [data-message-role="user"]');
     await page.waitForSelector('.message-row.assistant, [data-message-role="assistant"]');
 
     // Strict assertion: verify controls reflect active streaming (Stop available, sending blocked, nav disabled)
     const streamLockState = await page.evaluate(() => {
-      const stopBtn = Array.from(document.querySelectorAll('.stop-btn, header button')).find(b => b.textContent.includes('Stop'));
-      const sendBtn = document.querySelector('.send-btn');
-      const newChatBtn = document.querySelector('.new-chat-btn');
+      const stopBtn = document.querySelector('[data-testid="stop-btn"] button') || document.querySelector('button[aria-label="Stop generation"]') || Array.from(document.querySelectorAll('.stop-btn, header button')).find(b => b.textContent.includes('Stop'));
+      const sendBtn = document.querySelector('button[aria-label="Send message"], .send-btn');
+      const newChatBtn = document.querySelector('[data-testid="new-chat-btn"] button') || document.querySelector('button[aria-label="+ New Chat"]') || document.querySelector('.new-chat-btn');
+      const label = stopBtn?.getAttribute('aria-label') || stopBtn?.textContent?.trim() || '';
       return {
         hasStopBtn: Boolean(stopBtn),
-        stopText: stopBtn?.textContent?.trim(),
+        stopLabel: label,
         sendBtnExists: Boolean(sendBtn),
-        newChatDisabled: newChatBtn?.disabled === true
+        newChatDisabled: newChatBtn?.disabled === true || Boolean(newChatBtn?.closest('[disabled]'))
       };
     });
     console.log('Stream Lock Assertions:', streamLockState);
     if (!streamLockState.hasStopBtn) {
       throw new Error('Assertion failed: Stop button must be visible during streaming');
     }
-    if (streamLockState.stopText !== 'Stop') {
-      throw new Error(`Assertion failed: Stop button text must be 'Stop', got '${streamLockState.stopText}'`);
+    if (!streamLockState.stopLabel.includes('Stop')) {
+      throw new Error(`Assertion failed: Stop button label must contain 'Stop', got '${streamLockState.stopLabel}'`);
     }
     if (streamLockState.sendBtnExists) {
       throw new Error('Assertion failed: Send button must not be active while streaming (replaced by Stop)');
@@ -130,7 +142,7 @@ async function run() {
     // Capture Delta 2 or completion
     const delta2Handle = await page.waitForFunction((prev) => {
       const text = (document.querySelector('.message-row.assistant .assistant-bubble, [data-message-role="assistant"]')?.textContent || '').trim();
-      const stopBtn = Array.from(document.querySelectorAll('header button, .stop-btn')).find(b => b.textContent.includes('Stop'));
+      const stopBtn = document.querySelector('[data-testid="stop-btn"] button') || document.querySelector('button[aria-label="Stop generation"]') || Array.from(document.querySelectorAll('header button, .stop-btn')).find(b => b.textContent.includes('Stop'));
       return (text.length > prev.length && text.startsWith(prev)) || (!stopBtn && text.length > 0);
     }, { timeout: 10000 }, delta1Text);
     const delta2Text = await delta2Handle.jsonValue();
@@ -139,9 +151,9 @@ async function run() {
     // 6. Wait for final generation completion (terminal event received)
     console.log('Waiting for terminal completion...');
     await page.waitForFunction(() => {
-      const stopBtn = Array.from(document.querySelectorAll('header button, .stop-btn')).find(b => b.textContent.includes('Stop'));
-      const newChatBtn = document.querySelector('.new-chat-btn');
-      return !stopBtn && newChatBtn?.disabled === false;
+      const stopBtn = document.querySelector('[data-testid="stop-btn"] button') || document.querySelector('button[aria-label="Stop generation"]') || Array.from(document.querySelectorAll('header button, .stop-btn')).find(b => b.textContent.includes('Stop'));
+      const newChatBtn = document.querySelector('[data-testid="new-chat-btn"] button') || document.querySelector('button[aria-label="+ New Chat"]') || document.querySelector('.new-chat-btn');
+      return !stopBtn && (newChatBtn?.disabled === false || !newChatBtn?.closest('[disabled]'));
     }, { timeout: 15000 });
 
     const assistantText = await page.$eval('.message-row.assistant .assistant-bubble, [data-message-role="assistant"]', el => el.textContent?.trim());

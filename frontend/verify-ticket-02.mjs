@@ -1,9 +1,11 @@
 import puppeteer from 'puppeteer-core';
 import path from 'node:path';
+import { installNodeFetchGuard, installBrowserGuard, getVerificationOrigins, assertSafeExecutionEnvironment } from './test/verification-harness.mjs';
+
+installNodeFetchGuard({ mode: 'verified-backend' });
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const BASE_URL = 'http://localhost:4200';
-const BACKEND_URL = 'http://localhost:8080';
+const { frontendUrl: BASE_URL, backendUrl: BACKEND_URL } = getVerificationOrigins();
 
 const SCREENSHOT_DIR = '/tmp';
 const SCREENSHOTS = {
@@ -91,6 +93,8 @@ async function sendRunViaBackend(convId, text) {
 
 async function run() {
   console.log('--- Starting Ticket 02 Deterministic Browser Automation Verification ---');
+  await assertSafeExecutionEnvironment(BACKEND_URL);
+
   const browser = await puppeteer.launch({
     executablePath: CHROME_PATH,
     headless: true,
@@ -99,6 +103,7 @@ async function run() {
 
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 900 });
+  await installBrowserGuard(page, { mode: 'verified-backend' });
 
   page.on('console', msg => {
     if (msg.type() === 'error') {
@@ -119,16 +124,16 @@ async function run() {
 
     // Establish fresh conversation
     await page.waitForFunction(() => {
-      const btn = document.querySelector('.new-chat-btn');
-      return btn && !btn.disabled;
+      const btn = document.querySelector('[data-testid="new-chat-btn"] button, button[aria-label="+ New Chat"], .new-chat-btn');
+      return btn && !btn.disabled && !btn.closest('[disabled]');
     });
     const oldId = await page.evaluate(() => localStorage.getItem('bot_active_conversation_id'));
-    await page.click('.new-chat-btn');
+    await page.click('[data-testid="new-chat-btn"] button, button[aria-label="+ New Chat"], .new-chat-btn');
     await page.waitForFunction(
       (prev) => {
         const cur = localStorage.getItem('bot_active_conversation_id');
         const rows = document.querySelectorAll('[data-message-role]');
-        return Boolean(cur && cur !== prev && rows.length === 0);
+        return Boolean(cur !== prev && rows.length === 0);
       },
       { timeout: 10000 },
       oldId
@@ -206,7 +211,7 @@ async function run() {
 
     await page.waitForFunction(() => {
       const sendBtn = document.querySelector('button[aria-label="Send message"]');
-      const stopBtn = document.querySelector('.stop-btn');
+      const stopBtn = document.querySelector('[data-testid="stop-btn"] button, button[aria-label="Stop generation"], .stop-btn');
       const assistant = document.querySelector('[data-message-role="assistant"]');
       return Boolean(sendBtn && !stopBtn && assistant && assistant.textContent.includes('mock streaming response'));
     }, { timeout: 15000 });
@@ -239,24 +244,24 @@ async function run() {
       return text.length > 0;
     }, { timeout: 10000 });
 
-    const hasStopBtn = await page.evaluate(() => Boolean(document.querySelector('.stop-btn')));
+    const hasStopBtn = await page.evaluate(() => Boolean(document.querySelector('[data-testid="stop-btn"] button, button[aria-label="Stop generation"], .stop-btn')));
     if (!hasStopBtn) {
       throw new Error('Stop button must be visible while streaming Turn 2');
     }
 
     console.log('Clicking Stop button...');
-    await page.click('.stop-btn');
+    await page.click('[data-testid="stop-btn"] button, button[aria-label="Stop generation"], .stop-btn');
 
     // Stop button idempotency: clicking stop again must not fail or throw
     await page.evaluate(() => {
-      const stopBtn = document.querySelector('.stop-btn');
+      const stopBtn = document.querySelector('[data-testid="stop-btn"] button, button[aria-label="Stop generation"], .stop-btn');
       if (stopBtn) stopBtn.click();
     });
 
     // Wait until stream finishes, Send button is restored, and interrupted banner appears
     await page.waitForFunction(() => {
       const sendBtn = document.querySelector('button[aria-label="Send message"]');
-      const stopBtn = document.querySelector('.stop-btn');
+      const stopBtn = document.querySelector('[data-testid="stop-btn"] button, button[aria-label="Stop generation"], .stop-btn');
       const banner = document.querySelector('[data-testid="last-interrupted-banner"], .recovering-banner');
       return Boolean(sendBtn && !stopBtn && banner);
     }, { timeout: 15000 });
@@ -335,7 +340,7 @@ async function run() {
       if (assistants.length < 3) return false;
       const thirdAssistant = assistants[2]?.textContent || '';
       const sendBtn = document.querySelector('button[aria-label="Send message"]');
-      const stopBtn = document.querySelector('.stop-btn');
+      const stopBtn = document.querySelector('[data-testid="stop-btn"] button, button[aria-label="Stop generation"], .stop-btn');
       const textarea = document.querySelector('textarea');
       return Boolean(sendBtn && !stopBtn && textarea && !textarea.disabled && thirdAssistant.includes('mock streaming response'));
     }, { timeout: 15000 });
@@ -395,7 +400,7 @@ async function run() {
       const title = document.querySelector('.header-title')?.textContent?.trim();
       const userMsg = document.querySelector('[data-message-role="user"]')?.textContent?.trim();
       const activeSidebarItem = document.querySelector('.conversation-item.active')?.textContent?.trim();
-      const hasLoadMoreConvBtn = Boolean(document.querySelector('.load-more-conv-btn'));
+      const hasLoadMoreConvBtn = Boolean(document.querySelector('[data-testid="load-more-conv-btn"], .load-more-conv-btn'));
       return { title, userMsg, activeSidebarItem, hasLoadMoreConvBtn };
     });
     console.log('Deep Conversation Restored State:', deepRestoredState);
@@ -409,7 +414,7 @@ async function run() {
     // Click "Load more conversations" in sidebar and verify list expands without duplicate IDs
     console.log('Clicking "Load more conversations" in sidebar...');
     const prevConvItemCount = await page.$$eval('.conversation-item', els => els.length);
-    await page.click('.load-more-conv-btn');
+    await page.click('[data-testid="load-more-conv-btn"] button, button[aria-label="Load more conversations"], .load-more-conv-btn');
 
     await page.waitForFunction((prevCount) => {
       const curCount = document.querySelectorAll('.conversation-item').length;
@@ -453,7 +458,7 @@ async function run() {
     // Initial page loads 20 messages (Seed Turn 02 through Seed Turn 11 = 20 messages; Seed Turn 01 is older)
     await page.waitForFunction(() => {
       const rows = document.querySelectorAll('[data-message-role]');
-      const loadMoreBtn = document.querySelector('.load-more-btn');
+      const loadMoreBtn = document.querySelector('[data-testid="load-more-btn"], .load-more-btn');
       return rows.length === 20 && Boolean(loadMoreBtn);
     }, { timeout: 15000 });
     console.log('Initial page of 20 messages mounted with "Load earlier messages" button visible.');
@@ -470,7 +475,7 @@ async function run() {
         const userBubbles = Array.from(document.querySelectorAll('[data-message-role="user"]'));
         const lastUser = userBubbles[userBubbles.length - 1]?.textContent?.trim();
         const sendBtn = document.querySelector('button[aria-label="Send message"]');
-        const stopBtn = document.querySelector('.stop-btn');
+        const stopBtn = document.querySelector('[data-testid="stop-btn"] button, button[aria-label="Stop generation"], .stop-btn');
         return Boolean(sendBtn && !stopBtn && lastUser === expectedText);
       }, { timeout: 15000 }, uiTurnText);
     }
@@ -484,19 +489,19 @@ async function run() {
     }
 
     // "Load earlier messages" must still be present
-    const hasLoadEarlier = await page.evaluate(() => Boolean(document.querySelector('.load-more-btn')));
+    const hasLoadEarlier = await page.evaluate(() => Boolean(document.querySelector('[data-testid="load-more-btn"], .load-more-btn')));
     if (!hasLoadEarlier) {
       throw new Error(`Expected 'Load earlier messages' button to still be present`);
     }
 
     // Click "Load earlier messages" to load the remaining 2 messages (Seed Turn 01)
     console.log('Clicking "Load earlier messages" button to load earlier history...');
-    await page.click('.load-more-btn');
+    await page.click('[data-testid="load-more-btn"] button, button[aria-label="Load earlier messages"], .load-more-btn');
 
     // Wait until all 44 messages are mounted and "Load earlier messages" button disappears
     await page.waitForFunction(() => {
       const rows = document.querySelectorAll('[data-message-role]');
-      const loadMoreBtn = document.querySelector('.load-more-btn');
+      const loadMoreBtn = document.querySelector('[data-testid="load-more-btn"], .load-more-btn');
       return rows.length === 44 && !loadMoreBtn;
     }, { timeout: 15000 });
 

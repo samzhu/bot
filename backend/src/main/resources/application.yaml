@@ -8,26 +8,18 @@ bot:
 spring:
   application:
     name: bot
-  autoconfigure:
-    exclude:
-      - org.springframework.ai.model.google.genai.autoconfigure.chat.GoogleGenAiChatAutoConfiguration
-      - org.springframework.ai.model.google.genai.autoconfigure.embedding.GoogleGenAiEmbeddingConnectionAutoConfiguration
-      - org.springframework.ai.model.google.genai.autoconfigure.embedding.GoogleGenAiTextEmbeddingAutoConfiguration
-      - org.springframework.ai.model.google.genai.autoconfigure.image.GoogleGenAiImageConnectionAutoConfiguration
-      - org.springframework.ai.model.google.genai.autoconfigure.image.GoogleGenAiImageAutoConfiguration
-      - org.springframework.ai.model.google.genai.autoconfigure.tts.GoogleGenAiTextToSpeechConnectionAutoConfiguration
-      - org.springframework.ai.model.google.genai.autoconfigure.tts.GoogleGenAiTextToSpeechAutoConfiguration
-      - org.springframework.ai.model.google.genai.autoconfigure.transcription.GoogleGenAiTranscriptionConnectionAutoConfiguration
-      - org.springframework.ai.model.google.genai.autoconfigure.transcription.GoogleGenAiTranscriptionAutoConfiguration
+  # WHY / ARCHITECTURAL AUTO-CONFIGURATION ISOLATION:
+  # All Spring AI starter dependencies (e.g. spring-ai-starter-model-google-genai-tts and
+  # spring-ai-starter-vector-store-pgvector) have been replaced with their respective raw modules
+  # (spring-ai-google-genai-tts and spring-ai-pgvector-store).
+  # As verified via Gradle dependencyInsight, zero spring-ai-autoconfigure-* artifacts exist
+  # on the runtime classpath. The previous 9 blanket exclusions for GoogleGenAi*AutoConfiguration
+  # (chat, embedding connection, text embedding, image connection, image, tts connection, tts,
+  # transcription connection, transcription) are removed because those auto-configuration classes
+  # are completely absent from the application classpath.
+  # All active AI beans are deterministically created via programmatic configuration (GoogleGenAiManualConfig, SessionConfig).
   ai:
     google:
       genai:
         chat:
           model: gemini-3.8-flash
-    vectorstore:
-      type: none
-      pgvector:
-        initialize-schema: false
-    model:
-      audio:
-        speech: none
