@@ -93,7 +93,7 @@ npm run test:unit
 # 3. SSE Stream Parser test suite alone (13 tests)
 npm run test:parser
 
-# 4. Production bundle build (actual bundle: 4.87 MB < 5.5 MB budget; component CSS: 7.07 kB < 8 kB budget)
+# 4. Production bundle build (actual bundle: 5.00 MB < 5.5 MB budget; component CSS: 7.07 kB < 8 kB budget)
 npm run build
 ```
 
@@ -117,6 +117,14 @@ node verify-clipboard.mjs
 ---
 
 ## 5. Architectural Boundaries & MVP Limitations
+
+### Dependency Overrides (KaTeX Security Mitigation)
+- **WHY**: `@copilotkit/angular@0.6.0` specifies `katex: "^0.16.22"`, which prevents standard semver resolution from installing the patched KaTeX version addressing [GHSA-238p-pmpm-9mq7](https://github.com/advisories/GHSA-238p-pmpm-9mq7). A narrow, scoped override (`@copilotkit/angular` -> `katex: 0.18.2`) forces the minimum patched version for this advisory. Public API compatibility (`renderToString`) and chat bundle behavior have been strictly verified.
+- **Removal Condition**: Remove this scoped override once upstream `@copilotkit/angular` natively updates its KaTeX dependency range to `>=0.18.2`.
+
+### Residual Security Advisories (Zod 3 Compatibility)
+- **Status (as of 2026-11-11)**: To preserve runtime compatibility with `@copilotkit/angular` and schema validation pipelines, Zod 3 compatibility is retained. The remaining 10 high-severity `npm audit` entries originate from a single upstream advisory, [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5), cascading through 9 dependent `@copilotkit/*` and `@ag-ui/*` packages.
+- **Upstream Tracking**: Zod maintainers have frozen v3 with no backports planned ([colinhacks/zod#6653](https://github.com/colinhacks/zod/issues/6653)), and CopilotKit tracks official Zod 4 migration in [CopilotKit#7967](https://github.com/CopilotKit/CopilotKit/issues/7967). This dependency restriction will be resolved once upstream natively supports `zod >= 4.6.6`. Zero risk is not claimed.
 
 - **In Scope**: Loopback developer identity, PostgreSQL JDBC schema migrations with version tracking, GraphQL conversation/message/run queries, unidirectional SSE streaming (`message.delta`, `run.completed`, `run.cancelled`, `run.failed`), single active run per conversation constraint, multi-turn sliding window history (10 turns), optimistic UI updates with conflict/retry recovery.
 - **Out of Scope (MVP)**: Multi-tenant JWT/OAuth2 authentication, speech-to-text (transcription), text-to-speech (TTS), embedding vector search / RAG, live web tools, GraalVM native image compilation.
