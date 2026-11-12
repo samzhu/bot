@@ -112,6 +112,8 @@ enum ProjectionState { VALID MISSING UNKNOWN }
 enum NativeValuePresence { PRESENT NULL_VALUE MISSING UNKNOWN }
 type NativeUsageValue { value: String presence: NativeValuePresence! meaning: String! }
 enum UsageCostStatus { UNPRICED COMPLETE PARTIAL UNKNOWN NOT_DISPATCHED }
+enum UsageReportStatus { EMPTY COMPLETE PARTIAL UNKNOWN }
+enum UsageReportMetric { INPUT OUTPUT CACHE_READ CACHE_WRITE }
 type UsageCostLineItem {
  category: String! nativeQuantity: String unit: String! meaning: String!
  rate: String rateBasis: String! exactAmount: String storedAmount: String reasons: [String!]!
@@ -141,7 +143,34 @@ type UsageSnapshot {
  adapterVersion: String! captureVersion: String! captureCompleteness: CaptureCompleteness! rawState: RawUsageState!
  rawUsage: String captureReason: String capturedAt: String!
 }
+type UsageReportSummary {
+ status: UsageReportStatus! currency: String! knownSubtotal: String completeTotal: String
+ unknownCount: String! coverageUnknownCount: String! recordedAttemptCount: String! unassignedCount: String!
+ sharePercent: String
+}
+type UsageNativeMetric {
+ knownValue: String completeValue: String unknownCount: String! unit: String! meaning: String!
+}
+type UsageNativeGroup {
+ provider: String! endpoint: String! model: String! schemaVersion: String!
+ input: UsageNativeMetric! output: UsageNativeMetric! cacheRead: UsageNativeMetric! cacheWrite: UsageNativeMetric!
+}
+type UsageDailyBucket {
+ day: String! knownSubtotal: String completeTotal: String unknownCount: String! recordedAttemptCount: String!
+ visualRatioPercent: Int
+}
+type UsageReport {
+ workspaceId: ID! periodDays: Int! from: String! to: String! asOf: String! timeZone: String!
+ simulation: Boolean! summary: UsageReportSummary! nativeGroups: [UsageNativeGroup!]!
+ daily: [UsageDailyBucket!]! attempts: UsageAttemptConnection!
+}
 extend type Query {
  myUsageAttempts(workspaceId: ID!, first: Int = 20, after: String): UsageAttemptConnection!
  myUsageAttempt(workspaceId: ID!, id: ID!): UsageAttempt
+ myUsageReport(workspaceId: ID!, periodDays: Int = 7, provider: String, model: String,
+               simulation: Boolean = false, first: Int = 20, after: String): UsageReport!
+ workspaceUsageReport(workspaceId: ID!, periodDays: Int = 7, provider: String, model: String,
+                      simulation: Boolean = false, first: Int = 20, after: String,
+                      memberId: ID, unassignedOnly: Boolean = false): UsageReport!
+ workspaceUsageAttempt(workspaceId: ID!, id: ID!): UsageAttempt
 }

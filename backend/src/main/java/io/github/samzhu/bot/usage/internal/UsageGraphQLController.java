@@ -17,6 +17,7 @@ import org.springframework.stereotype.Controller;
 
 import java.util.List;
 import java.util.Map;
+import static io.github.samzhu.bot.usage.internal.UsageReadModel.*;
 
 @Controller
 public class UsageGraphQLController {
@@ -33,48 +34,6 @@ public class UsageGraphQLController {
         this.workspace = workspace;
         this.costs = costs;
     }
-
-    public record Attempt(
-            String id,
-            String workspaceId,
-            String runId,
-            String providerRequestId,
-            String providerResponseId,
-            String preparedAt,
-            String startedAt,
-            String finishedAt,
-            String provider,
-            String endpoint,
-            String model,
-            String channel,
-            String executionOutcome,
-            String usagePresence,
-            String captureCompleteness,
-            String projectionError,
-            String projectionState,
-            String projectionVersion,
-            String effectiveSnapshotId,
-            boolean simulation,
-            String attemptCoverage) {}
-
-    public record Snapshot(
-            String id,
-            String eventId,
-            String ordinal,
-            String semantic,
-            String sourceLayer,
-            String schemaVersion,
-            String adapterVersion,
-            String captureVersion,
-            String captureCompleteness,
-            String rawState,
-            String rawUsage,
-            String captureReason,
-            String capturedAt) {}
-
-    public record PageInfo(boolean hasNextPage, String endCursor) {}
-
-    public record Connection<T>(List<T> nodes, PageInfo pageInfo) {}
 
     @QueryMapping
     public Connection<Attempt> myUsageAttempts(
@@ -109,7 +68,7 @@ public class UsageGraphQLController {
                         ? jdbc.query(
                                 "SELECT * FROM provider_attempt WHERE workspace_id=? AND actor_id=?"
                                     + " ORDER BY prepared_at DESC,id DESC LIMIT ?",
-                                (rs, n) -> attempt(rs),
+                                (rs, n) -> UsageReadModel.attempt(rs),
                                 workspaceId,
                                 actor,
                                 limit + 1)
@@ -117,7 +76,7 @@ public class UsageGraphQLController {
                                 "SELECT * FROM provider_attempt WHERE workspace_id=? AND actor_id=?"
                                     + " AND (prepared_at,id)<(?,?) ORDER BY prepared_at DESC,id"
                                     + " DESC LIMIT ?",
-                                (rs, n) -> attempt(rs),
+                                (rs, n) -> UsageReadModel.attempt(rs),
                                 workspaceId,
                                 actor,
                                 java.sql.Timestamp.from(time),
@@ -145,44 +104,13 @@ public class UsageGraphQLController {
                 .query(
                         "SELECT * FROM provider_attempt WHERE workspace_id=? AND actor_id=? AND"
                             + " id=?",
-                        (rs, n) -> attempt(rs),
+                        (rs, n) -> UsageReadModel.attempt(rs),
                         workspaceId,
                         actor,
                         id)
                 .stream()
                 .findFirst()
                 .orElse(null);
-    }
-
-    private Attempt attempt(java.sql.ResultSet rs) throws java.sql.SQLException {
-        return new Attempt(
-                rs.getString("id"),
-                rs.getString("workspace_id"),
-                rs.getString("run_id"),
-                rs.getString("provider_request_id"),
-                rs.getString("provider_response_id"),
-                rs.getTimestamp("prepared_at").toInstant().toString(),
-                rs.getTimestamp("started_at") == null
-                        ? null
-                        : rs.getTimestamp("started_at").toInstant().toString(),
-                rs.getTimestamp("finished_at") == null
-                        ? null
-                        : rs.getTimestamp("finished_at").toInstant().toString(),
-                rs.getString("provider"),
-                rs.getString("endpoint"),
-                rs.getString("model"),
-                rs.getString("channel"),
-                rs.getString("execution_outcome"),
-                rs.getString("usage_presence"),
-                rs.getString("capture_completeness"),
-                rs.getString("projection_error"),
-                rs.getString("projection_state"),
-                Long.toString(rs.getLong("projection_version")),
-                "VALID".equals(rs.getString("projection_state"))
-                        ? rs.getString("projection_snapshot_id")
-                        : null,
-                rs.getBoolean("simulation"),
-                rs.getString("attempt_coverage"));
     }
 
     public record NativeValue(String value, String presence, String meaning) {}
@@ -208,8 +136,7 @@ public class UsageGraphQLController {
     }
 
     private NativeValue nativeValue(Attempt attempt, String field) {
-        if (myUsageAttempt(attempt.workspaceId(), attempt.id()) == null)
-            throw new WorkspaceAccessDeniedException();
+        authorizeAttempt(attempt);
         String key =
                 switch (attempt.provider()) {
                     case "FAKE" -> field;
@@ -266,9 +193,9 @@ public class UsageGraphQLController {
 
     @SchemaMapping(typeName = "UsageAttempt", field = "cost")
     public java.util.Map<String, Object> cost(Attempt attempt) {
-        if (myUsageAttempt(attempt.workspaceId(), attempt.id()) == null)
-            throw new WorkspaceAccessDeniedException();
-        var c = costs.readCosts(java.util.List.of(attempt.id())).get(attempt.id());
+        authorizeAttempt(attempt);
+        var c = attempt.reportRead() ? attempt.reportCost()
+                : costs.readCosts(java.util.List.of(attempt.id())).get(attempt.id());
         if (c == null) throw new WorkspaceAccessDeniedException();
         var result = new java.util.HashMap<String, Object>();
         result.put("status", c.status()); result.put("amount", c.completeAmount());
@@ -290,8 +217,7 @@ public class UsageGraphQLController {
     @SchemaMapping(typeName = "UsageAttempt", field = "snapshots")
     public Connection<Snapshot> snapshots(
             Attempt attempt, @Argument Integer first, @Argument String after) {
-        if (myUsageAttempt(attempt.workspaceId(), attempt.id()) == null)
-            throw new WorkspaceAccessDeniedException();
+        authorizeAttempt(attempt);
         int limit = pageSize(first);
         String[] cursor =
                 after == null
@@ -362,6 +288,18 @@ public class UsageGraphQLController {
                                 nodes.getLast().ordinal(),
                                 nodes.getLast().id());
         return new Connection<>(nodes, new PageInfo(more, next));
+    }
+
+    private void authorizeAttempt(Attempt attempt) {
+        String actor = user.getCurrentUserId();
+        workspace.requireMember(attempt.workspaceId(), actor);
+        if (attempt.managerScope()) {
+            if (!workspace.isManager(attempt.workspaceId(), actor)) throw new WorkspaceAccessDeniedException();
+            Integer count = jdbc.queryForObject("SELECT count(*) FROM provider_attempt WHERE workspace_id=? AND id=?", Integer.class, attempt.workspaceId(), attempt.id());
+            if (count == null || count != 1) throw new WorkspaceAccessDeniedException();
+        } else if (myUsageAttempt(attempt.workspaceId(), attempt.id()) == null) {
+            throw new WorkspaceAccessDeniedException();
+        }
     }
 
     private static int pageSize(Integer first) {

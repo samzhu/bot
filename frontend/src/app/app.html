@@ -8,7 +8,7 @@
     @if (currentView() === 'bots') {
       <app-bot-manager (startChat)="openBotDraft($event)" (saved)="navigation()?.refreshBots()" />
     } @else if (currentView() === 'usage') {
-      <app-usage [workspaceId]="workspaces.selectedId()" (back)="currentView.set('chat')" />
+      <app-usage [workspaceId]="workspaces.selectedId()" [manager]="selectedWorkspaceManager()" (back)="currentView.set('chat')" />
     } @else {
       @if (streamError()) { <p role="alert">{{streamError()}} @if (streamError() === '載入對話歷史失敗。') { <button type="button" (click)="retryHistory()">重試載入</button> } @if (streamError()?.includes('狀態尚未確認')) { <button type="button" (click)="checkChatStatus()">查詢執行狀態</button> }</p> }
       @if (specifiedBot(); as bot) {

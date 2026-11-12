@@ -58,6 +58,7 @@ export interface GraphQLMessageView {
 })
 export class App implements OnInit {
   readonly workspaces = new WorkspaceStore();
+  readonly selectedWorkspaceManager = computed(() => this.workspaces.workspaces().find(item => item.id === this.workspaces.selectedId())?.role === 'MANAGER');
   private readonly sourceWorkspaces = new WeakMap<ChatSession, string>();
   readonly navigation = viewChild(ChatNavigationComponent);
   readonly navigationLayout = signal<ChatSidenavMode>('expanded');

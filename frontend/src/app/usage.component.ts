@@ -1,13 +1,21 @@
-import { Component, Input, OnChanges, OnDestroy, output } from '@angular/core';
+import { Component, Input, OnChanges, OnDestroy, output, signal } from '@angular/core';
 import { NativeUsageValue, UsageSnapshot, UsageStore } from './usage.store';
 import { CostExplanationComponent } from './cost-explanation.component';
+import { UsageReportsComponent } from './usage-reports.component';
 
 @Component({
-  selector: 'app-usage', standalone: true, imports: [CostExplanationComponent],
+  selector: 'app-usage', standalone: true, imports: [CostExplanationComponent, UsageReportsComponent],
   template: `
     <section class="usage" role="region" tabindex="0" aria-label="個人用量內容，可垂直捲動">
       <button type="button" (click)="back.emit()">返回對話</button>
       <h1>個人用量</h1>
+      <nav aria-label="用量頁面">
+        <button type="button" [attr.aria-pressed]="activeTab()==='attempts'" (click)="activeTab.set('attempts')">逐次用量</button>
+        <button type="button" [attr.aria-pressed]="activeTab()==='reports'" (click)="activeTab.set('reports')">報表</button>
+      </nav>
+      @if (activeTab()==='reports') {
+        <app-usage-reports [workspaceId]="workspaceId" [manager]="manager" />
+      } @else {
       @if (store.loading()) { <p role="status">載入用量中…</p> }
       @if (store.error()) { <p role="alert">{{store.error()}} <button type="button" (click)="store.retry()">重試</button></p> }
       @if (!store.loading() && !store.error() && !store.attempts().length) { <p>目前沒有用量紀錄。</p> }
@@ -52,12 +60,15 @@ import { CostExplanationComponent } from './cost-explanation.component';
           @if (store.snapshotsHasMore()) { <button type="button" [disabled]="store.snapshotsLoading()" (click)="store.loadMoreSnapshots()">載入更多快照</button> }
         </section>
       }
+      }
     </section>
   `,
   styles: [`:host{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;min-width:0;overflow:hidden}.usage{flex:1 1 auto;min-height:0;min-width:0;padding:1rem;overflow:auto}.table-scroll{overflow:auto;max-inline-size:100%}table{border-collapse:separate;border-spacing:0}th,td{padding:.5rem;text-align:start;vertical-align:top;white-space:nowrap}thead th{position:sticky;inset-block-start:0;background:Canvas}tbody th{position:sticky;inset-inline-start:0;background:Canvas}small{display:block;white-space:normal}pre{white-space:pre-wrap;overflow-wrap:anywhere}`]
 })
 export class UsageComponent implements OnChanges, OnDestroy {
   @Input() workspaceId: string | null = null;
+  @Input() manager = false;
+  readonly activeTab=signal<'attempts'|'reports'>('attempts');
   readonly back = output<void>(); readonly store = new UsageStore();
   ngOnChanges(): void { void this.store.setWorkspace(this.workspaceId); }
   ngOnDestroy(): void { void this.store.setWorkspace(null); }
