@@ -26,6 +26,18 @@
    - 查證義務：Root 與 agy1/agy2/agy3 於規劃與實作前均有先查證官方資料之義務；驗收發現缺陷退回修正後須落實複驗。
    - 彈性調用技能：涉及規格規劃至實作時，依序遵循 `to-spec` → `to-tickets` → `implement` 之標準流程，但依需求彈性調用，不將所有小型修改強制綁定全套技能。
 
+### 官方參考來源與重新查核時機
+
+- 每次規劃、開票、修改或驗收涉及套件行為的工作，以及依賴升級、文件與實作不一致時，重新確認實際解析版本與對應章節；沿用舊結論前檢查版本與文件是否已變動。
+- **AG-UI**：涉及 Agent 通訊時查閱[官方協定](https://docs.ag-ui.com/)、[HttpAgent](https://docs.ag-ui.com/sdk/js/client/http-agent)與 [Middleware](https://docs.ag-ui.com/sdk/js/client/middleware)，搭配 ThreadPlane adapter 與固定版本公開型別查核事件、識別字、取消及復原；區分瀏覽器能力與可信伺服器責任。
+- **Angular／CDK**：查閱 [Angular 官方文件](https://angular.dev/)與 [CDK 官方文件](https://material.angular.dev/cdk/categories)，核對目前版本的表單、signals、元件生命週期、無障礙及測試能力。
+- **ThreadPlane**：涉及替換或使用其聊天元件／Agent adapter 時，先讀 [Angular 指南](https://threadplane.ai/docs/angular/chat/getting-started/introduction)，由 [API 索引](https://threadplane.ai/docs/api?mode=docs)進入對應元件與 adapter；對照 npm 實際發布版本、peer dependencies、公開型別及原碼，區分未發布的開發 API，並查核輸入、取消、持久化與生命週期的應用責任。
+- **Spring AI**：使用[目前指定的 2.1 reference](https://docs.spring.io/spring-ai/reference/2.1/index.html)，並核對實際 BOM／module 版本；RC API 有落差時查同版 tag、JAR 與 release notes。
+- **Spring Boot／Framework**：查閱 [Boot reference](https://docs.spring.io/spring-boot/reference/)、[配置屬性表](https://docs.spring.io/spring-boot/appendix/application-properties/index.html)及 [Framework reference](https://docs.spring.io/spring-framework/reference/)，依工作選讀配置、測試、開發服務、GraphQL、串流生命週期與打包章節。
+- **模型／雲端整合**：以 [Gemini API 官方文件](https://ai.google.dev/gemini-api/docs)、[Google AI Studio](https://aistudio.google.com/)及 [Google Cloud 官方文件](https://cloud.google.com/docs)確認模型識別字、能力、限制與部署選項；設定中的模型名稱與實際 SDK 支援須分別核對。
+- **瀏覽器標準**：涉及 dialog、fetch、串流與取消時，查閱 [WHATWG HTML](https://html.spec.whatwg.org/)、[Fetch](https://fetch.spec.whatwg.org/)與 [Streams](https://streams.spec.whatwg.org/)規範；MDN 可協助理解，行為衝突以標準與實際瀏覽器驗證交叉確認。
+- 技術結論的規格或研究記錄保留實際版本、查核日期、已讀章節連結與取得失敗；本節僅提供來源與觸發條件，不宣稱連結內容永遠適用。
+
 ## 二、資料庫與領域塑模 (DB & Schema Clean Code)
 
 1. **命名規範與領域對齊**
@@ -55,7 +67,7 @@
 
 3. **前端開發與元件規範**
    - 需求追溯：規劃、實作與驗收前，先核對使用者指定的需求與設計依據，建立可追溯的對照；偏差、取捨與驗收條件記錄於規格 Issue。AGENTS.md 僅保存跨任務工作原則，具體功能與畫面設計集中於規格。
-   - 標準與型別優先：遵循專案已安裝之穩定 Angular 規範；使用 CopilotKit 先查閱官方手冊與 TypeScript 型別宣告。
+   - 標準與型別優先：遵循專案已安裝之穩定 Angular 規範；使用 ThreadPlane 先查閱官方手冊與已發布的 TypeScript 型別宣告。
    - 樣式整合原則：採用 SDK 原生預設樣式，不覆寫 SDK 私有內部 CSS；設計參考之 PDF 僅作功能與版面配置參考，不可視為直接 UI 樣式來源。
    - 標準元件回退：SDK 欠缺通用管理控制項時，評估採用標準 Angular/HTML 能力，不捏造假 API 或假 Handler。
 

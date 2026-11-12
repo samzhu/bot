@@ -8,6 +8,16 @@ import java.util.concurrent.ConcurrentHashMap;
 public class RunRegistry {
 
     private final ConcurrentHashMap<String, RunHandle> activeHandles = new ConcurrentHashMap<>();
+    // Bounded fair stripes serialize publication and cancellation of the same run without
+    // retaining a lock per historical ID. Model execution is outside these gates.
+    // These in-memory stripes coordinate only one application process, not multiple nodes.
+    private final java.util.concurrent.locks.ReentrantLock[] lifecycleGates = java.util.stream.IntStream.range(0, 256)
+            .mapToObj(i -> new java.util.concurrent.locks.ReentrantLock(true))
+            .toArray(java.util.concurrent.locks.ReentrantLock[]::new);
+
+    public java.util.concurrent.locks.ReentrantLock lifecycleGate(String runId) {
+        return lifecycleGates[Math.floorMod(runId.hashCode(), lifecycleGates.length)];
+    }
 
     public void register(String runId, RunHandle handle) {
         activeHandles.put(runId, handle);

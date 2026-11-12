@@ -277,4 +277,62 @@ describe('Browser Request Interception Guard (Puppeteer E2E)', () => {
 
     await page.close();
   });
+  it('unguarded AG-UI reaches browser trap while default guard blocks it', async () => {
+    const page = await browser.newPage();
+    await page.goto(trapUrl);
+    await page.evaluate(() => fetch('/api/ag-ui', { method: 'POST', body: '{}' }));
+    assert.equal(trapReceivedRequests.filter(r => r.url.startsWith('/api/ag-ui')).length, 1);
+    trapReceivedRequests = [];
+    await installBrowserGuard(page);
+    const status = await page.evaluate(async () => (await fetch('/api/ag-ui?query=1', { method: 'POST', body: '{}' })).status);
+    assert.equal(status, 403);
+    assert.equal(trapReceivedRequests.filter(r => r.url.startsWith('/api/ag-ui')).length, 0);
+    await page.close();
+  });
+
+  it('AG-UI verified mode rejects unsafe backend without browser generation traffic', async () => {
+    const page = await browser.newPage();
+    await installBrowserGuard(page, { mode: 'verified-backend' });
+    await page.goto(trapUrl);
+    const status = await page.evaluate(async () => (await fetch('/api/ag-ui', { method: 'POST', body: '{}' })).status);
+    assert.equal(status, 403);
+    assert.equal(trapReceivedRequests.filter(r => r.url.startsWith('/api/ag-ui')).length, 0);
+    await page.close();
+  });
+
+  it('AG-UI mock preserves request identity and last user text without reaching trap', async () => {
+    const page = await browser.newPage();
+    const store = createSyntheticStore();
+    await installBrowserGuard(page, { mode: 'mock', syntheticStore: store });
+    await page.goto(trapUrl);
+    const result = await page.evaluate(async () => {
+      const response = await fetch('/api/ag-ui?source=browser#fragment', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ threadId: 'thread-123', runId: 'run-123', messages: [{ id: 'user-123', role: 'user', content: 'hello' }, { id: 'prior-assistant', role: 'assistant', content: 'old' }] }) });
+      return { status: response.status, body: await response.text() };
+    });
+    assert.equal(result.status, 200);
+    const events = result.body.split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6)));
+    assert.deepEqual(events.map(e => e.type), ['RUN_STARTED', 'TEXT_MESSAGE_START', 'TEXT_MESSAGE_CONTENT', 'TEXT_MESSAGE_END', 'RUN_FINISHED']);
+    assert.equal(events[0].threadId, 'thread-123');
+    assert.equal(events[0].runId, 'run-123');
+    const conv = store.getConversation('thread-123');
+    assert.equal(conv.messages[0].id, 'user-123');
+    assert.equal(conv.messages[0].content, 'hello');
+    assert.equal(conv.messages[0].runId, 'run-123');
+    assert.equal(conv.messages[1].runId, 'run-123');
+    assert.equal(conv.messages[1].id, events[1].messageId);
+    assert.equal(conv.runs[0].id, 'run-123');
+    assert.equal(trapReceivedRequests.filter(r => r.url.startsWith('/api/ag-ui')).length, 0);
+    await page.close();
+  });
+
+  it('AG-UI fail-closed blocks browser POST with zero trap generation calls', async () => {
+    const page = await browser.newPage();
+    await installBrowserGuard(page, { mode: 'fail-closed' });
+    await page.goto(trapUrl);
+    const status = await page.evaluate(async () => (await fetch('/api/ag-ui?x=1', { method: 'POST', body: '{}' })).status);
+    assert.equal(status, 403);
+    assert.equal(trapReceivedRequests.filter(r => r.url.startsWith('/api/ag-ui')).length, 0);
+    await page.close();
+  });
+
 });

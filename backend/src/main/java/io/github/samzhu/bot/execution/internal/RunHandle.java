@@ -1,5 +1,14 @@
 package io.github.samzhu.bot.execution.internal;
 
+import com.agui.community.core.event.Event;
+import com.agui.community.core.event.RunErrorEvent;
+import com.agui.community.core.event.RunFinishedEvent;
+import com.agui.community.core.event.RunStartedEvent;
+import com.agui.community.core.event.TextMessageContentEvent;
+import com.agui.community.core.event.TextMessageEndEvent;
+import com.agui.community.core.event.TextMessageStartEvent;
+import com.agui.community.core.message.Role;
+import com.agui.community.spring.server.core.JacksonSerializer;
 import io.github.samzhu.bot.execution.RunStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,6 +27,7 @@ import java.util.concurrent.ScheduledFuture;
 public class RunHandle {
 
     private static final Logger log = LoggerFactory.getLogger(RunHandle.class);
+    private static final JacksonSerializer AGUI_SERIALIZER = new JacksonSerializer();
 
     // Why single lock monitor: guarantees that delta appending, sequence increment,
     // event emission, and terminal CAS transition happen atomically without reordering or concurrency races.
@@ -28,6 +38,8 @@ public class RunHandle {
     private final SseEmitter emitter;
     private final RunRegistry registry;
     private final String userMessageId;
+    private final String assistantId;
+    private boolean textStarted;
     private final TerminalCallback callback;
     // Why Disposables.swap(): prevents race conditions where a stream reaches terminal
     // (or is cancelled) before the reactive subscription is attached; disposing swapDisposable
@@ -36,6 +48,9 @@ public class RunHandle {
     private final StringBuilder fullReply = new StringBuilder();
 
     private boolean terminal = false;
+    private enum TerminalClaim { ACTIVE, CANCEL_REQUESTED, FINALIZING }
+    private final java.util.concurrent.atomic.AtomicReference<TerminalClaim> terminalClaim =
+            new java.util.concurrent.atomic.AtomicReference<>(TerminalClaim.ACTIVE);
     private int seq = 1; // run.started is seq 1, deltas start at 2
 
     private ScheduledFuture<?> deadlineFuture;
@@ -64,6 +79,7 @@ public class RunHandle {
             SseEmitter emitter,
             RunRegistry registry,
             String userMessageId,
+            String assistantId,
             TerminalCallback callback) {
         this.runId = runId;
         this.conversationId = conversationId;
@@ -71,6 +87,7 @@ public class RunHandle {
         this.emitter = emitter;
         this.registry = registry;
         this.userMessageId = userMessageId;
+        this.assistantId = assistantId;
         this.callback = callback;
 
         this.emitter.onCompletion(() -> {
@@ -89,7 +106,7 @@ public class RunHandle {
         });
         this.emitter.onTimeout(() -> {
             synchronized (lock) {
-                if (terminal) return;
+                if (terminal || !terminalClaim.compareAndSet(TerminalClaim.ACTIVE, TerminalClaim.FINALIZING)) return;
                 /*
                  * RATIONALE: Servlet container timeout callback is the container's error notification/cleanup mechanism.
                  * Transitioning to FAILED with timeout error reason reflects true outcome rather than CANCELLED,
@@ -112,7 +129,7 @@ public class RunHandle {
             SseEmitter emitter,
             RunRegistry registry,
             TerminalCallback callback) {
-        this(runId, conversationId, ownerId, emitter, registry, null, callback);
+        this(runId, conversationId, ownerId, emitter, registry, null, null, callback);
     }
 
     public void startScheduledTasks(TaskScheduler scheduler, Duration deadline, Duration heartbeatInterval) {
@@ -145,6 +162,10 @@ public class RunHandle {
     public void sendStarted() {
         synchronized (lock) {
             try {
+                if (assistantId != null) {
+                    sendAgUi(new RunStartedEvent(conversationId, runId));
+                    return;
+                }
                 Map<String, Object> data = new HashMap<>();
                 data.put("runId", runId);
                 data.put("seq", 1);
@@ -157,6 +178,20 @@ public class RunHandle {
             } catch (Exception ex) {
                 handleWriteFailure("Failed to send initial run.started: " + ex.getMessage());
             }
+        }
+    }
+
+    // The CAS orders cancellation against terminal callbacks without waiting for an
+    // emitter write while the caller holds the shared lifecycle stripe.
+    public void requestCancellation() {
+        terminalClaim.compareAndSet(TerminalClaim.ACTIVE, TerminalClaim.CANCEL_REQUESTED);
+    }
+
+    // The caller also holds the lifecycle stripe, ordering this check with cancellation.
+    public void startSubscription(java.util.function.Supplier<Disposable> subscribe) {
+        synchronized (lock) {
+            if (terminal || terminalClaim.get() != TerminalClaim.ACTIVE) return;
+            swapDisposable.update(subscribe.get());
         }
     }
 
@@ -174,10 +209,18 @@ public class RunHandle {
     public void delta(String chunk) {
         if (chunk == null || chunk.isEmpty()) return;
         synchronized (lock) {
-            if (terminal) return;
+            if (terminal || terminalClaim.get() != TerminalClaim.ACTIVE) return;
             fullReply.append(chunk);
             int currentSeq = ++seq;
             try {
+                if (assistantId != null) {
+                    if (!textStarted) {
+                        sendAgUi(new TextMessageStartEvent(assistantId, Role.ASSISTANT));
+                        textStarted = true;
+                    }
+                    sendAgUi(new TextMessageContentEvent(assistantId, chunk));
+                    return;
+                }
                 emitter.send(SseEmitter.event()
                         .name("message.delta")
                         .data(Map.of("runId", runId, "seq", currentSeq, "delta", chunk)));
@@ -209,15 +252,17 @@ public class RunHandle {
 
     public void complete(String userPrompt) {
         synchronized (lock) {
-            if (terminal) return;
-            clearScheduledTasks();
+            if (terminal || terminalClaim.get() != TerminalClaim.ACTIVE) return;
             String answer = fullReply.toString();
             if (answer.isBlank()) {
                 fail("Empty model response");
                 return;
             }
-
-            TerminalResult result = callback.commitTerminal(runId, conversationId, RunStatus.COMPLETED, null, answer, false, userPrompt);
+            // The CAS, not the later DB commit, decides whether completion or cancellation won.
+            if (!terminalClaim.compareAndSet(TerminalClaim.ACTIVE, TerminalClaim.FINALIZING)) return;
+            clearScheduledTasks();
+            TerminalResult result = commitOrAbandon(RunStatus.COMPLETED, null, answer, false, userPrompt);
+            if (result == null) return;
             terminal = true;
             swapDisposable.dispose();
             registry.remove(runId);
@@ -228,10 +273,11 @@ public class RunHandle {
 
     public void fail(String errorMessage) {
         synchronized (lock) {
-            if (terminal) return;
+            if (terminal || !terminalClaim.compareAndSet(TerminalClaim.ACTIVE, TerminalClaim.FINALIZING)) return;
             clearScheduledTasks();
             String partial = fullReply.toString();
-            TerminalResult result = callback.commitTerminal(runId, conversationId, RunStatus.FAILED, errorMessage, partial, true, null);
+            TerminalResult result = commitOrAbandon(RunStatus.FAILED, errorMessage, partial, true, null);
+            if (result == null) return;
             terminal = true;
             swapDisposable.dispose();
             registry.remove(runId);
@@ -245,15 +291,34 @@ public class RunHandle {
             if (terminal) {
                 return callback.queryCurrentStatus(runId);
             }
+            requestCancellation();
             clearScheduledTasks();
             String partial = fullReply.toString();
-            TerminalResult result = callback.commitTerminal(runId, conversationId, RunStatus.CANCELLED, "Run cancelled by user", partial, true, null);
+            TerminalResult result = commitOrAbandon(RunStatus.CANCELLED, "Run cancelled by user", partial, true, null);
+            if (result == null) throw new IllegalStateException("Unable to determine run terminal status");
             terminal = true;
             swapDisposable.dispose();
             registry.remove(runId);
 
             dispatchTerminalEvent(result);
             return result.finalStatus();
+        }
+    }
+
+    // If terminal writes and the fallback lookup fail, the DB status is unknown.
+    // A still-RUNNING row blocks new runs until explicit cancellation after recovery
+    // or startup orphan reconciliation; a transport error must not claim DB failure.
+    private TerminalResult commitOrAbandon(RunStatus status, String error, String content,
+                                           boolean interrupted, String userPrompt) {
+        try {
+            return callback.commitTerminal(runId, conversationId, status, error, content, interrupted, userPrompt);
+        } catch (RuntimeException ex) {
+            terminal = true;
+            clearScheduledTasks();
+            swapDisposable.dispose();
+            registry.remove(runId);
+            try { emitter.completeWithError(ex); } catch (RuntimeException ignored) { }
+            return null;
         }
     }
 
@@ -270,6 +335,10 @@ public class RunHandle {
             return;
         }
 
+        if (assistantId != null) {
+            dispatchAgUiTerminal(result);
+            return;
+        }
         int currentSeq = ++seq;
         RunStatus status = result.finalStatus();
 
@@ -304,6 +373,35 @@ public class RunHandle {
         }
     }
 
+    private void sendAgUi(Event event) throws IOException {
+        emitter.send(SseEmitter.event().data(AGUI_SERIALIZER.serialize(event)));
+    }
+
+    private void dispatchAgUiTerminal(TerminalResult result) {
+        try {
+            if (textStarted) {
+                sendAgUi(new TextMessageEndEvent(assistantId));
+            }
+            if (result.finalStatus() == RunStatus.COMPLETED) {
+                sendAgUi(new RunFinishedEvent(conversationId, runId));
+            } else if (result.finalStatus() == RunStatus.CANCELLED) {
+                // Java core 0.1.1 cannot represent the standard 1.0.4 cancelled outcome.
+                // Serialize its wire shape until the published Java sealed union supports it.
+                Map<String, Object> cancelled = Map.of(
+                        "type", "RUN_FINISHED",
+                        "threadId", conversationId,
+                        "runId", runId,
+                        "outcome", Map.of("type", "cancelled"));
+                emitter.send(SseEmitter.event().data(AGUI_SERIALIZER.serialize(cancelled)));
+            } else {
+                sendAgUi(new RunErrorEvent("Execution failed"));
+            }
+            emitter.complete();
+        } catch (Exception ex) {
+            log.info("AG-UI terminal delivery failed for run {}: {}", runId, ex.getMessage());
+        }
+    }
+
     private void sendTerminalEventAndClose(String eventName, Map<String, Object> data) {
         try {
             emitter.send(SseEmitter.event().name(eventName).data(data));
@@ -333,14 +431,17 @@ public class RunHandle {
     }
 
     private void handleWriteFailure(String reason) {
-        if (terminal) return;
+        if (terminal || !terminalClaim.compareAndSet(TerminalClaim.ACTIVE, TerminalClaim.FINALIZING)) return;
         terminal = true;
         clearScheduledTasks();
         registry.remove(runId);
         log.info("Client write failed or disconnected for run {}: {}", runId, reason);
         String partial = fullReply.toString();
-        callback.commitTerminal(runId, conversationId, RunStatus.CANCELLED, reason, partial, true, null);
-        swapDisposable.dispose();
+        try {
+            callback.commitTerminal(runId, conversationId, RunStatus.CANCELLED, reason, partial, true, null);
+        } finally {
+            swapDisposable.dispose();
+        }
         /*
          * RATIONALE: Spring Framework 7 / Servlet container cleanup contract.
          * When an IOException occurs while writing to the HTTP socket, the servlet container (Tomcat)

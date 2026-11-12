@@ -166,123 +166,54 @@ describe('Issue #11 Frontend: Conversation Pinning & Dual-Section Sidebar', () =
     expect(app.unpinnedConversations()[0].pinned).toBe(false);
   });
 
-  it('2. should render dual sections in sidebar with independent empty states', async () => {
-    const fixture = TestBed.createComponent(App);
-    const app = fixture.componentInstance;
+  it('2. renders separate pinned and recent sections with independent empty states', async () => {
+    const fixture = TestBed.createComponent(App); const app = fixture.componentInstance;
     fixture.detectChanges();
-
-    await vi.waitFor(() => {
-      expect(app.pinnedConversations().length).toBe(1);
-      expect(app.unpinnedConversations().length).toBe(1);
-    });
+    await vi.waitFor(() => { expect(app.pinnedConversations()).toHaveLength(1); expect(app.unpinnedConversations()).toHaveLength(1); });
     fixture.detectChanges();
-
-    const compiled = fixture.nativeElement as HTMLElement;
-    expect(compiled.querySelector('.sidebar-pinned-section')).toBeTruthy();
-    expect(compiled.querySelector('.sidebar-unpinned-section')).toBeTruthy();
-
-    // Both sections have items
-    expect(compiled.querySelector('[data-testid="pinned-empty"]')).toBeNull();
-    expect(compiled.querySelector('[data-testid="unpinned-empty"]')).toBeNull();
-
-    // Set pinned to empty
-    app.pinnedConversations.set([]);
-    fixture.detectChanges();
-    expect(compiled.querySelector('[data-testid="pinned-empty"]')?.textContent).toContain('尚無釘選對話');
-
-    // Set unpinned to empty
-    app.unpinnedConversations.set([]);
-    fixture.detectChanges();
-    expect(compiled.querySelector('[data-testid="unpinned-empty"]')?.textContent).toContain('尚無近期對話');
+    const root = fixture.nativeElement as HTMLElement;
+    const pinned = root.querySelector('[aria-label="釘選對話"]')!;
+    const recent = root.querySelector('[aria-label="近期對話"]')!;
+    expect(pinned.textContent).toContain('Pinned Conversation 1');
+    expect(recent.textContent).toContain('Unpinned Conversation 1');
+    app.pinnedConversations.set([]); fixture.detectChanges();
+    expect(pinned.textContent).toContain('尚無釘選對話');
+    expect(recent.textContent).toContain('Unpinned Conversation 1');
+    app.unpinnedConversations.set([]); fixture.detectChanges();
+    expect(recent.textContent).toContain('尚無近期對話');
   });
 
-  it('3. should allow collapsing pinned and recent sections independently', async () => {
-    const fixture = TestBed.createComponent(App);
-    const app = fixture.componentInstance;
-    fixture.detectChanges();
-    await fixture.whenStable();
-    fixture.detectChanges();
-
-    const compiled = fixture.nativeElement as HTMLElement;
-
-    // Initially both expanded
-    expect(app.isPinnedCollapsed()).toBe(false);
-    expect(app.isUnpinnedCollapsed()).toBe(false);
-
-    // Collapse pinned
-    app.togglePinnedSection();
-    fixture.detectChanges();
-    expect(app.isPinnedCollapsed()).toBe(true);
-    expect(compiled.querySelector('.pinned-list-container')).toBeNull();
-
-    // Collapse unpinned
-    app.toggleUnpinnedSection();
-    fixture.detectChanges();
-    expect(app.isUnpinnedCollapsed()).toBe(true);
-    expect(compiled.querySelector('.unpinned-list-container')).toBeNull();
+  it('3. collapses pinned and recent sections independently', async () => {
+    const fixture = TestBed.createComponent(App); fixture.detectChanges(); await fixture.whenStable(); fixture.detectChanges();
+    const root = fixture.nativeElement as HTMLElement;
+    const pinned = root.querySelector('[aria-label="釘選對話"] h2 button') as HTMLButtonElement;
+    const recent = root.querySelector('[aria-label="近期對話"] h2 button') as HTMLButtonElement;
+    pinned.click(); fixture.detectChanges();
+    expect(pinned.getAttribute('aria-expanded')).toBe('false'); expect(recent.getAttribute('aria-expanded')).toBe('true');
+    recent.click(); fixture.detectChanges(); expect(recent.getAttribute('aria-expanded')).toBe('false');
   });
 
-  it('4. clicking pin button calls setConversationPinned mutation and stops event propagation without selecting row', async () => {
-    const fixture = TestBed.createComponent(App);
-    const app = fixture.componentInstance;
-    fixture.detectChanges();
-
-    await vi.waitFor(() => expect(app.unpinnedConversations().length).toBe(1));
-    fixture.detectChanges();
-
-    const targetConv = app.unpinnedConversations()[0];
-    const initialSelectedId = app.currentConversationId();
-
-    const selectSpy = vi.spyOn(app, 'selectConversation');
-    const toggleSpy = vi.spyOn(app, 'togglePin');
-
-    const compiled = fixture.nativeElement as HTMLElement;
-    const pinBtn = compiled.querySelector(`[data-testid="pin-btn-${targetConv.id}"] button`) as HTMLButtonElement;
-    expect(pinBtn).toBeTruthy();
-
-    // Click pin button
-    pinBtn.click();
-    fixture.detectChanges();
-
-    expect(toggleSpy).toHaveBeenCalled();
-    // Verify row selection was NOT triggered due to stopPropagation
-    expect(selectSpy).not.toHaveBeenCalled();
-    expect(app.currentConversationId()).toBe(initialSelectedId);
+  it('4. native pin menu sends a mutation without selecting the conversation', async () => {
+    const fixture = TestBed.createComponent(App); const app = fixture.componentInstance;
+    fixture.detectChanges(); await vi.waitFor(() => expect(app.unpinnedConversations()).toHaveLength(1)); fixture.detectChanges();
+    const section = (fixture.nativeElement as HTMLElement).querySelector('[aria-label="近期對話"]')!;
+    const initialId = app.currentConversationId();
+    (section.querySelector('[aria-label="More actions"]') as HTMLButtonElement).click(); fixture.detectChanges();
+    const pin = Array.from(section.querySelectorAll('[role="menuitem"]') as NodeListOf<HTMLElement>).find(item => item.textContent?.trim() === 'Pin');
+    expect(pin).toBeTruthy(); pin!.click();
+    await vi.waitFor(() => expect(fetchMock.mock.calls.some((call: any[]) => JSON.parse(call[1]?.body || '{}').query?.includes('setConversationPinned'))).toBe(true));
+    expect(app.currentConversationId()).toBe(initialId);
   });
 
-  it('5. pin button is disabled while isStreaming, isSubmitting, or pin is in-flight (pinPending)', async () => {
-    const fixture = TestBed.createComponent(App);
-    const app = fixture.componentInstance;
-    fixture.detectChanges();
-
-    await vi.waitFor(() => expect(app.unpinnedConversations().length).toBe(1));
-    fixture.detectChanges();
-
-    const compiled = fixture.nativeElement as HTMLElement;
-    const convId = 'conv-unpinned-1';
-    const getPinButton = () => compiled.querySelector(`[data-testid="pin-btn-${convId}"] button`) as HTMLButtonElement;
-
-    expect(getPinButton().disabled).toBe(false);
-
-    // Streaming disables pin button
-    app.isStreaming.set(true);
-    fixture.detectChanges();
-    expect(getPinButton().disabled).toBe(true);
-    app.isStreaming.set(false);
-
-    // Submitting disables pin button
-    app.isSubmitting.set(true);
-    fixture.detectChanges();
-    expect(getPinButton().disabled).toBe(true);
-    app.isSubmitting.set(false);
-
-    // In-flight pin mutation disables pin button globally
-    app.conversationStore.pinPendingIds.set(new Set([convId]));
-    fixture.detectChanges();
-    expect(getPinButton().disabled).toBe(true);
-    app.conversationStore.pinPendingIds.set(new Set());
-    fixture.detectChanges();
-    expect(getPinButton().disabled).toBe(false);
+  it('5. selection and pin remain available during streaming and submitting', async () => {
+    const fixture = TestBed.createComponent(App); const app = fixture.componentInstance;
+    fixture.detectChanges(); await vi.waitFor(() => expect(app.unpinnedConversations()).toHaveLength(1));
+    app.chatSession().active.set(true); fixture.detectChanges();
+    const section = (fixture.nativeElement as HTMLElement).querySelector('[aria-label="近期對話"]')!;
+    const row = Array.from(section.querySelectorAll('button')).find(button => button.textContent?.includes('Unpinned Conversation 1'))!;
+    expect(row.disabled).toBe(false); expect(section.querySelector('[aria-label="More actions"]')).toBeTruthy();
+    app.conversationStore.pinPendingIds.set(new Set(['conv-unpinned-1'])); fixture.detectChanges();
+    expect(section.querySelector('[aria-label="More actions"]')).toBeNull(); expect(row.disabled).toBe(false);
   });
 
   it('6. synchronous guard prevents rapid double clicks from sending multiple mutations', async () => {

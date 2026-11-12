@@ -1,63 +1,54 @@
-# TestApp
+# Herdr Bot Frontend
 
-This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 22.0.0.
+Angular with ThreadPlane native components and the AG-UI adapter. See the
+[root README](../README.md) for prerequisites, profiles and ./dev.sh startup.
 
-## Development server
+## Local checks
 
-To start a local development server, run:
+    TPLANE_TELEMETRY_DISABLED=1 npm ci --ignore-scripts
+    npm test
+    npm run test:guard
+    npm run build
 
-```bash
-ng serve
-```
+npm test runs component / application tests and retained historical SSE parser
+utility tests. Production chat uses ThreadPlane and the official AG-UI client.
+Dependency verification also uses npm ls and npm audit.
 
-Once the server is running, open your browser and navigate to `http://localhost:4200/`. The application will automatically reload whenever you modify any of the source files.
+## Browser verification
 
-## Code scaffolding
+The current suites require a running frontend and a verified fake-model backend:
 
-Angular CLI includes powerful code scaffolding tools. To generate a new component, run:
+    node e2e/threadplane-chat.mjs
+    node e2e/threadplane-navigation.mjs
+    node e2e/threadplane-bot.mjs
 
-```bash
-ng generate component component-name
-```
+BROWSER_URL defaults to http://127.0.0.1:4300, BACKEND_URL to
+http://127.0.0.1:8181. For ./dev.sh --mock, use ports 4200 and 8080.
+CHROME_PATH overrides the default macOS Chrome executable.
 
-For a complete list of available schematics (such as `components`, `directives`, or `pipes`), run:
+The shared helper verifies all three SAFE_MOCK fields through both origins,
+guards generation, retains synthetic fixtures, and writes results, screenshots,
+console and network evidence to a temporary directory. Any failed check makes
+the suite fail. Scripts never clean the database.
 
-```bash
-ng generate --help
-```
+| Suite | Coverage |
+| --- | --- |
+| Chat | Raw drafts and delayed creation, concurrent Runs, cancellation and persisted Message IDs, status reconciliation, historical failure / cancellation, clipboard, controlled failure and input cases |
+| Navigation | Native Sidenav and palette, title search, pinning, pagination recovery, narrow layouts, keyboard focus, stale responses and error recovery |
+| Bot | Native status select, search, pagination, create / update validation, save refresh recovery, dialogs and narrow layouts |
 
-## Building
+Fault injection is explicitly marked in each script. OFF uses a synthetic GraphQL
+fixture and IME uses composition events; they are not native OS IME validation.
+Clipboard checks distinguish simulated rejection from actual Chrome write / read.
+Browser suites use public GraphQL state; the backend suite separately tests real
+PostgreSQL ownership and Session consistency. Cross-owner browser login is not
+simulated.
 
-To build the project run:
+The Bot suite creates 21 pagination fixtures by default. BOT_PAGINATION_TAG can
+reuse an existing group named <tag>-page-00 through -20. Chat and navigation suites
+also retain their own synthetic data.
 
-```bash
-ng build
-```
-
-This will compile your project and store the build artifacts in the `dist/` directory. By default, the production build optimizes your application for performance and speed.
-
-### Bundle & Style Budgets (Ticket 02 / Issue #3 Rationale)
-- `initial`: `maximumWarning: 5.0MB`, `maximumError: 5.5MB` (measured initial bundle is ~4.85 MB due to CopilotKit runtime modules).
-- `anyComponentStyle`: `maximumWarning: 7kB`, `maximumError: 8kB`. Measured compiled `app.css` is 6.32 kB (accommodating monochrome stop button, interrupted status badge, and bounded pagination controls). Budget warning is set to 7 kB (actual + small margin) with error kept strictly at 8 kB to prevent regressions without unjustified looseness.
-
-## Running unit tests
-
-To execute unit tests with the [Vitest](https://vitest.dev/) test runner, use the following command:
-
-```bash
-ng test
-```
-
-## Running end-to-end tests
-
-For end-to-end (e2e) testing, run:
-
-```bash
-ng e2e
-```
-
-Angular CLI does not come with an end-to-end testing framework by default. You can choose one that suits your needs.
-
-## Additional Resources
-
-For more information on using the Angular CLI, including detailed command references, visit the [Angular CLI Overview and Command Reference](https://angular.dev/tools/cli) page.
+Older verify-ticket-*, verify-seed, verify-draft, verify-native-ui,
+verify-clipboard, verify-pinning* and issue16/18/22 layout scripts are retired and
+fail immediately. Their assertions are preserved for traceability; use the three
+ThreadPlane suites above for current verification.

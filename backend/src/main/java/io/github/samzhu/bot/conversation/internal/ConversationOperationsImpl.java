@@ -5,6 +5,7 @@ import io.github.samzhu.bot.bot.BotView;
 import io.github.samzhu.bot.bot.GkeAgentNotConnectedException;
 import io.github.samzhu.bot.conversation.ConversationAccessDeniedException;
 import io.github.samzhu.bot.conversation.ConversationOperations;
+import io.github.samzhu.bot.conversation.ConversationSearchValidationException;
 import io.github.samzhu.bot.conversation.ConversationView;
 import io.github.samzhu.bot.conversation.MessageView;
 import org.springframework.data.jdbc.core.JdbcAggregateTemplate;
@@ -69,11 +70,28 @@ public class ConversationOperationsImpl implements ConversationOperations {
 
     @Override
     public List<ConversationView> listConversations(String userId, Boolean pinned, int limit, int offset) {
+        return listConversations(userId, null, pinned, limit, offset);
+    }
+
+    @Override
+    public List<ConversationView> listConversations(String userId, String search, Boolean pinned, int limit, int offset) {
         int safeLimit = Math.max(1, Math.min(limit <= 0 ? 20 : limit, 100));
         int safeOffset = Math.max(0, offset);
+        String normalized = search == null ? null : search.strip();
+        if (normalized != null && normalized.length() > 100) {
+            throw new ConversationSearchValidationException("Conversation search must not exceed 100 characters");
+        }
 
         List<Conversation> list;
-        if (pinned == null) {
+        if (normalized != null && !normalized.isEmpty()) {
+            // Escape before adding our own wildcards: user input is literal, not a LIKE pattern.
+            String pattern = "%" + normalized.replace("\\", "\\\\")
+                    .replace("%", "\\%")
+                    .replace("_", "\\_") + "%";
+            list = pinned == null
+                    ? conversationRepository.searchByUserId(userId, pattern, safeLimit, safeOffset)
+                    : conversationRepository.searchByUserIdAndPinned(userId, pinned, pattern, safeLimit, safeOffset);
+        } else if (pinned == null) {
             list = conversationRepository.findByUserIdWithPaging(userId, safeLimit, safeOffset);
         } else {
             list = conversationRepository.findByUserIdAndPinnedWithPaging(userId, pinned, safeLimit, safeOffset);
@@ -115,7 +133,12 @@ public class ConversationOperationsImpl implements ConversationOperations {
     @Override
     @Transactional
     public MessageView appendMessage(String conversationId, String role, String content, String runId, boolean interrupted) {
-        String msgId = UUID.randomUUID().toString();
+        return appendMessageWithId(UUID.randomUUID().toString(), conversationId, role, content, runId, interrupted);
+    }
+
+    @Override
+    @Transactional
+    public MessageView appendMessageWithId(String msgId, String conversationId, String role, String content, String runId, boolean interrupted) {
         Instant now = Instant.now();
         Message msg = new Message(msgId, conversationId, runId, role, content, interrupted, now);
         Message saved = jdbcAggregateTemplate.insert(msg);

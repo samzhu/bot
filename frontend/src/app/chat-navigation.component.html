@@ -1,0 +1,78 @@
+<chat-sidenav-scrim [open]="layoutMode() === 'drawer' && navigationOpen()" (dismiss)="setNavigationOpen(false)" />
+<!-- The SDK listens for Escape inside its nav; initial focus is on this outer modal host. -->
+<div #drawer class="drawer-focus" tabindex="-1" (keydown.escape)="navigationOpen() && setNavigationOpen(false)" [attr.role]="layoutMode() === 'drawer' && navigationOpen() ? 'dialog' : null" [attr.aria-modal]="layoutMode() === 'drawer' && navigationOpen() ? 'true' : null" [attr.aria-label]="layoutMode() === 'drawer' ? '側欄導覽' : null" [attr.inert]="layoutMode() === 'drawer' && !navigationOpen() ? '' : null" [cdkTrapFocus]="layoutMode() === 'drawer' && navigationOpen() && !search.open()">
+<chat-sidenav [mode]="layoutMode()" [open]="navigationOpen()" [debug]="false" (modeChange)="setLayoutMode($event)" (openChange)="setNavigationOpen($event)" (newChat)="newChat()" (searchOpened)="openSearch()">
+  <div sidenavHeader class="navigation-title">Herdr Bot</div>
+  <div sidenavPrimary>
+  @if (initializing()) { <p role="status">載入中…</p> }
+  <div class="modes" aria-label="功能選擇">
+    <button type="button" data-testid="nav-conversations" [attr.aria-pressed]="mode() === 'conversations'" (click)="selectMode('conversations')">對話列表</button>
+    <button type="button" data-testid="nav-bots" [attr.aria-pressed]="mode() === 'bots'" (click)="selectMode('bots')">Bot</button>
+  </div>
+  </div>
+  <div sidenavSections class="navigation">
+  @if (mode() === 'conversations') {
+    <button type="button" [disabled]="initializing() || conversationLoading()" (click)="loadConversations()">重新載入對話</button>
+    @if (conversationError()) {
+      <p role="alert">對話列表載入失敗。 <button type="button" (click)="loadConversations()">重試載入</button></p>
+    }
+    @if (conversations.pinMutationError()) {
+      <p role="alert">釘選操作失敗。 <button type="button" (click)="conversations.retryPinMutation()">重試</button></p>
+    }
+    @if (conversations.pinRefreshError()) {
+      <p role="alert">{{ conversations.pinRefreshError()!.message }} <button type="button" [disabled]="conversations.isRetryingRefetch()" (click)="conversations.retryPinRefetch()">重試載入</button></p>
+    }
+    @if (deepActive().length) {
+      <section aria-label="目前對話"><h2>目前對話</h2>
+        <chat-thread-list [threads]="deepActive()" [activeThreadId]="activeConversationId() ?? ''" [actions]="threadActions()" [showNewThreadButton]="false" (threadSelected)="selectConversation($event)" />
+      </section>
+    }
+    <section aria-label="釘選對話">
+      <h2><button type="button" [attr.aria-expanded]="!conversations.isPinnedCollapsed()" (click)="conversations.togglePinnedSection()">釘選對話 ({{ pinned().length }})</button></h2>
+      @if (!conversations.isPinnedCollapsed()) {
+        @if (!pinned().length) { <p>尚無釘選對話</p> }
+        <chat-thread-list [threads]="pinned()" [activeThreadId]="activeConversationId() ?? ''" [actions]="threadActions()" [showNewThreadButton]="false" (threadSelected)="selectConversation($event)" />
+        @if (conversations.loadMorePinnedError()) {
+          <p role="alert">{{ conversations.loadMorePinnedError() }} <button type="button" data-testid="page-retry" [disabled]="conversations.isLoadingMorePinned() || conversations.isAnyPinPending() || !!conversations.pinRefreshError()" (click)="conversations.loadMorePinned()">重試</button></p>
+        } @else if (conversations.hasMorePinned()) { <button type="button" [disabled]="conversations.isLoadingMorePinned() || conversations.isAnyPinPending() || !!conversations.pinRefreshError()" (click)="conversations.loadMorePinned()">載入更多釘選對話</button> }
+      }
+    </section>
+    <section aria-label="近期對話">
+      <h2><button type="button" [attr.aria-expanded]="!conversations.isUnpinnedCollapsed()" (click)="conversations.toggleUnpinnedSection()">近期對話</button></h2>
+      @if (!conversations.isUnpinnedCollapsed()) {
+        @if (!recent().length) { <p>尚無近期對話</p> }
+        <chat-thread-list [threads]="recent()" [activeThreadId]="activeConversationId() ?? ''" [actions]="threadActions()" [showNewThreadButton]="false" (threadSelected)="selectConversation($event)" />
+        @if (conversations.loadMoreUnpinnedError()) {
+          <p role="alert">{{ conversations.loadMoreUnpinnedError() }} <button type="button" data-testid="page-retry" [disabled]="conversations.isLoadingMoreUnpinned() || conversations.isAnyPinPending() || !!conversations.pinRefreshError()" (click)="conversations.loadMoreUnpinned()">重試</button></p>
+        } @else if (conversations.hasMoreUnpinned()) { <button type="button" [disabled]="conversations.isLoadingMoreUnpinned() || conversations.isAnyPinPending() || !!conversations.pinRefreshError()" (click)="conversations.loadMoreUnpinned()">載入更多對話</button> }
+      }
+    </section>
+  } @else {
+    <section aria-label="Bot 清單">
+      <h2>Bot</h2>
+      @if (botsLoading()) { <p role="status">載入 Bot 清單中…</p> }
+      @if (botsError()) { <p role="alert">{{ botsError() }} <button type="button" data-testid="bots-retry" (click)="retryBots()">重試載入</button></p> }
+      @if (!botsLoading() && !botsError() && !bots().length) { <p>目前沒有 Bot。</p> }
+      <ul class="bot-list">
+        @for (bot of bots(); track bot.id) {
+          <li><button type="button" class="bot-item" [attr.data-testid]="'bot-item-' + bot.id" (click)="selectBot(bot)"><span>{{ bot.name }}</span><small>{{ botStatus(bot) }}</small></button></li>
+        }
+      </ul>
+      @if (hasMoreBots() && !botsError()) { <button type="button" data-testid="bots-more" [disabled]="botsLoading()" (click)="loadMoreBots()">載入更多 Bot</button> }
+    </section>
+  }
+  </div>
+</chat-sidenav>
+</div>
+@if (search.error()) {
+  <div #searchAlert tabindex="-1" role="alert" class="search-alert">{{ search.error() }}
+    @if (search.validationError()) {
+      <label>修改搜尋文字 <input type="text" [value]="search.query()" (input)="search.editInvalidQuery($any($event.target).value)" /></label>
+    }
+    <button type="button" [disabled]="search.loading() || !search.query().trim() || search.query().trim().length > 100" (click)="search.retry()">重試搜尋</button>
+  </div>
+}
+<div (keydown)="onPaletteKeydown($event)">
+  <chat-history-search-palette [open]="search.open()" [query]="search.query()" [results]="search.results()" [loading]="search.loading()" placeholder="搜尋對話標題（最多20筆，請縮小關鍵字）" (queryChange)="changeSearchQuery($event)" (closed)="closeSearch()" (threadSelected)="selectConversation($event)" />
+</div>
+@if (search.open()) { <p class="search-hint" aria-hidden="true">搜尋對話標題（最多20筆，請縮小關鍵字）</p> }

@@ -105,6 +105,15 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
 
     @Override
     public StartRunOutcome startRun(String conversationId, String clientRequestId, String message, String userId) {
+        return startRunInternal(conversationId, clientRequestId, message, userId, false);
+    }
+
+    @Override
+    public StartRunOutcome startAgUiRun(String conversationId, String runId, String message, String userId) {
+        return startRunInternal(conversationId, runId, message, userId, true);
+    }
+
+    private StartRunOutcome startRunInternal(String conversationId, String clientRequestId, String message, String userId, boolean agUi) {
         // 1. Verify conversation ownership
         Optional<ConversationView> convOpt = conversationOperations.findConversationById(conversationId, userId);
         if (convOpt.isEmpty()) {
@@ -143,70 +152,84 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         // Why delegate active adjudication to DB: checking early active runs in application memory creates
         // a race where a concurrent same-ID request is misclassified as 409 active run rather than 200 duplicate.
         // We let the database unique indexes (uq_active_run_per_conv and uq_client_request_per_conv) adjudicate.
-        String runId = UUID.randomUUID().toString();
+        String runId = agUi ? clientRequestId : UUID.randomUUID().toString();
+        String assistantId = UUID.randomUUID().toString();
         Instant now = Instant.now();
         ChatRun newRun = new ChatRun(runId, conversationId, clientRequestId, message, RunStatus.RUNNING.name(), actualExecutionMode, null, now, now);
 
         final String[] userMsgHolder = new String[1];
+        SseEmitter emitter;
+        RunHandle handle;
+        var lifecycleGate = runRegistry.lifecycleGate(runId);
+        lifecycleGate.lock();
         try {
-            transactionTemplate.executeWithoutResult(status -> {
-                jdbcAggregateTemplate.insert(newRun);
-                var uMsg = conversationOperations.appendMessage(conversationId, "USER", message, runId, false);
-                userMsgHolder[0] = uMsg.id();
-            });
-        } catch (Exception ex) {
-            // Check if this is specifically a unique constraint collision on chat_run active or client_request
-            if (isRunUniqueConstraintCollision(ex)) {
-                // Why re-query same clientRequestId first: another concurrent thread with the SAME clientRequestId
-                // may have won the insert race. If so, return EXISTING (200 duplicate) or CONFLICT (409 conflicting payload), NOT a generic active 409!
-                Optional<ChatRun> raced = runRepository.findByConversationIdAndClientRequestId(conversationId, clientRequestId);
-                if (raced.isPresent()) {
-                    ChatRun oldRun = raced.get();
-                    if (oldRun.inputText() != null && oldRun.inputText().equals(message)) {
-                        return new StartRunOutcome(StartRunOutcome.Type.EXISTING, toView(oldRun), null, null);
-                    } else {
-                        return new StartRunOutcome(StartRunOutcome.Type.CONFLICT, toView(oldRun), null, "Conflicting message for clientRequestId");
+            try {
+                transactionTemplate.executeWithoutResult(status -> {
+                    jdbcAggregateTemplate.insert(newRun);
+                    var uMsg = conversationOperations.appendMessage(conversationId, "USER", message, runId, false);
+                    userMsgHolder[0] = uMsg.id();
+                });
+            } catch (Exception ex) {
+                // Check if this is specifically a unique constraint collision on chat_run active or client_request
+                if (isRunUniqueConstraintCollision(ex) || (agUi && isRunIdCollision(ex))) {
+                    // Why re-query same clientRequestId first: another concurrent thread with the SAME clientRequestId
+                    // may have won the insert race. If so, return EXISTING (200 duplicate) or CONFLICT (409 conflicting payload), NOT a generic active 409!
+                    Optional<ChatRun> raced = runRepository.findByConversationIdAndClientRequestId(conversationId, clientRequestId);
+                    if (raced.isPresent()) {
+                        ChatRun oldRun = raced.get();
+                        if (oldRun.inputText() != null && oldRun.inputText().equals(message)) {
+                            return new StartRunOutcome(StartRunOutcome.Type.EXISTING, toView(oldRun), null, null);
+                        } else {
+                            return new StartRunOutcome(StartRunOutcome.Type.CONFLICT, toView(oldRun), null, "Conflicting message for clientRequestId");
+                        }
                     }
+                    // Client UUIDs are global primary keys: a collision in another conversation or
+                    // owner must be a generic conflict without exposing the existing run.
+                    if (agUi && runRepository.findById(runId).isPresent()) {
+                        return new StartRunOutcome(StartRunOutcome.Type.CONFLICT, null, null, "Run identifier conflict");
+                    }
+                    // If not same clientRequestId, collision was uq_active_run_per_conv: another active run is in progress
+                    Optional<ChatRun> activeRaced = runRepository.findActiveRunByConversationId(conversationId);
+                    return new StartRunOutcome(StartRunOutcome.Type.CONFLICT, activeRaced.map(this::toView).orElse(null), null, "Another active run is in progress for this conversation");
                 }
-                // If not same clientRequestId, collision was uq_active_run_per_conv: another active run is in progress
-                Optional<ChatRun> activeRaced = runRepository.findActiveRunByConversationId(conversationId);
-                return new StartRunOutcome(StartRunOutcome.Type.CONFLICT, activeRaced.map(this::toView).orElse(null), null, "Another active run is in progress for this conversation");
+                // For non-unique-constraint exceptions (e.g. FK violation, NOT NULL, serialization failure), propagate!
+                if (ex instanceof RuntimeException re) {
+                    throw re;
+                }
+                throw new RuntimeException("Failed to start run due to unexpected database error", ex);
             }
-            // For non-unique-constraint exceptions (e.g. FK violation, NOT NULL, serialization failure), propagate!
-            if (ex instanceof RuntimeException re) {
-                throw re;
-            }
-            throw new RuntimeException("Failed to start run due to unexpected database error", ex);
+
+            // 4. Create SseEmitter with 0L timeout (lifecycle strictly managed by app deadline and heartbeat)
+            emitter = new SseEmitter(0L);
+            handle = new RunHandle(
+                    runId,
+                    conversationId,
+                    userId,
+                    emitter,
+                    runRegistry,
+                    userMsgHolder[0], agUi ? assistantId : null,
+                    new RunHandle.TerminalCallback() {
+                        @Override
+                        public RunHandle.TerminalResult commitTerminal(String rId, String convId, RunStatus targetStatus, String errorMessage, String assistantContent, boolean interrupted, String userPrompt) {
+                            return commitTerminalInternal(rId, convId, targetStatus, errorMessage, assistantContent, interrupted, userPrompt, agUi ? assistantId : null);
+                        }
+
+                        @Override
+                        public RunStatus queryCurrentStatus(String rId) {
+                            return runRepository.findById(rId)
+                                    .map(r -> RunStatus.valueOf(r.status()))
+                                    .orElse(RunStatus.FAILED);
+                        }
+                    }
+            );
+
+            runRegistry.register(runId, handle);
+
+            // 5. Send run.started event (seq = 1) BEFORE starting scheduled tasks
+            handle.sendStarted();
+        } finally {
+            lifecycleGate.unlock();
         }
-
-        // 4. Create SseEmitter with 0L timeout (lifecycle strictly managed by app deadline and heartbeat)
-        SseEmitter emitter = new SseEmitter(0L);
-        RunHandle handle = new RunHandle(
-                runId,
-                conversationId,
-                userId,
-                emitter,
-                runRegistry,
-                userMsgHolder[0],
-                new RunHandle.TerminalCallback() {
-                    @Override
-                    public RunHandle.TerminalResult commitTerminal(String rId, String convId, RunStatus targetStatus, String errorMessage, String assistantContent, boolean interrupted, String userPrompt) {
-                        return commitTerminalInternal(rId, convId, targetStatus, errorMessage, assistantContent, interrupted, userPrompt);
-                    }
-
-                    @Override
-                    public RunStatus queryCurrentStatus(String rId) {
-                        return runRepository.findById(rId)
-                                .map(r -> RunStatus.valueOf(r.status()))
-                                .orElse(RunStatus.FAILED);
-                    }
-                }
-        );
-
-        runRegistry.register(runId, handle);
-
-        // 5. Send run.started event (seq = 1) BEFORE starting scheduled tasks
-        handle.sendStarted();
 
         // 6. Start scheduled tasks (application deadline & heartbeat) ONLY AFTER run.started has been sent
         // Why startScheduledTasks after sendStarted: prevents deadline or heartbeat frames from interleaving before seq 1.
@@ -249,64 +272,95 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
          * Offloading subscription to Reactor's shared boundedElastic scheduler releases Tomcat's worker thread, allowing
          * startRun() to return the SseEmitter so headers and run.started are flushed to the client without delay.
          * This enables real-time delta consumption and timely user cancellation.
-         * The resulting Disposable is registered via handle.setSubscription(disposable), maintaining thread safety under
+         * The resulting Disposable is installed atomically by handle.startSubscription, maintaining thread safety under
          * single-lock CAS, TransactionTemplate atomicity, and clean disposal if cancelled early or late.
          */
-        if (chatModel instanceof StreamingChatModel streamingModel) {
-            try {
-                Disposable disposable = Flux.defer(() -> streamingModel.stream(new Prompt(aiMessages)))
-                        .subscribeOn(Schedulers.boundedElastic())
-                        .subscribe(
-                                chatResponse -> {
-                                    if (chatResponse != null && chatResponse.getResult() != null && chatResponse.getResult().getOutput() != null) {
-                                        String text = chatResponse.getResult().getOutput().getText();
-                                        if (text != null) {
-                                            handle.delta(text);
+        // Re-enter the fair gate so a cancellation already waiting since publication wins
+        // before the asynchronous subscription is scheduled. The model runs off-gate.
+        String schedulingError = null;
+        var deferredFailure = new java.util.concurrent.atomic.AtomicReference<String>();
+        lifecycleGate.lock();
+        try {
+            if (chatModel instanceof StreamingChatModel streamingModel) {
+                try {
+                    handle.startSubscription(() -> Flux.defer(() -> streamingModel.stream(new Prompt(aiMessages)))
+                            .subscribeOn(Schedulers.boundedElastic())
+                            .subscribe(
+                                    chatResponse -> {
+                                        if (chatResponse != null && chatResponse.getResult() != null && chatResponse.getResult().getOutput() != null) {
+                                            String text = chatResponse.getResult().getOutput().getText();
+                                            if (text != null) {
+                                                handle.delta(text);
+                                            }
                                         }
-                                    }
-                                },
-                                error -> handle.fail(error != null ? error.getMessage() : "Model streaming error"),
-                                () -> handle.complete(message)
-                        );
-                handle.setSubscription(disposable);
-            } catch (Exception ex) {
-                log.error("Synchronous exception subscribing to model stream for run {}", runId, ex);
-                handle.fail("Model subscription error: " + ex.getMessage());
-            }
-        } else {
-            /*
-             * Non-streaming fallback: wrap synchronous ChatModel.call in Mono.fromCallable with the same boundedElastic
-             * scheduler to prevent blocking the MVC request thread when alternative non-streaming models are configured.
-             * Explicitly require non-null ChatResponse so null model returns trigger immediate failure rather than hanging
-             * as an empty Mono until the deadline scheduler fires.
-             */
-            try {
-                Disposable disposable = Mono.fromCallable(() -> {
-                            var response = chatModel.call(new Prompt(aiMessages));
-                            Objects.requireNonNull(response, "Model call returned null ChatResponse");
-                            return response;
-                        })
-                        .subscribeOn(Schedulers.boundedElastic())
-                        .subscribe(
-                                response -> {
-                                    if (response.getResult() != null && response.getResult().getOutput() != null) {
-                                        String text = response.getResult().getOutput().getText();
-                                        if (text != null) {
-                                            handle.delta(text);
+                                    },
+                                    error -> failAfterGate(lifecycleGate, deferredFailure, handle::fail,
+                                            error != null ? error.getMessage() : "Model streaming error"),
+                                    () -> handle.complete(message)
+                            ));
+                } catch (Exception ex) {
+                    log.error("Synchronous exception subscribing to model stream for run {}", runId, ex);
+                    schedulingError = "Model subscription error: " + ex.getMessage();
+                }
+            } else {
+                /*
+                 * Non-streaming fallback: wrap synchronous ChatModel.call in Mono.fromCallable with the same boundedElastic
+                 * scheduler to prevent blocking the MVC request thread when alternative non-streaming models are configured.
+                 * Explicitly require non-null ChatResponse so null model returns trigger immediate failure rather than hanging
+                 * as an empty Mono until the deadline scheduler fires.
+                 */
+                try {
+                    handle.startSubscription(() -> Mono.fromCallable(() -> {
+                                var response = chatModel.call(new Prompt(aiMessages));
+                                Objects.requireNonNull(response, "Model call returned null ChatResponse");
+                                return response;
+                            })
+                            .subscribeOn(Schedulers.boundedElastic())
+                            .subscribe(
+                                    response -> {
+                                        if (response.getResult() != null && response.getResult().getOutput() != null) {
+                                            String text = response.getResult().getOutput().getText();
+                                            if (text != null) {
+                                                handle.delta(text);
+                                            }
                                         }
-                                    }
-                                    handle.complete(message);
-                                },
-                                error -> handle.fail(error != null ? error.getMessage() : "Model execution error")
-                        );
-                handle.setSubscription(disposable);
-            } catch (Exception ex) {
-                log.error("Synchronous exception invoking non-streaming model for run {}", runId, ex);
-                handle.fail("Model execution error: " + ex.getMessage());
+                                        handle.complete(message);
+                                    },
+                                    error -> failAfterGate(lifecycleGate, deferredFailure, handle::fail,
+                                            error != null ? error.getMessage() : "Model execution error")
+                            ));
+                } catch (Exception ex) {
+                    log.error("Synchronous exception invoking non-streaming model for run {}", runId, ex);
+                    schedulingError = "Model execution error: " + ex.getMessage();
+                }
             }
-        }
 
+        } finally {
+            lifecycleGate.unlock();
+        }
+        if (schedulingError != null) {
+            handle.fail(schedulingError);
+        }
+        if (deferredFailure.get() != null) {
+            handle.fail(deferredFailure.get());
+        }
         return new StartRunOutcome(StartRunOutcome.Type.STARTED, toView(newRun), emitter, null);
+    }
+
+    // subscribeOn can synchronously report scheduler rejection; avoid DB/SSE while holding a stripe.
+    static void failAfterGate(java.util.concurrent.locks.ReentrantLock gate,
+                              java.util.concurrent.atomic.AtomicReference<String> deferred,
+                              java.util.function.Consumer<String> fail, String message) {
+        if (gate.isHeldByCurrentThread()) {
+            deferred.set(message);
+            return;
+        }
+        // A worker may fail before the starter releases its stripe. Wait without
+        // holding the handle monitor, then perform the terminal work outside the stripe.
+        gate.lock();
+        try { /* Wait for the starter to finish scheduling. */ }
+        finally { gate.unlock(); }
+        fail.accept(message);
     }
 
     private RunHandle.TerminalResult commitTerminalInternal(
@@ -316,7 +370,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
             String errorMessage,
             String assistantContent,
             boolean interrupted,
-            String userPrompt) {
+            String userPrompt, String assistantId) {
 
         try {
             // Why short transaction: CAS terminal update, assistant message persistence,
@@ -338,7 +392,9 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                 String messageId = null;
                 // Append assistant message if content exists (for COMPLETED or partial CANCELLED/FAILED)
                 if (assistantContent != null && !assistantContent.isBlank()) {
-                    MessageView msg = conversationOperations.appendMessage(conversationId, "ASSISTANT", assistantContent, runId, interrupted);
+                    MessageView msg = assistantId == null
+                            ? conversationOperations.appendMessage(conversationId, "ASSISTANT", assistantContent, runId, interrupted)
+                            : conversationOperations.appendMessageWithId(assistantId, conversationId, "ASSISTANT", assistantContent, runId, interrupted);
                     messageId = msg.id();
                 }
 
@@ -369,11 +425,11 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         } catch (Exception ex) {
             log.error("Transaction rolled back for run {} during terminal commit: {}", runId, ex.getMessage(), ex);
             // In a new independent short transaction, mark as FAILED with interrupted assistant partial (no Session pair)
-            return fallbackToFailed(runId, conversationId, assistantContent, "Terminal commit failure: " + ex.getMessage());
+            return fallbackToFailed(runId, conversationId, assistantContent, "Terminal commit failure: " + ex.getMessage(), assistantId);
         }
     }
 
-    private RunHandle.TerminalResult fallbackToFailed(String runId, String conversationId, String assistantContent, String error) {
+    private RunHandle.TerminalResult fallbackToFailed(String runId, String conversationId, String assistantContent, String error, String assistantId) {
         try {
             return transactionTemplate.execute(status -> {
                 int rows = runRepository.updateTerminalStatus(runId, RunStatus.FAILED.name(), error, Instant.now());
@@ -386,7 +442,9 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                 }
                 String msgId = null;
                 if (assistantContent != null && !assistantContent.isBlank()) {
-                    MessageView msg = conversationOperations.appendMessage(conversationId, "ASSISTANT", assistantContent, runId, true);
+                    MessageView msg = assistantId == null
+                            ? conversationOperations.appendMessage(conversationId, "ASSISTANT", assistantContent, runId, true)
+                            : conversationOperations.appendMessageWithId(assistantId, conversationId, "ASSISTANT", assistantContent, runId, true);
                     msgId = msg.id();
                 }
                 return new RunHandle.TerminalResult(true, RunStatus.FAILED, msgId, error);
@@ -399,6 +457,18 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                     .orElse(null);
             return new RunHandle.TerminalResult(false, actual, null, error);
         }
+    }
+
+    private boolean isRunIdCollision(Throwable ex) {
+        for (Throwable cur = ex; cur != null; cur = cur.getCause()) {
+            if (cur instanceof java.sql.SQLException sql
+                    && "23505".equals(sql.getSQLState())
+                    && cur.getMessage() != null
+                    && cur.getMessage().contains("chat_run_pkey")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean isRunUniqueConstraintCollision(Throwable ex) {
@@ -427,32 +497,39 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
 
     @Override
     public CancelRunOutcome cancelRun(String runId, String userId) {
-        RunHandle handle = runRegistry.get(runId);
-        if (handle != null) {
+        var lifecycleGate = runRegistry.lifecycleGate(runId);
+        RunHandle handle;
+        lifecycleGate.lock();
+        try {
+            handle = runRegistry.get(runId);
+            if (handle == null) {
+                // The fallback and handle publication share the gate, so a committed run
+                // cannot be cancelled here while its starter later publishes an active handle.
+                Optional<ChatRun> runOpt = runRepository.findById(runId);
+                if (runOpt.isEmpty()) {
+                    return new CancelRunOutcome(runId, RunStatus.FAILED, false);
+                }
+                ChatRun run = runOpt.get();
+                if (conversationOperations.findConversationById(run.conversationId(), userId).isEmpty()) {
+                    return new CancelRunOutcome(runId, RunStatus.FAILED, false);
+                }
+                runRepository.updateTerminalStatus(runId, RunStatus.CANCELLED.name(), "Run cancelled by user", Instant.now());
+                RunStatus status = runRepository.findById(runId)
+                        .map(r -> RunStatus.valueOf(r.status()))
+                        .orElse(RunStatus.CANCELLED);
+                return new CancelRunOutcome(runId, status, status == RunStatus.CANCELLED);
+            }
             if (!handle.getOwnerId().equals(userId)) {
                 return new CancelRunOutcome(runId, RunStatus.FAILED, false);
             }
-            RunStatus status = handle.cancel(userId);
-            return new CancelRunOutcome(runId, status, status == RunStatus.CANCELLED);
+            handle.requestCancellation();
+        } finally {
+            lifecycleGate.unlock();
         }
-
-        // DB Fallback if not active in registry
-        Optional<ChatRun> runOpt = runRepository.findById(runId);
-        if (runOpt.isEmpty()) {
-            return new CancelRunOutcome(runId, RunStatus.FAILED, false);
-        }
-        ChatRun run = runOpt.get();
-        Optional<ConversationView> conv = conversationOperations.findConversationById(run.conversationId(), userId);
-        if (conv.isEmpty()) {
-            return new CancelRunOutcome(runId, RunStatus.FAILED, false);
-        }
-
-        // CAS cancel in DB
-        runRepository.updateTerminalStatus(runId, RunStatus.CANCELLED.name(), "Run cancelled by user", Instant.now());
-        RunStatus finalStatus = runRepository.findById(runId)
-                .map(r -> RunStatus.valueOf(r.status()))
-                .orElse(RunStatus.CANCELLED);
-        return new CancelRunOutcome(runId, finalStatus, finalStatus == RunStatus.CANCELLED);
+        // A handle serializes its own terminal transition. Release the stripe first so
+        // emitting its terminal frame cannot hold up unrelated runs sharing the stripe.
+        RunStatus status = handle.cancel(userId);
+        return new CancelRunOutcome(runId, status, status == RunStatus.CANCELLED);
     }
 
     private RunView toView(ChatRun r) {

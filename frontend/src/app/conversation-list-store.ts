@@ -68,11 +68,13 @@ export class ConversationListStore {
   readonly pinnedOffset = signal<number>(0);
   readonly hasMorePinned = signal<boolean>(false);
   readonly isLoadingMorePinned = signal<boolean>(false);
+  readonly loadMorePinnedError = signal<string | null>(null);
 
   // Independent Pagination State for Recent/Unpinned Section
   readonly unpinnedOffset = signal<number>(0);
   readonly hasMoreUnpinned = signal<boolean>(false);
   readonly isLoadingMoreUnpinned = signal<boolean>(false);
+  readonly loadMoreUnpinnedError = signal<string | null>(null);
 
   // Aliases for backward compatibility
   readonly conversationOffset = this.unpinnedOffset;
@@ -216,6 +218,8 @@ export class ConversationListStore {
     this.unpinnedOffset.set(unpinnedResult.items.length);
     this.hasMoreUnpinned.set(unpinnedResult.hasMore);
 
+    this.loadMorePinnedError.set(null);
+    this.loadMoreUnpinnedError.set(null);
     this.pinRefreshError.set(null);
     return true;
   }
@@ -263,6 +267,7 @@ export class ConversationListStore {
     }
 
     this.isLoadingMorePinned.set(true);
+    this.loadMorePinnedError.set(null);
     const pageEpoch = ++this.currentPinnedPageEpoch;
     const queryGen = this.queryGeneration;
 
@@ -289,6 +294,7 @@ export class ConversationListStore {
     } catch (err) {
       if (pageEpoch === this.currentPinnedPageEpoch && queryGen === this.queryGeneration) {
         console.error('Failed to load more pinned conversations:', err);
+        this.loadMorePinnedError.set('釘選對話載入失敗，請重試。');
       }
     } finally {
       if (pageEpoch === this.currentPinnedPageEpoch) {
@@ -308,6 +314,7 @@ export class ConversationListStore {
     }
 
     this.isLoadingMoreUnpinned.set(true);
+    this.loadMoreUnpinnedError.set(null);
     const pageEpoch = ++this.currentUnpinnedPageEpoch;
     const queryGen = this.queryGeneration;
 
@@ -334,6 +341,7 @@ export class ConversationListStore {
     } catch (err) {
       if (pageEpoch === this.currentUnpinnedPageEpoch && queryGen === this.queryGeneration) {
         console.error('Failed to load more unpinned conversations:', err);
+        this.loadMoreUnpinnedError.set('近期對話載入失敗，請重試。');
       }
     } finally {
       if (pageEpoch === this.currentUnpinnedPageEpoch) {
@@ -546,6 +554,8 @@ export class ConversationListStore {
     this.pinPendingIds.set(new Set());
     this.pinMutationError.set(null);
     this.pinRefreshError.set(null);
+    this.loadMorePinnedError.set(null);
+    this.loadMoreUnpinnedError.set(null);
     this.isRetryingRefetch.set(false);
     this.pinnedOffset.set(0);
     this.hasMorePinned.set(false);

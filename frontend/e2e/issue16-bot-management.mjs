@@ -1,3 +1,6 @@
+// Historical layout verification retained for coverage traceability; see README.
+throw new Error('Retired legacy browser verification; use the current ThreadPlane browser matrix.');
+
 import puppeteer from 'puppeteer-core';
 import http from 'node:http';
 import fs from 'node:fs';

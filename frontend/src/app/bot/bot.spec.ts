@@ -430,15 +430,25 @@ describe('Bot Management, Signal Forms & Search/Paging Integration', () => {
       expect(text()).not.toContain('開啟草稿');
     });
 
-    it('replaces the target select with 全部狀態/未連線 only (no fabricated READY or LOCAL option)', () => {
+    it('uses the native ChatSelect to choose a truthful connection status', async () => {
       expect(q('[data-testid="target-filter-select"]')).toBeNull();
-      const options = Array.from(
-        (q('[data-testid="status-filter-select"]') as HTMLSelectElement).options
-      ).map(o => [o.value, o.textContent?.trim()]);
-      expect(options).toEqual([
-        ['ALL', '全部狀態'],
-        ['NOT_CONNECTED', '未連線']
-      ]);
+      const select = q('chat-select[data-testid="status-filter-select"]') as HTMLElement;
+      expect(select).toBeTruthy();
+      const trigger = select.querySelector('button') as HTMLButtonElement;
+      expect(trigger.textContent).toContain('全部狀態');
+      component.currentOffset.set(20);
+      trigger.click();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      fixture.detectChanges();
+      const options = Array.from(document.querySelectorAll('[role="option"]')) as HTMLElement[];
+      expect(options.map(option => option.textContent?.trim())).toEqual(['全部狀態', '未連線']);
+      options[1].click();
+      fixture.detectChanges();
+      expect(trigger.textContent).toContain('未連線');
+      expect(component.selectedStatus()).toBe('NOT_CONNECTED');
+      expect(component.currentOffset()).toBe(0);
+      expect(lastGetBots().variables.target).toBe('GKE_REMOTE');
       expect(text()).not.toMatch(/READY|在線|部署完成/);
     });
 
@@ -511,7 +521,7 @@ describe('Bot Management, Signal Forms & Search/Paging Integration', () => {
 
     it('status change resets offset and never turns into a LOCAL or client-side page filter', async () => {
       component.currentOffset.set(20);
-      component.onStatusChange({ target: { value: 'NOT_CONNECTED' } } as unknown as Event);
+      component.onStatusChange('NOT_CONNECTED');
       expect(component.selectedStatus()).toBe('NOT_CONNECTED');
       expect(component.currentOffset()).toBe(0);
       const body = lastGetBots();
@@ -732,7 +742,7 @@ describe('Bot Management, Signal Forms & Search/Paging Integration', () => {
         expect(app.seedBot()).toBeNull();
       });
 
-      it('strictly sets seedBot to null and refuses submitInput mutation when default query fails or returns null', async () => {
+      it('strictly sets seedBot to null and refuses submission when default query fails or returns null', async () => {
         app.currentConversationId.set(null);
         app.activeDraftBot.set(null);
         const store = TestBed.inject(BotStore);
@@ -762,13 +772,13 @@ describe('Bot Management, Signal Forms & Search/Paging Integration', () => {
         expect(store.defaultLocalBot()).toBeNull();
         expect(app.seedBot()).toBeNull();
 
-        app.inputValue.set('Test message without default bot');
-        await app.submitInput();
+        app.chatDraftChanged('Test message without default bot');
+        app.submitChat('Test message without default bot');
 
         expect(mutationCalled).toBe(false);
         // Guard condition blocks message dispatch when default local bot is absent
         expect(app.streamError() === '未配置預設本地助理，目前無法建立對話' || app.streamError() === null).toBe(true);
-        expect(app.inputValue()).toBe('Test message without default bot');
+        expect(app.chatSession().draft()).toBe('Test message without default bot');
       });
 
       it('authoritative defaultLocalBot is used even when absent from the current paginated bots list', async () => {

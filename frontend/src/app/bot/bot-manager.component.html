@@ -45,18 +45,15 @@
         />
       </div>
 
-      <div class="target-filter-box">
-        <label for="status-filter-select" class="visually-hidden">篩選連線狀態</label>
-        <select
-          id="status-filter-select"
-          class="filter-target-select"
+      <div class="target-filter-box" role="group" aria-labelledby="status-filter-label">
+        <span id="status-filter-label">篩選連線狀態</span>
+        <chat-select
           data-testid="status-filter-select"
+          [options]="statusOptions"
           [value]="selectedStatus()"
-          (change)="onStatusChange($event)"
-        >
-          <option value="ALL">全部狀態</option>
-          <option value="NOT_CONNECTED">未連線</option>
-        </select>
+          [menuLabel]="'篩選連線狀態'"
+          (valueChange)="onStatusChange($event)"
+        />
       </div>
     </div>
   </div>

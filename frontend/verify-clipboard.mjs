@@ -1,3 +1,6 @@
+// Historical layout verification retained for coverage traceability; see README.
+throw new Error('Retired legacy browser verification; use the current ThreadPlane browser matrix.');
+
 import puppeteer from 'puppeteer-core';
 import path from 'node:path';
 import { installBrowserGuard, getGuardStats, getVerificationOrigins } from './test/verification-harness.mjs';

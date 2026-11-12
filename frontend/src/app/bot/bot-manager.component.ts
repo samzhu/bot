@@ -1,4 +1,5 @@
 import { Component, OnInit, computed, inject, output, signal, viewChild } from '@angular/core';
+import { ChatSelectComponent } from '@threadplane/chat';
 import { BotStore } from './bot-store';
 import { BotEditorComponent } from './bot-editor.component';
 import { BotTarget, BotView, getBotExecutionModeDisplay } from './bot.model';
@@ -14,7 +15,7 @@ export type BotStatusFilter = 'ALL' | 'NOT_CONNECTED';
 @Component({
   selector: 'app-bot-manager',
   standalone: true,
-  imports: [BotEditorComponent],
+  imports: [BotEditorComponent, ChatSelectComponent],
   templateUrl: './bot-manager.component.html',
   styleUrl: './bot-manager.component.css'
 })
@@ -23,12 +24,17 @@ export class BotManagerComponent implements OnInit {
 
   // Emits selected bot when user requests to open draft chat
   readonly startChat = output<BotView>();
+  readonly saved = output<BotView>();
 
   // 表單責任已收斂至獨立 BotEditorComponent（右側面板）；manager 只負責開啟與保存後刷新。
   readonly editor = viewChild<BotEditorComponent>('editor');
 
   readonly searchQuery = signal<string>('');
   readonly selectedStatus = signal<BotStatusFilter>('ALL');
+  readonly statusOptions = [
+    { value: 'ALL', label: '全部狀態' },
+    { value: 'NOT_CONNECTED', label: '未連線' }
+  ];
   readonly currentOffset = signal<number>(0);
   readonly pageSize = 20;
   // Store 也供首頁使用；只有本管理頁的查詢完成後，快取才具有正確管理範圍。
@@ -77,7 +83,8 @@ export class BotManagerComponent implements OnInit {
   }
 
   // 保存成功（mutation 已完成）後回第一頁並依目前條件刷新；刷新失敗只留 list retry，不重送 mutation。
-  async onSaved(_bot: BotView): Promise<void> {
+  async onSaved(bot: BotView): Promise<void> {
+    this.saved.emit(bot);
     this.currentOffset.set(0);
     try {
       await this.fetchBots();
@@ -93,9 +100,9 @@ export class BotManagerComponent implements OnInit {
     this.fetchBots().catch(err => console.warn('Search fetch error:', err));
   }
 
-  onStatusChange(event: Event): void {
-    const select = event.target as HTMLSelectElement;
-    this.selectedStatus.set(select.value as BotStatusFilter);
+  onStatusChange(value: string): void {
+    if (value !== 'ALL' && value !== 'NOT_CONNECTED') return;
+    this.selectedStatus.set(value);
     this.currentOffset.set(0);
     this.fetchBots().catch(err => console.warn('Status change fetch error:', err));
   }

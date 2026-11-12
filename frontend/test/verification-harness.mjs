@@ -81,11 +81,25 @@ export function isGenerationRequest(input, initOrMethod = 'GET') {
   if (method.toUpperCase() !== 'POST') return false;
 
   try {
-    const cleanUrl = url.split('?')[0].split('#')[0];
-    return /\/api\/conversations\/[^/]+\/runs$/.test(cleanUrl);
+    const path = new URL(url, 'http://verification.invalid').pathname;
+    return /^\/api\/conversations\/[^/]+\/runs$/.test(path) || path === '/api/ag-ui';
   } catch (_) {
     return false;
   }
+}
+
+function syntheticAgUiBody(input, options = {}) {
+  const threadId = input.threadId || 'thread-mock';
+  const runId = input.runId || 'run-mock';
+  const messageId = options.assistantMessageId || 'assistant-mock';
+  const events = [
+    { type: 'RUN_STARTED', threadId, runId },
+    { type: 'TEXT_MESSAGE_START', messageId, role: 'assistant' },
+    { type: 'TEXT_MESSAGE_CONTENT', messageId, delta: options.deltaText || 'Synthetic verification response from safe test harness.' },
+    { type: 'TEXT_MESSAGE_END', messageId },
+    { type: 'RUN_FINISHED', threadId, runId }
+  ];
+  return events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('');
 }
 
 /**
@@ -169,8 +183,8 @@ export async function assertSafeBackendOrigin(baseUrl, fetchFn = originalNodeFet
     throw new Error(`[PAID_MODEL_BLOCKED] Invalid JSON from verification status at ${statusUrl}`);
   }
 
-  if (!body || body.mock !== true || body.modelClass !== 'MockChatModel') {
-    throw new Error(`[PAID_MODEL_BLOCKED] Target backend at ${origin} returned unverified marker: ${JSON.stringify(body)}. Expected mock=true and modelClass=MockChatModel.`);
+  if (!body || body.status !== 'SAFE_MOCK' || body.mock !== true || body.modelClass !== 'MockChatModel') {
+    throw new Error(`[PAID_MODEL_BLOCKED] Target backend at ${origin} returned unverified marker: ${JSON.stringify(body)}. Expected status=SAFE_MOCK, mock=true and modelClass=MockChatModel.`);
   }
 
   return true;
@@ -211,7 +225,7 @@ export async function assertSafeExecutionEnvironment(backendUrl = getVerificatio
  * Installs a transport-level guard on Node.js globalThis.fetch.
  *
  * Options:
- * - mode: 'mock' (default) | 'fail-closed' | 'verified-backend'
+ * - mode: 'fail-closed' (default) | 'mock' | 'verified-backend'
  * - allowNonGeneration: boolean (default true) - allows non-generation HTTP calls (e.g. GraphQL queries/mutations, seed checks)
  */
 export function installNodeFetchGuard(options = {}) {
@@ -219,7 +233,7 @@ export function installNodeFetchGuard(options = {}) {
     originalNodeFetch = globalThis.fetch;
   }
 
-  const mode = options.mode || 'mock';
+  const mode = options.mode || 'fail-closed';
   const allowNonGeneration = options.allowNonGeneration !== false;
 
   // Valid modes are strictly: 'mock', 'fail-closed', 'verified-backend'.
@@ -243,6 +257,11 @@ export function installNodeFetchGuard(options = {}) {
 
       if (mode === 'mock') {
         guardStats.mockedCalls++;
+        if (new URL(url, 'http://verification.invalid').pathname === '/api/ag-ui') {
+          let body = {};
+          try { body = typeof init.body === 'string' ? JSON.parse(init.body) : input instanceof Request ? await input.clone().json() : {}; } catch (_) {}
+          return new Response(syntheticAgUiBody(body, options), { status: 200, headers: { 'Content-Type': 'text/event-stream; charset=utf-8', 'X-Verification-Guard': 'MOCK_SYNTHETIC' } });
+        }
         return createSyntheticSseResponse(options);
       }
 
@@ -300,12 +319,12 @@ export function createSyntheticStore() {
       }
       return conversations.get(id);
     },
-    addMessage(convId, role, content) {
+    addMessage(convId, role, content, identity = {}) {
       const conv = this.ensureConversation(convId);
       const msg = {
-        id: `msg-${role.toLowerCase()}-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        id: identity.id || `msg-${role.toLowerCase()}-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
         conversationId: convId,
-        runId: `run-${Date.now()}`,
+        runId: identity.runId || `run-${Date.now()}`,
         role: role.toUpperCase(),
         content,
         interrupted: false,
@@ -331,14 +350,14 @@ export function createSyntheticStore() {
  * 3. Provides a cooperative request dispatcher for downstream handlers without race conditions.
  *
  * Options:
- * - mode: 'mock' (default) | 'fail-closed' | 'verified-backend'
+ * - mode: 'fail-closed' (default) | 'mock' | 'verified-backend'
  * - customMocks: object mapping URL strings or patterns to handlers
  * - syntheticStore: store instance or boolean true
  */
 export async function installBrowserGuard(page, options = {}) {
   await page.setRequestInterception(true);
 
-  const mode = options.mode || 'mock';
+  const mode = options.mode || 'fail-closed';
   const customMocks = options.customMocks || {};
   const store = options.syntheticStore ? (options.syntheticStore === true ? createSyntheticStore() : options.syntheticStore) : null;
   const isKnownMode = mode === 'mock' || mode === 'fail-closed' || mode === 'verified-backend';
@@ -419,11 +438,12 @@ export async function installBrowserGuard(page, options = {}) {
           postData = JSON.parse(req.postData() || '{}');
         } catch (_) {}
 
-        const userPrompt = postData.message || 'User test prompt';
+        const lastUser = Array.isArray(postData.messages) ? postData.messages.findLast(message => message.role === 'user') : null;
+        const userPrompt = postData.message || lastUser?.content || 'User test prompt';
         const delta1 = options.delta1 || (options.deltaText ? options.deltaText : '這是一次本機最小');
         const delta2 = options.delta2 || (options.deltaText ? '' : '聊天閉環驗證合成回應。');
         const fullDelta = options.deltaText || `${delta1}${delta2}`;
-        const runId = options.runId || `run-mock-${Date.now()}`;
+        const runId = postData.runId || options.runId || `run-mock-${Date.now()}`;
 
         // Authoritative message IDs shared between synthetic store and SSE frames
         let userMessageId = `msg-user-${Date.now()}`;
@@ -431,11 +451,11 @@ export async function installBrowserGuard(page, options = {}) {
 
         // If synthetic store is active, update store state with identical IDs and metadata
         const convIdMatch = url.match(/\/api\/conversations\/([^/]+)\/runs/);
-        const convId = convIdMatch ? convIdMatch[1] : 'conv-mock-1';
+        const convId = postData.threadId || (convIdMatch ? convIdMatch[1] : 'conv-mock-1');
         if (store) {
-          const userMsg = store.addMessage(convId, 'USER', userPrompt);
+          const userMsg = store.addMessage(convId, 'USER', userPrompt, { id: lastUser?.id, runId });
           userMessageId = userMsg.id;
-          const assistantMsg = store.addMessage(convId, 'ASSISTANT', fullDelta);
+          const assistantMsg = store.addMessage(convId, 'ASSISTANT', fullDelta, { runId });
           assistantMessageId = assistantMsg.id;
           const conv = store.ensureConversation(convId);
           conv.runs.push({ id: runId, status: 'COMPLETED', errorMessage: null });
@@ -466,7 +486,9 @@ export async function installBrowserGuard(page, options = {}) {
           ''
         );
 
-        const sseFrames = sseFramesList.join('\n');
+        const sseFrames = new URL(url, 'http://verification.invalid').pathname === '/api/ag-ui'
+          ? syntheticAgUiBody(postData, { assistantMessageId, deltaText: fullDelta })
+          : sseFramesList.join('\n');
 
         return safeRespond({
           status: 200,

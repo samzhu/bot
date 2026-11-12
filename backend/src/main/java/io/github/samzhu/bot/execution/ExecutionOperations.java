@@ -9,6 +9,7 @@ public interface ExecutionOperations {
     Optional<RunView> findRunById(String runId, String userId);
     List<RunView> listRunsByConversation(String conversationId, int limit, int offset);
     StartRunOutcome startRun(String conversationId, String clientRequestId, String message, String userId);
+    StartRunOutcome startAgUiRun(String conversationId, String runId, String message, String userId);
     CancelRunOutcome cancelRun(String runId, String userId);
 
     record StartRunOutcome(

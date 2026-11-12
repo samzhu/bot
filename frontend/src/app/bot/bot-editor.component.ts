@@ -27,7 +27,7 @@ const EMPTY_FORM: BotEditorFormData = { name: '', description: '', instructions:
 /**
  * 右側貼邊的 Bot 新增／設定面板。
  * 為何沿用原生 <dialog>.showModal()：焦點陷阱、Escape、inert 背景由瀏覽器提供；
- * 靠右只是應用層 CSS 佈局（Issue #21），不引入 Drawer 套件，也不使用 CopilotKit ThreadsDrawer。
+ * 靠右為應用層 CSS 佈局；ThreadPlane 的確認對話框不提供可投影的表單面板。
  */
 @Component({
   selector: 'app-bot-editor',

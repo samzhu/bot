@@ -1,4 +1,4 @@
-@import "@copilotkit/angular/styles.css";
+@import "@threadplane/chat/chat.css";
 
 *, *::before, *::after {
   box-sizing: border-box;
@@ -13,27 +13,4 @@ html, body {
   background-color: #ffffff;
   color: #111827;
   overflow: hidden;
-}
-
-/* App shell sidebar scrollbar scoping: preserves CopilotKit native chat scrollbars untouched */
-.sidebar ::-webkit-scrollbar,
-.conversation-list::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-.sidebar ::-webkit-scrollbar-track,
-.conversation-list::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.sidebar ::-webkit-scrollbar-thumb,
-.conversation-list::-webkit-scrollbar-thumb {
-  background: #d1d5db;
-  border-radius: 3px;
-}
-
-.sidebar ::-webkit-scrollbar-thumb:hover,
-.conversation-list::-webkit-scrollbar-thumb:hover {
-  background: #9ca3af;
 }

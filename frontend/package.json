@@ -14,7 +14,8 @@
   "private": true,
   "packageManager": "npm@11.13.0",
   "dependencies": {
-    "@ag-ui/core": "1.0.2",
+    "@ag-ui/client": "1.0.4",
+    "@ag-ui/core": "1.0.4",
     "@angular/cdk": "22.2.6",
     "@angular/common": "22.2.5",
     "@angular/compiler": "22.2.5",
@@ -22,9 +23,16 @@
     "@angular/forms": "22.2.5",
     "@angular/platform-browser": "22.2.5",
     "@angular/router": "22.2.5",
-    "@copilotkit/angular": "0.6.0",
+    "@json-render/core": "0.16.0",
+    "@threadplane/a2ui": "0.3.7",
+    "@threadplane/ag-ui": "0.3.7",
+    "@threadplane/chat": "0.3.7",
+    "@threadplane/render": "0.3.7",
+    "@threadplane/telemetry": "0.3.7",
+    "marked": "16.4.2",
     "rxjs": "7.8.1",
-    "tslib": "^2.3.0"
+    "tslib": "^2.3.0",
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@angular/build": "22.2.6",
@@ -34,10 +42,5 @@
     "puppeteer-core": "^25.17.0",
     "typescript": "6.0.3",
     "vitest": "^4.1.12"
-  },
-  "overrides": {
-    "@copilotkit/angular": {
-      "katex": "0.18.2"
-    }
   }
 }

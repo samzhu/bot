@@ -5,6 +5,7 @@ import graphql.GraphqlErrorBuilder;
 import io.github.samzhu.bot.bot.GkeAgentNotConnectedException;
 import io.github.samzhu.bot.conversation.ConversationAccessDeniedException;
 import io.github.samzhu.bot.conversation.ConversationOperations;
+import io.github.samzhu.bot.conversation.ConversationSearchValidationException;
 import io.github.samzhu.bot.conversation.ConversationView;
 import io.github.samzhu.bot.conversation.MessageView;
 import io.github.samzhu.bot.identity.CurrentUserProvider;
@@ -34,13 +35,14 @@ public class ConversationGraphQLController {
 
     @QueryMapping
     public List<ConversationView> conversations(
+            @Argument(name = "search") String search,
             @Argument(name = "pinned") Boolean pinned,
             @Argument(name = "limit") Integer limit,
             @Argument(name = "offset") Integer offset) {
         int safeLimit = (limit == null || limit <= 0) ? 20 : limit;
         int safeOffset = (offset == null || offset < 0) ? 0 : offset;
         String userId = currentUserProvider.getCurrentUserId();
-        return conversationOperations.listConversations(userId, pinned, safeLimit, safeOffset);
+        return conversationOperations.listConversations(userId, search, pinned, safeLimit, safeOffset);
     }
 
     @QueryMapping
@@ -74,6 +76,14 @@ public class ConversationGraphQLController {
     public GraphQLError handleConversationAccessDenied(ConversationAccessDeniedException ex) {
         return GraphqlErrorBuilder.newError()
                 .errorType(ErrorType.FORBIDDEN)
+                .message(ex.getMessage())
+                .build();
+    }
+
+    @GraphQlExceptionHandler
+    public GraphQLError handleInvalidSearch(ConversationSearchValidationException ex) {
+        return GraphqlErrorBuilder.newError()
+                .errorType(ErrorType.BAD_REQUEST)
                 .message(ex.getMessage())
                 .build();
     }

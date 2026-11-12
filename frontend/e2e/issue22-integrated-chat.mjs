@@ -1,3 +1,6 @@
+// Historical layout verification retained for coverage traceability; see README.
+throw new Error('Retired legacy browser verification; use the current ThreadPlane browser matrix.');
+
 // PDF p110/114: public API + real browser + PostgreSQL; never use a paid model.
 import puppeteer from 'puppeteer-core';
 import assert from 'node:assert/strict';

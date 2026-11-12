@@ -1,4 +1,4 @@
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { test, describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import {
@@ -70,6 +70,36 @@ describe('Verification Guard Harness (Issue #14)', () => {
     verificationMarkerBody = { status: 'SAFE_MOCK', mock: true, modelClass: 'MockChatModel' };
     resetGuardStats();
     uninstallNodeFetchGuard();
+  });
+
+  it('AG-UI trap sees unguarded POST but default guard blocks it', async () => {
+    const endpoint = `${trapUrl}/api/ag-ui?test=1`;
+    await fetch(endpoint, { method: 'POST', body: '{}' });
+    assert.equal(trapReceivedRequests.filter(r => r.url.startsWith('/api/ag-ui')).length, 1);
+    trapReceivedRequests = [];
+    installNodeFetchGuard();
+    await assert.rejects(fetch(new Request(endpoint, { method: 'POST', body: '{}' })), /PAID_MODEL_BLOCKED/);
+    assert.equal(trapReceivedRequests.filter(r => r.url.startsWith('/api/ag-ui')).length, 0);
+  });
+
+  it('AG-UI Node mock emits standard events and does not call trap', async () => {
+    installNodeFetchGuard({ mode: 'mock' });
+    const input = { threadId: 'thread-node', runId: 'run-node', messages: [{ id: 'user-node', role: 'user', content: 'hello' }] };
+    const response = await fetch(new Request(`${trapUrl}/api/ag-ui?mock=1`, { method: 'POST', body: JSON.stringify(input) }));
+    const events = (await response.text()).split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6)));
+    assert.deepEqual(events.map(e => e.type), ['RUN_STARTED', 'TEXT_MESSAGE_START', 'TEXT_MESSAGE_CONTENT', 'TEXT_MESSAGE_END', 'RUN_FINISHED']);
+    assert.equal(events[0].threadId, input.threadId);
+    assert.equal(events[0].runId, input.runId);
+    assert.equal(events[1].messageId, events[2].messageId);
+    assert.equal(events[1].messageId, events[3].messageId);
+    assert.equal(trapReceivedRequests.filter(r => r.url.startsWith('/api/ag-ui')).length, 0);
+  });
+
+  it('AG-UI verified mode rejects invalid status without generation traffic', async () => {
+    verificationMarkerBody.status = 'UNSAFE';
+    installNodeFetchGuard({ mode: 'verified-backend' });
+    await assert.rejects(fetch(`${trapUrl}/api/ag-ui`, { method: 'POST', body: '{}' }), /PAID_MODEL_BLOCKED/);
+    assert.equal(trapReceivedRequests.filter(r => r.url.startsWith('/api/ag-ui')).length, 0);
   });
 
   it('RED STEP PROOF: Unguarded Node fetch leaks live generation to backend trap', async () => {
@@ -314,6 +344,9 @@ describe('Verification Guard Harness (Issue #14)', () => {
   });
 
   it('GREEN STEP: Request matcher and extractor accurately identify generation endpoints across shapes', () => {
+    assert.equal(isGenerationRequest('http://localhost:8080/api/ag-ui', 'POST'), true);
+    assert.equal(isGenerationRequest('/api/ag-ui?source=test', 'POST'), true);
+    assert.equal(isGenerationRequest('/api/ag-ui', 'GET'), false);
     assert.equal(isGenerationRequest('http://localhost:8080/api/conversations/123/runs', 'POST'), true);
     assert.equal(isGenerationRequest('http://127.0.0.1:4200/api/conversations/abc-def/runs', 'POST'), true);
     assert.equal(isGenerationRequest('/api/conversations/conv-1/runs', 'POST'), true);
@@ -360,4 +393,23 @@ describe('Verification Guard Harness (Issue #14)', () => {
     assert.equal(frame3.messageId, 'assistant-msg-json');
     assert.equal(frame3.status, 'COMPLETED');
   });
+});
+
+
+test('AG-UI matcher normalizes paths and excludes unrelated routes', () => {
+  assert.equal(isGenerationRequest('http://localhost/a/../api/ag-ui?x=1#part', 'POST'), true);
+  assert.equal(isGenerationRequest('/other/api/ag-ui', 'POST'), false);
+  assert.equal(isGenerationRequest('/api/ag-ui#fragment', 'GET'), false);
+  assert.equal(isGenerationRequest('/api/runs/x/cancel', 'POST'), false);
+});
+
+test('safe backend requires all three markers', async () => {
+  for (const body of [
+    { status: 'UNSAFE', mock: true, modelClass: 'MockChatModel' },
+    { status: 'SAFE_MOCK', mock: false, modelClass: 'MockChatModel' },
+    { status: 'SAFE_MOCK', mock: true, modelClass: 'RealModel' }
+  ]) {
+    await assert.rejects(assertSafeBackendOrigin('http://localhost:1', async () => new Response(JSON.stringify(body), { status: 200 })), /PAID_MODEL_BLOCKED/);
+  }
+  assert.equal(await assertSafeBackendOrigin('http://localhost:1', async () => new Response(JSON.stringify({ status: 'SAFE_MOCK', mock: true, modelClass: 'MockChatModel' }), { status: 200 })), true);
 });

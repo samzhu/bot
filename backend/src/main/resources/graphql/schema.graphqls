@@ -85,7 +85,7 @@ type Query {
   bots(search: String, target: BotTarget, limit: Int = 20, offset: Int = 0): [Bot!]!
   bot(id: ID!): Bot
   defaultLocalBot: Bot
-  conversations(pinned: Boolean, limit: Int = 20, offset: Int = 0): [Conversation!]!
+  conversations(search: String, pinned: Boolean, limit: Int = 20, offset: Int = 0): [Conversation!]!
   conversation(id: ID!): Conversation
   run(id: ID!): Run
 }
