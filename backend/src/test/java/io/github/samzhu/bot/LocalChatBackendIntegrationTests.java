@@ -77,6 +77,9 @@ class LocalChatBackendIntegrationTests {
     @Autowired
     private org.springframework.transaction.support.TransactionTemplate transactionTemplate;
 
+    @Autowired
+    private io.github.samzhu.bot.workspace.WorkspaceOperations workspaceOperations;
+
     @MockitoSpyBean
     private SessionService sessionService;
 
@@ -1853,8 +1856,8 @@ class LocalChatBackendIntegrationTests {
         String foreignConvId = createTestConversation("Foreign Owner Guard Conv");
         // Start run with foreign user ("user-bob") directly via service
         var bobStartOutcome = runExecutionService.startRun(foreignConvId, "req-23-bob", "Bob unauthorized message", "user-bob");
-        assertEquals(io.github.samzhu.bot.execution.ExecutionOperations.StartRunOutcome.Type.CONFLICT, bobStartOutcome.type(), "Foreign user startRun must be rejected");
-        assertEquals("Conversation not found or access denied", bobStartOutcome.conflictMessage());
+        assertEquals(io.github.samzhu.bot.execution.ExecutionOperations.StartRunOutcome.Type.ACCESS_DENIED, bobStartOutcome.type(), "Foreign user startRun must be rejected");
+        assertNull(bobStartOutcome.conflictMessage());
 
         // Start valid run with rightful owner (default user)
         var aliceStartOutcome = runExecutionService.startRun(foreignConvId, "req-23-alice", "Alice authorized message", currentUserProvider.getCurrentUserId());
@@ -1863,7 +1866,8 @@ class LocalChatBackendIntegrationTests {
 
         // Foreign user bob tries to cancel alice's run
         var bobCancelOutcome = runExecutionService.cancelRun(aliceRunId, "user-bob");
-        assertEquals(RunStatus.FAILED, bobCancelOutcome.finalStatus());
+        assertTrue(bobCancelOutcome.accessDenied());
+        assertNull(bobCancelOutcome.finalStatus());
         assertFalse(bobCancelOutcome.cancelled(), "Foreign user cancelRun must fail");
 
         // Rightful owner cancels run
@@ -1871,7 +1875,7 @@ class LocalChatBackendIntegrationTests {
         assertEquals(RunStatus.CANCELLED, aliceCancelOutcome.finalStatus());
         assertTrue(aliceCancelOutcome.cancelled());
 
-        // 6. Unknown conversation ID -> 409 Conflict ("Conversation not found or access denied")
+        // 6. Unknown conversation uses the same non-disclosing response as denied access.
         String bodyUnknownConv = objectMapper.writeValueAsString(Map.of(
                 "clientRequestId", "req-23-valid-3",
                 "message", "valid prompt"
@@ -1882,9 +1886,9 @@ class LocalChatBackendIntegrationTests {
                 .POST(HttpRequest.BodyPublishers.ofString(bodyUnknownConv))
                 .build();
         HttpResponse<String> resp6 = httpClient.send(req6, HttpResponse.BodyHandlers.ofString());
-        assertEquals(409, resp6.statusCode());
+        assertEquals(404, resp6.statusCode());
         JsonNode json6 = objectMapper.readTree(resp6.body());
-        assertEquals("Conversation not found or access denied", json6.path("error").asText());
+        assertEquals("CONVERSATION_ACCESS_DENIED", json6.path("code").asText());
     }
 
     @Test
@@ -2170,7 +2174,7 @@ class LocalChatBackendIntegrationTests {
     @Test
     void test_LocalDataSeedInitializer_Idempotent_And_SessionTurnPair() {
         var localDataSeedInitializer = new io.github.samzhu.bot.bootstrap.LocalDataSeedInitializer(
-                sessionService, jdbcTemplate, transactionTemplate
+                sessionService, workspaceOperations, jdbcTemplate, transactionTemplate
         );
 
         // Run seed initializer

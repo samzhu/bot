@@ -11,6 +11,7 @@ public record Conversation(
     String botId,
     String title,
     String userId,
+    String workspaceId,
     boolean pinned,
     Instant createdAt,
     Instant updatedAt

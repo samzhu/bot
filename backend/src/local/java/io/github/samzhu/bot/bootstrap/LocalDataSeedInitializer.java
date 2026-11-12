@@ -1,5 +1,6 @@
 package io.github.samzhu.bot.bootstrap;
 
+import io.github.samzhu.bot.workspace.WorkspaceOperations;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -47,14 +48,17 @@ public class LocalDataSeedInitializer implements ApplicationRunner {
     private static final Logger log = LoggerFactory.getLogger(LocalDataSeedInitializer.class);
 
     private final SessionService sessionService;
+    private final WorkspaceOperations workspace;
     private final JdbcTemplate jdbcTemplate;
     private final TransactionTemplate transactionTemplate;
 
     public LocalDataSeedInitializer(
             SessionService sessionService,
+            WorkspaceOperations workspace,
             JdbcTemplate jdbcTemplate,
             TransactionTemplate transactionTemplate) {
         this.sessionService = sessionService;
+        this.workspace = workspace;
         this.jdbcTemplate = jdbcTemplate;
         this.transactionTemplate = transactionTemplate;
     }
@@ -96,6 +100,7 @@ public class LocalDataSeedInitializer implements ApplicationRunner {
             return;
         }
 
+        workspace.personal("dev-user");
         transactionTemplate.executeWithoutResult(status -> {
             loadCompletedScenario();
             loadFailedScenario();
@@ -113,8 +118,8 @@ public class LocalDataSeedInitializer implements ApplicationRunner {
         Instant t1 = t0.plusSeconds(2);
 
         jdbcTemplate.update("""
-            INSERT INTO conversation (id, bot_id, title, user_id, pinned, created_at, updated_at)
-            VALUES (?, 'bot-general', '示範：成功問答 (COMPLETED)', ?, TRUE, ?, ?)
+            INSERT INTO conversation (id, bot_id, title, user_id, workspace_id, pinned, created_at, updated_at)
+            VALUES (?, 'bot-general', '示範：成功問答 (COMPLETED)', ?, (SELECT id FROM workspace WHERE personal_owner_id = 'dev-user'), TRUE, ?, ?)
         """, convId, userId, Timestamp.from(t0), Timestamp.from(t1));
 
         String userPrompt = "請用一句話介紹什麼是 Spring AI？";
@@ -175,8 +180,8 @@ public class LocalDataSeedInitializer implements ApplicationRunner {
         Instant t1 = t0.plusSeconds(1);
 
         jdbcTemplate.update("""
-            INSERT INTO conversation (id, bot_id, title, user_id, created_at, updated_at)
-            VALUES (?, 'bot-general', '示範：模型錯誤 (FAILED)', ?, ?, ?)
+            INSERT INTO conversation (id, bot_id, title, user_id, workspace_id, created_at, updated_at)
+            VALUES (?, 'bot-general', '示範：模型錯誤 (FAILED)', ?, (SELECT id FROM workspace WHERE personal_owner_id = 'dev-user'), ?, ?)
         """, convId, userId, Timestamp.from(t0), Timestamp.from(t1));
 
         String userPrompt = "觸發超時與配額不足示範";
@@ -209,8 +214,8 @@ public class LocalDataSeedInitializer implements ApplicationRunner {
         Instant t1 = t0.plusSeconds(3);
 
         jdbcTemplate.update("""
-            INSERT INTO conversation (id, bot_id, title, user_id, created_at, updated_at)
-            VALUES (?, 'bot-general', '示範：中途取消 (CANCELLED)', ?, ?, ?)
+            INSERT INTO conversation (id, bot_id, title, user_id, workspace_id, created_at, updated_at)
+            VALUES (?, 'bot-general', '示範：中途取消 (CANCELLED)', ?, (SELECT id FROM workspace WHERE personal_owner_id = 'dev-user'), ?, ?)
         """, convId, userId, Timestamp.from(t0), Timestamp.from(t1));
 
         String userPrompt = "請幫我寫一篇五千字的量子力學詳解";

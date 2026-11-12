@@ -4,6 +4,13 @@
 <chat-sidenav [mode]="layoutMode()" [open]="navigationOpen()" [debug]="false" (modeChange)="setLayoutMode($event)" (openChange)="setNavigationOpen($event)" (newChat)="newChat()" (searchOpened)="openSearch()">
   <div sidenavHeader class="navigation-title">Herdr Bot</div>
   <div sidenavPrimary>
+  <label for="workspace-select">目前工作區</label>
+  <select id="workspace-select" [value]="workspaceId() ?? ''" [disabled]="workspaceLoading() || !workspaces().length" (change)="workspaceSelected.emit($any($event.target).value)">
+    @for (workspace of workspaces(); track workspace.id) { <option [value]="workspace.id">{{workspace.name}}</option> }
+  </select>
+  @if (workspaceError()) { <p role="alert">{{workspaceError()}} <button type="button" (click)="workspaceRetry.emit()">重試</button></p> }
+  @else if (!workspaceLoading() && !workspaces().length) { <p>目前沒有可存取的工作區。</p> }
+
   @if (initializing()) { <p role="status">載入中…</p> }
   <div class="modes" aria-label="功能選擇">
     <button type="button" data-testid="nav-conversations" [attr.aria-pressed]="mode() === 'conversations'" (click)="selectMode('conversations')">對話列表</button>

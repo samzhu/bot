@@ -10,6 +10,8 @@ export class ChatSearchStore {
   readonly error = signal<string | null>(null);
   readonly validationError = signal(false);
   private generation = 0;
+  private workspaceId: string | null = null;
+  setWorkspace(id: string | null): void { if (id === this.workspaceId) return; this.closeSearch(); this.workspaceId = id; this.query.set(''); this.results.set([]); }
   private timer: ReturnType<typeof setTimeout> | undefined;
   private controller: AbortController | undefined;
   private readonly destroyRef = inject(DestroyRef);
@@ -45,9 +47,10 @@ export class ChatSearchStore {
   }
   private async search(search: string, generation: number, reopen: boolean): Promise<void> {
     const controller = new AbortController(); this.controller = controller;
+    const workspaceId = this.workspaceId;
     try {
       const response = await fetch('/graphql', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
-        body: JSON.stringify({ query: 'query SearchConversations($search: String, $limit: Int, $offset: Int) { conversations(search: $search, limit: $limit, offset: $offset) { id title } }', variables: { search, limit: 20, offset: 0 } }) });
+        body: JSON.stringify({ query: 'query SearchConversations($search: String, $limit: Int, $offset: Int, $workspaceId: ID) { conversations(search: $search, limit: $limit, offset: $offset, workspaceId: $workspaceId) { id title } }', variables: { search, limit: 20, offset: 0, workspaceId } }) });
       if (!response.ok) throw new Error('search failed');
       const json = await response.json();
       if (json.errors?.length || !Array.isArray(json.data?.conversations)) throw new Error('search failed');

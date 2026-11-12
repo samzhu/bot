@@ -1,5 +1,5 @@
 <div class="layout-container" data-threadplane-chat-theme="light" [attr.aria-busy]="isInitializing()">
-  <app-chat-navigation [activeConversationId]="currentConversationId()" [initializing]="isInitializing()"
+  <app-chat-navigation [workspaces]="workspaces.workspaces()" [workspaceId]="workspaces.selectedId()" [workspaceLoading]="workspaces.loading() || isInitializing()" [workspaceError]="workspaces.error()" (workspaceSelected)="selectWorkspace($event)" (workspaceRetry)="retryWorkspaces()" [activeConversationId]="currentConversationId()" [initializing]="isInitializing()"
     (conversationSelected)="selectConversation($event)" (botSelected)="openBotDraft($event)"
     (modeSelected)="onNavigationMode($event)" (newChatRequested)="newConversation()"
     (layoutModeChanged)="navigationLayout.set($event)" />
@@ -8,13 +8,13 @@
     @if (currentView() === 'bots') {
       <app-bot-manager (startChat)="openBotDraft($event)" (saved)="navigation()?.refreshBots()" />
     } @else {
-      @if (streamError()) { <p role="alert">{{streamError()}} @if (streamError() === '載入對話歷史失敗。') { <button type="button" (click)="retryHistory()">重試載入</button> }</p> }
+      @if (streamError()) { <p role="alert">{{streamError()}} @if (streamError() === '載入對話歷史失敗。') { <button type="button" (click)="retryHistory()">重試載入</button> } @if (streamError()?.includes('狀態尚未確認')) { <button type="button" (click)="checkChatStatus()">查詢執行狀態</button> }</p> }
       @if (specifiedBot(); as bot) {
         @if (getModeDisplay(bot).isSimulated) { <p class="simulation-banner" data-testid="simulation-banner" role="status">本機模擬模式：正式 Agent 尚未連線。</p> }
         @else if (!bot.canChat) { <p class="disabled-bot-banner" data-testid="disabled-bot-banner" role="alert">未連線（停用）：目前無法送出，草稿已保留。</p> }
       } @else if (isDefaultBotMissing()) { <p class="disabled-bot-banner" data-testid="default-bot-missing-banner" role="alert">找不到預設助理，暫時無法送出訊息。</p> }
       @for (failure of chatSessions.failedCreations(chatKey())(); track failure.runId) {
-        <div role="alert">建立對話失敗，原稿：<pre>{{failure.raw}}</pre>
+        <div role="alert">送出未完成，原稿：<pre>{{failure.raw}}</pre>
           <button type="button" [disabled]="!!chatSession().draft()" (click)="restoreFailedDraft(failure.runId, failure.raw)">還原原稿</button>
           <button type="button" (click)="copyFailedDraft(failure.raw)">複製原稿</button>
         </div>

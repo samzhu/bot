@@ -5,6 +5,8 @@ import java.util.Optional;
 
 public interface ConversationOperations {
     ConversationView createConversation(String botId, String title, String userId);
+    ConversationView createConversation(String botId, String title, String userId, String workspaceId);
+    List<ConversationView> listConversations(String userId, String search, Boolean pinned, int limit, int offset, String workspaceId);
     Optional<ConversationView> findConversationById(String id, String userId);
     List<ConversationView> listConversations(String userId, int limit, int offset);
     List<ConversationView> listConversations(String userId, Boolean pinned, int limit, int offset);

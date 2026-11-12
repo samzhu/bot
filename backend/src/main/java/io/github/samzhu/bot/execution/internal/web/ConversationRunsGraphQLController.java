@@ -1,6 +1,8 @@
 package io.github.samzhu.bot.execution.internal.web;
 
 import io.github.samzhu.bot.conversation.ConversationView;
+import io.github.samzhu.bot.conversation.ConversationOperations;
+import io.github.samzhu.bot.conversation.ConversationAccessDeniedException;
 import io.github.samzhu.bot.execution.ExecutionOperations;
 import io.github.samzhu.bot.execution.RunView;
 import io.github.samzhu.bot.identity.CurrentUserProvider;
@@ -15,12 +17,15 @@ import java.util.List;
 public class ConversationRunsGraphQLController {
 
     private final ExecutionOperations executionOperations;
+    private final ConversationOperations conversations;
     private final CurrentUserProvider currentUserProvider;
 
     public ConversationRunsGraphQLController(
             ExecutionOperations executionOperations,
+            ConversationOperations conversations,
             CurrentUserProvider currentUserProvider) {
         this.executionOperations = executionOperations;
+        this.conversations = conversations;
         this.currentUserProvider = currentUserProvider;
     }
 
@@ -34,6 +39,9 @@ public class ConversationRunsGraphQLController {
     public List<RunView> runs(ConversationView conversation, @Argument(name = "limit") Integer limit, @Argument(name = "offset") Integer offset) {
         int safeLimit = (limit == null || limit <= 0) ? 20 : limit;
         int safeOffset = (offset == null || offset < 0) ? 0 : offset;
+        if (conversations.findConversationById(conversation.id(), currentUserProvider.getCurrentUserId()).isEmpty()) {
+            throw new ConversationAccessDeniedException("Conversation access denied");
+        }
         return executionOperations.listRunsByConversation(conversation.id(), safeLimit, safeOffset);
     }
 }

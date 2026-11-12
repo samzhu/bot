@@ -7,7 +7,7 @@ import { signal } from '@angular/core';
 const local: BotView = { id:'local', name:'General Assistant', target:'LOCAL', connectionStatus:'NOT_APPLICABLE', executionMode:'LOCAL', canChat:true, createdAt:'', updatedAt:'' };
 const botA: BotView = { ...local, id:'a', name:'Bot A', target:'GKE_REMOTE', connectionStatus:'NOT_CONNECTED', executionMode:'SPRING_AI_SIMULATION', canChat:true };
 const botB: BotView = { ...botA, id:'b', name:'Bot B', executionMode:'UNAVAILABLE', canChat:false };
-const conversation = (id: string, botId = local.id) => ({ id, botId, title:id, pinned:false, createdAt:'', updatedAt:'', messages:[], runs:[] });
+const conversation = (id: string, botId = local.id) => ({ id, workspaceId:'personal', botId, title:id, pinned:false, createdAt:'', updatedAt:'', messages:[], runs:[] });
 function deferred<T>() { let resolve!: (v:T)=>void; let reject!: (e:unknown)=>void; const promise = new Promise<T>((yes,no)=>{resolve=yes;reject=no;}); return {promise,resolve,reject}; }
 
 describe('App ThreadPlane public behavior', () => {
@@ -19,6 +19,7 @@ describe('App ThreadPlane public behavior', () => {
     vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body || '{}'));
       requests.push(body);
+      if (body.query?.includes('Workspaces')) return Response.json({data:{workspaces:[{id:'personal',name:'Personal',role:'MANAGER',personal:true}]}});
       if (body.query?.includes('defaultLocalBot')) return Response.json({data:{defaultLocalBot:local,bots:[botA,botB]}});
       if (body.query?.includes('conversations(')) return Response.json({data:{conversations:[]}});
       if (body.query?.includes('bots(')) return Response.json({data:{bots:[botA,botB],defaultLocalBot:local}});
@@ -42,6 +43,103 @@ describe('App ThreadPlane public behavior', () => {
     return textarea;
   }
 
+  it('does not place a late A creation into selected B or steal B draft', async () => {
+    const {app} = await setup();
+    app.workspaces.workspaces.set([{id:'personal',name:'A',role:'MANAGER',personal:true},{id:'B',name:'B',role:'MEMBER',personal:false}]);
+    const creation = deferred<string>();
+    const create = vi.spyOn(app.chatTransport,'createConversation').mockReturnValue(creation.promise);
+    vi.spyOn(app.chatTransport,'run').mockResolvedValue({status:'COMPLETED'});
+    app.openBotDraft(botA); app.chatDraftChanged('A raw'); app.submitChat('A raw');
+    await app.selectWorkspace('B'); app.openBotDraft(botA); app.chatDraftChanged('B raw');
+    app.chatTransport.created.set('created-A',{id:'created-A',botId:'a',title:'A',createdAt:'',updatedAt:''});
+    creation.resolve('created-A');
+    await vi.waitFor(() => expect(app.chatTransport.run).toHaveBeenCalledOnce());
+    expect(create).toHaveBeenCalledWith('a', 'personal');
+    expect(app.workspaces.selectedId()).toBe('B'); expect(app.currentConversationId()).toBeNull();
+    expect(app.chatSession().draft()).toBe('B raw');
+    expect(app.conversations().some(item => item.id === 'created-A')).toBe(false);
+  });
+  it('shows cancellation denial without settling the active run', async () => {
+    const {app,fixture,root} = await setup();
+    const pending = deferred<{status:'COMPLETED'}>();
+    vi.spyOn(app.chatTransport,'run').mockReturnValue(pending.promise);
+    vi.spyOn(app.chatTransport,'cancel').mockResolvedValue({status:'REJECTED'});
+    const stopLocal = vi.spyOn(app.chatTransport,'stopLocal');
+    vi.spyOn(app.chatTransport,'createConversation').mockResolvedValue('A');
+    app.openBotDraft(botA); app.chatDraftChanged('sent'); app.submitChat('sent');
+    await vi.waitFor(() => expect(app.chatSession().conversationId).toBe('A'));
+    await vi.waitFor(() => expect(app.chatSession().active()).toBe(true));
+    app.stopChat(); await vi.waitFor(() => expect(app.streamError()).toContain('無權取消'));
+    fixture.detectChanges(); expect(app.chatSession().active()).toBe(true); expect(app.chatSession().draft()).toBe('');
+    expect(stopLocal).not.toHaveBeenCalled(); expect(root.textContent).toContain('查詢');
+    pending.resolve({status:'COMPLETED'});
+  });
+  it('does not select a hydrated conversation from a different workspace', async () => {
+    const {app} = await setup();
+    vi.spyOn(app.chatTransport, 'hydrate').mockResolvedValue({...conversation('foreign'), workspaceId:'B'});
+    await app.selectConversation('foreign');
+    expect(app.currentConversationId()).not.toBe('foreign');
+    expect(app.activeConversation()?.id).not.toBe('foreign');
+  });
+  it('retries failed history with the selected workspace and activates the verified conversation', async () => {
+    const {app} = await setup();
+    const hydrate = vi.spyOn(app.chatTransport, 'hydrate').mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(conversation('C'));
+    await app.selectConversation('C'); expect(app.streamError()).toContain('載入對話歷史失敗');
+    app.retryHistory();
+    await vi.waitFor(() => expect(app.activeConversation()?.id).toBe('C'));
+    expect(hydrate).toHaveBeenLastCalledWith('C','personal');
+    expect(app.chatCanSend()).toBe(true);
+  });
+  it('shows real hydrated history after a scoped retry and ignores a retry that finishes after switching', async () => {
+    const {app, fixture, root} = await setup();
+    const row = {id:'message-C',runId:'r',role:'USER',content:'saved history',createdAt:'2026-01-01T00:00:00Z'};
+    let resolve!: (value: Response) => void; let count = 0;
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const query = JSON.parse(String(init?.body || '{}')).query || '';
+      if (!query.includes('SessionHistory')) return Response.json({data:{conversations:[]}});
+      if (++count === 1) throw new Error('offline');
+      if (count === 2) return Response.json({data:{conversation:{...conversation('C'),messages:[row]}}});
+      if (count === 3) throw new Error('offline again');
+      return new Promise<Response>(r => resolve = r);
+    }));
+    await app.selectConversation('C'); expect(app.streamError()).toContain('載入對話歷史失敗');
+    app.retryHistory(); await vi.waitFor(() => expect(app.activeConversation()?.id).toBe('C'));
+    fixture.detectChanges(); expect(app.chatCanSend()).toBe(true); expect(root.textContent).toContain('saved history');
+    await app.selectConversation('D'); expect(app.streamError()).toContain('載入對話歷史失敗');
+    app.retryHistory(); await vi.waitFor(() => expect(count).toBe(4));
+    app.workspaces.workspaces.set([{id:'personal',name:'A',role:'MANAGER',personal:true},{id:'B',name:'B',role:'MEMBER',personal:false}]);
+    await app.selectWorkspace('B'); app.chatDraftChanged('B draft');
+    resolve(Response.json({data:{conversation:{...conversation('D'),messages:[row]}}}));
+    await vi.waitFor(() => expect(app.workspaces.selectedId()).toBe('B'));
+    await new Promise(r => setTimeout(r, 0));
+    expect(app.currentConversationId()).toBeNull(); expect(app.chatSession().draft()).toBe('B draft');
+    expect(app.chatAgent().messages().some(m => m.content === 'saved history')).toBe(false);
+  });
+  it('does not project a conversation draft before its workspace is verified', async () => {
+    const {app} = await setup();
+    app.chatSessions.edit('conversation:C', 'private draft');
+    const history = deferred<any>(); vi.spyOn(app.chatTransport,'hydrate').mockReturnValue(history.promise);
+    const loading = app.selectConversation('C');
+    expect(app.chatSession().draft()).not.toBe('private draft');
+    history.resolve({...conversation('C'), workspaceId:'B'}); await loading;
+    expect(app.chatSession().draft()).not.toBe('private draft');
+  });
+  it('keeps a deep selected conversation when an earlier creation completes', async () => {
+    const {app} = await setup();
+    const creating = deferred<string>();
+    vi.spyOn(app.chatTransport, 'createConversation').mockReturnValue(creating.promise);
+    vi.spyOn(app.chatTransport, 'run').mockResolvedValue({status:'COMPLETED'});
+    vi.spyOn(app.chatTransport, 'hydrate').mockResolvedValue(conversation('deep-Y'));
+    app.openBotDraft(botA); app.chatDraftChanged('new X'); app.submitChat('new X');
+    await app.selectConversation('deep-Y');
+    expect(app.currentConversationId()).toBe('deep-Y'); expect(app.activeConversation()?.id).toBe('deep-Y');
+    expect(app.conversations().some(item => item.id === 'deep-Y')).toBe(false); const agent = app.chatAgent();
+    app.chatTransport.created.set('new-X',{id:'new-X',botId:'a',title:'X',createdAt:'',updatedAt:''});
+    creating.resolve('new-X'); await vi.waitFor(() => expect(app.chatTransport.run).toHaveBeenCalledOnce());
+    expect(app.currentConversationId()).toBe('deep-Y'); expect(app.activeConversation()?.id).toBe('deep-Y');
+    expect(app.currentTitle()).toBe('deep-Y'); expect(app.chatAgent()).toBe(agent); expect(app.navigation()?.deepActive().map(item => item.id)).toEqual(['deep-Y']);
+    expect(app.conversations().some(item => item.id === 'new-X')).toBe(true);
+  });
   it('renders native window and composer with the general chat title', async () => {
     const {root} = await setup();
     expect(root.querySelector('chat-window')).toBeTruthy();
@@ -88,8 +186,8 @@ describe('App ThreadPlane public behavior', () => {
     const {app}=await setup(); const creation=deferred<string>(); vi.spyOn(app.chatTransport,'createConversation').mockReturnValue(creation.promise);
     app.openBotDraft(botA); app.chatDraftChanged(' old\n '); app.submitChat(' old\n ');
     app.openBotDraft(botA); app.chatDraftChanged(' new '); creation.reject(new Error('failed'));
-    await vi.waitFor(()=>expect(app.chatSessions.failedCreations('bot:a')()).toHaveLength(1));
-    expect(app.chatSession().draft()).toBe(' new '); expect(app.chatSessions.failedCreations('bot:a')()[0].raw).toBe(' old\n ');
+    await vi.waitFor(()=>expect(app.chatSessions.failedCreations(`draft:${JSON.stringify(['personal', 'a'])}`)()).toHaveLength(1));
+    expect(app.chatSession().draft()).toBe(' new '); expect(app.chatSessions.failedCreations(`draft:${JSON.stringify(['personal', 'a'])}`)()[0].raw).toBe(' old\n ');
   });
   it('switches bots while a creation is pending without stealing selection or new draft', async () => {
     const {app}=await setup(); const creation=deferred<string>(); vi.spyOn(app.chatTransport,'createConversation').mockReturnValue(creation.promise);

@@ -88,17 +88,23 @@ public class AgUiController {
         // Client history and properties are untrusted; only the new user text enters the server-owned prompt.
         var result = execution.startAgUiRun(thread.asText(), id.asText(), text, currentUser.getCurrentUserId());
         return switch (result.type()) {
+            case ACCESS_DENIED -> jsonError(404, "CONVERSATION_ACCESS_DENIED");
             case STARTED -> ResponseEntity.ok().contentType(MediaType.TEXT_EVENT_STREAM).body(result.emitter());
-            case EXISTING -> ResponseEntity.status(409).body(Map.of(
+            case EXISTING -> ResponseEntity.status(409).contentType(MediaType.APPLICATION_JSON).body(Map.of(
                     "code", "DUPLICATE_RUN",
                     "runId", result.existingRun().id(),
                     "status", result.existingRun().status()));
-            case CONFLICT -> ResponseEntity.status(409).body(Map.of("code", "RUN_CONFLICT"));
-            case SERVICE_UNAVAILABLE -> ResponseEntity.status(503).body(Map.of("code", "GKE_AGENT_NOT_CONNECTED"));
+            case CONFLICT -> jsonError(409, "RUN_CONFLICT");
+            case SERVICE_UNAVAILABLE -> jsonError(503, "GKE_AGENT_NOT_CONNECTED");
         };
     }
 
+    // HttpAgent requests SSE, but pre-stream rejections are explicit JSON for its error handling.
+    private ResponseEntity<?> jsonError(int status, String code) {
+        return ResponseEntity.status(status).contentType(MediaType.APPLICATION_JSON).body(Map.of("code", code));
+    }
+
     private ResponseEntity<?> badRequest() {
-        return ResponseEntity.badRequest().body(Map.of("code", "INVALID_AG_UI_INPUT"));
+        return jsonError(400, "INVALID_AG_UI_INPUT");
     }
 }

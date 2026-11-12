@@ -5,6 +5,15 @@ import { ChatSearchStore } from './chat-search.store';
 describe('ChatSearchStore', () => {
   beforeEach(() => TestBed.configureTestingModule({ providers: [ChatSearchStore] }));
   afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+  it('discards search from the previous workspace and sends the captured scope', async () => {
+    vi.useFakeTimers(); let resolve!: (value: unknown) => void;
+    const fetcher = vi.fn((_url: string, _options: RequestInit) => new Promise(r => { resolve = r; })); vi.stubGlobal('fetch', fetcher);
+    const store = TestBed.inject(ChatSearchStore); store.setWorkspace('A'); store.openSearch(); store.changeQuery('query');
+    await vi.advanceTimersByTimeAsync(300);
+    expect(JSON.parse(fetcher.mock.calls[0][1].body as string).variables.workspaceId).toBe('A');
+    store.setWorkspace('B'); resolve({ok:true,json:async()=>({data:{conversations:[{id:'A',title:'A'}]}})});
+    await vi.runAllTimersAsync(); expect(store.results()).toEqual([]); expect(store.open()).toBe(false);
+  });
   it('clears stale results while debouncing, queries the server with trimmed input and preserves intent', async () => {
     vi.useFakeTimers();
     let resolve!: (v: unknown) => void;
@@ -14,7 +23,7 @@ describe('ChatSearchStore', () => {
     expect(store.loading()).toBe(true); expect(store.results()).toEqual([]);
     await vi.advanceTimersByTimeAsync(300);
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
-    expect(body.variables).toEqual({ search: 'first', limit: 20, offset: 0 });
+    expect(body.variables).toEqual({ search: 'first', limit: 20, offset: 0, workspaceId: null });
     store.closeSearch(); resolve({ok:true,json:async()=>({data:{conversations:[{id:'old',title:'Old'}]}})});
     await vi.runAllTimersAsync();
     expect(store.open()).toBe(false); expect(store.results()).toEqual([]);

@@ -1,6 +1,7 @@
 package io.github.samzhu.bot.conversation;
 
 import io.github.samzhu.bot.PostgresTestImage;
+import io.github.samzhu.bot.workspace.WorkspaceOperations;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -55,6 +56,9 @@ class ConversationPinningIntegrationTests {
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
+    @Autowired
+    private WorkspaceOperations workspaces;
+
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
             .build();
@@ -66,6 +70,8 @@ class ConversationPinningIntegrationTests {
     @BeforeEach
     void setUp() {
         baseUrl = "http://127.0.0.1:" + port;
+        workspaces.personal("dev-user");
+        workspaces.personal("foreign-user");
 
         // Ensure default bot fixture exists in test database
         jdbcTemplate.update("""
@@ -153,8 +159,8 @@ class ConversationPinningIntegrationTests {
         String foreignConvId = "conv-foreign-" + UUID.randomUUID();
         // Insert conversation owned by foreign user directly into DB
         jdbcTemplate.update("""
-            INSERT INTO conversation (id, bot_id, title, user_id, pinned, created_at, updated_at)
-            VALUES (?, 'bot-general', 'Foreign Owned Conversation', 'foreign-user', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            INSERT INTO conversation (id, bot_id, title, user_id, pinned, created_at, updated_at, workspace_id)
+            VALUES (?, 'bot-general', 'Foreign Owned Conversation', 'foreign-user', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, (SELECT id FROM workspace WHERE personal_owner_id = 'foreign-user'))
         """, foreignConvId);
 
         // Caller via public GraphQL is dev-user (default CurrentUserProvider)
@@ -173,8 +179,19 @@ class ConversationPinningIntegrationTests {
         assertEquals("FORBIDDEN", classification, "Classification must be FORBIDDEN: " + firstError);
 
         String errorMsg = firstError.path("message").asText();
-        assertTrue(errorMsg.toLowerCase().contains("unauthorized") || errorMsg.toLowerCase().contains("not owned"),
-                "Error message should mention unauthorized or not owned: " + errorMsg);
+        assertEquals("Conversation access denied", errorMsg);
+        assertEquals("CONVERSATION_ACCESS_DENIED", firstError.path("extensions").path("code").asText());
+        assertFalse(errorMsg.contains("foreign-user"));
+        assertFalse(errorMsg.contains(foreignConvId));
+
+        String missingPayload = objectMapper.writeValueAsString(java.util.Map.of(
+                "query", "mutation Pin($id: ID!) { setConversationPinned(id: $id, pinned: true) { id pinned } }",
+                "variables", java.util.Map.of("id", "missing-" + UUID.randomUUID())
+        ));
+        JsonNode missingError = executeGraphQL(missingPayload).path("errors").get(0);
+        assertEquals(errorMsg, missingError.path("message").asText());
+        assertEquals(firstError.path("extensions").path("code"), missingError.path("extensions").path("code"));
+        assertEquals(firstError.path("extensions").path("classification"), missingError.path("extensions").path("classification"));
 
         // Verify database state was not changed
         Boolean pinnedInDb = jdbcTemplate.queryForObject(
@@ -193,8 +210,8 @@ class ConversationPinningIntegrationTests {
 
         // Populate a conversation with non-empty run, messages, and session data
         jdbcTemplate.update("""
-            INSERT INTO conversation (id, bot_id, title, user_id, pinned, created_at, updated_at)
-            VALUES (?, 'bot-general', 'Idempotency Non-Empty Test', 'dev-user', false, ?, ?)
+            INSERT INTO conversation (id, bot_id, title, user_id, pinned, created_at, updated_at, workspace_id)
+            VALUES (?, 'bot-general', 'Idempotency Non-Empty Test', 'dev-user', false, ?, ?, (SELECT id FROM workspace WHERE personal_owner_id = 'dev-user'))
         """, convId, Timestamp.from(t0), Timestamp.from(t0));
 
         jdbcTemplate.update("""
@@ -296,16 +313,16 @@ class ConversationPinningIntegrationTests {
             String pId = "conv-p-" + String.format("%03d", i);
             Instant pTime = baseTime.plusSeconds(i * 10);
             jdbcTemplate.update("""
-                INSERT INTO conversation (id, bot_id, title, user_id, pinned, created_at, updated_at)
-                VALUES (?, 'bot-general', ?, 'dev-user', true, ?, ?)
+                INSERT INTO conversation (id, bot_id, title, user_id, pinned, created_at, updated_at, workspace_id)
+                VALUES (?, 'bot-general', ?, 'dev-user', true, ?, ?, (SELECT id FROM workspace WHERE personal_owner_id = 'dev-user'))
             """, pId, "Pinned " + i, Timestamp.from(pTime), Timestamp.from(pTime));
             expectedPinnedIds.add(pId);
 
             String uId = "conv-u-" + String.format("%03d", i);
             Instant uTime = baseTime.plusSeconds(i * 10 + 5);
             jdbcTemplate.update("""
-                INSERT INTO conversation (id, bot_id, title, user_id, pinned, created_at, updated_at)
-                VALUES (?, 'bot-general', ?, 'dev-user', false, ?, ?)
+                INSERT INTO conversation (id, bot_id, title, user_id, pinned, created_at, updated_at, workspace_id)
+                VALUES (?, 'bot-general', ?, 'dev-user', false, ?, ?, (SELECT id FROM workspace WHERE personal_owner_id = 'dev-user'))
             """, uId, "Unpinned " + i, Timestamp.from(uTime), Timestamp.from(uTime));
             expectedUnpinnedIds.add(uId);
         }
@@ -365,10 +382,10 @@ class ConversationPinningIntegrationTests {
         // E. Stable Tie-Breaker: identical updated_at timestamps order strictly by id DESC
         Instant tieTime = Instant.now().plusSeconds(1000);
         jdbcTemplate.update("""
-            INSERT INTO conversation (id, bot_id, title, user_id, pinned, created_at, updated_at)
-            VALUES ('conv-tie-1', 'bot-general', 'Tie 1', 'dev-user', true, ?, ?),
-                   ('conv-tie-3', 'bot-general', 'Tie 3', 'dev-user', true, ?, ?),
-                   ('conv-tie-2', 'bot-general', 'Tie 2', 'dev-user', true, ?, ?)
+            INSERT INTO conversation (id, bot_id, title, user_id, pinned, created_at, updated_at, workspace_id)
+            VALUES ('conv-tie-1', 'bot-general', 'Tie 1', 'dev-user', true, ?, ?, (SELECT id FROM workspace WHERE personal_owner_id = 'dev-user')),
+                   ('conv-tie-3', 'bot-general', 'Tie 3', 'dev-user', true, ?, ?, (SELECT id FROM workspace WHERE personal_owner_id = 'dev-user')),
+                   ('conv-tie-2', 'bot-general', 'Tie 2', 'dev-user', true, ?, ?, (SELECT id FROM workspace WHERE personal_owner_id = 'dev-user'))
         """, Timestamp.from(tieTime), Timestamp.from(tieTime),
              Timestamp.from(tieTime), Timestamp.from(tieTime),
              Timestamp.from(tieTime), Timestamp.from(tieTime));
@@ -428,8 +445,8 @@ class ConversationPinningIntegrationTests {
         // Start with 0 pinned and 1 unpinned conversation
         Instant t0 = Instant.now().minusSeconds(100000);
         jdbcTemplate.update("""
-            INSERT INTO conversation (id, bot_id, title, user_id, pinned, created_at, updated_at)
-            VALUES ('conv-init-target-1', 'bot-general', 'Initial Target Test', 'dev-user', false, ?, ?)
+            INSERT INTO conversation (id, bot_id, title, user_id, pinned, created_at, updated_at, workspace_id)
+            VALUES ('conv-init-target-1', 'bot-general', 'Initial Target Test', 'dev-user', false, ?, ?, (SELECT id FROM workspace WHERE personal_owner_id = 'dev-user'))
         """, Timestamp.from(t0), Timestamp.from(t0));
 
         // Pinned section must be strictly empty (0 items)
@@ -470,8 +487,8 @@ class ConversationPinningIntegrationTests {
         }
 
         jdbcTemplate.batchUpdate("""
-            INSERT INTO conversation (id, bot_id, title, user_id, pinned, created_at, updated_at)
-            VALUES (?, 'bot-general', ?, 'dev-user', ?, ?, ?)
+            INSERT INTO conversation (id, bot_id, title, user_id, pinned, created_at, updated_at, workspace_id)
+            VALUES (?, 'bot-general', ?, 'dev-user', ?, ?, ?, (SELECT id FROM workspace WHERE personal_owner_id = 'dev-user'))
         """, batchArgs);
 
         // Query database catalog directly to build authoritative expected order matching (updated_at DESC, id DESC)

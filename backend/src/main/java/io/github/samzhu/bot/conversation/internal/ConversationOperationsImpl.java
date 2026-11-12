@@ -1,6 +1,7 @@
 package io.github.samzhu.bot.conversation.internal;
 
 import io.github.samzhu.bot.bot.BotOperations;
+import io.github.samzhu.bot.workspace.WorkspaceOperations;
 import io.github.samzhu.bot.bot.BotView;
 import io.github.samzhu.bot.bot.GkeAgentNotConnectedException;
 import io.github.samzhu.bot.conversation.ConversationAccessDeniedException;
@@ -25,12 +26,14 @@ public class ConversationOperationsImpl implements ConversationOperations {
     private final MessageRepository messageRepository;
     private final JdbcAggregateTemplate jdbcAggregateTemplate;
     private final BotOperations botOperations;
+    private final WorkspaceOperations workspace;
 
     public ConversationOperationsImpl(
             ConversationRepository conversationRepository,
             MessageRepository messageRepository,
             JdbcAggregateTemplate jdbcAggregateTemplate,
-            BotOperations botOperations) {
+            BotOperations botOperations, WorkspaceOperations workspace) {
+        this.workspace = workspace;
         this.conversationRepository = conversationRepository;
         this.messageRepository = messageRepository;
         this.jdbcAggregateTemplate = jdbcAggregateTemplate;
@@ -39,6 +42,12 @@ public class ConversationOperationsImpl implements ConversationOperations {
 
     @Override
     public ConversationView createConversation(String botId, String title, String userId) {
+        return createConversation(botId, title, userId, null);
+    }
+
+    @Override
+    public ConversationView createConversation(String botId, String title, String userId, String workspaceId) {
+        String scope = workspace.requireMember(workspaceId, userId);
         Optional<BotView> botOpt = botOperations.findById(botId, userId);
         if (botOpt.isEmpty()) {
             throw new IllegalArgumentException("Bot not found: " + botId);
@@ -51,7 +60,7 @@ public class ConversationOperationsImpl implements ConversationOperations {
         String convId = UUID.randomUUID().toString();
         String safeTitle = (title == null || title.isBlank()) ? "New Conversation" : title.trim();
         Instant now = Instant.now();
-        Conversation conv = new Conversation(convId, botId, safeTitle, userId, false, now, now);
+        Conversation conv = new Conversation(convId, botId, safeTitle, userId, scope, false, now, now);
         Conversation saved = jdbcAggregateTemplate.insert(conv);
         return toView(saved);
     }
@@ -59,7 +68,7 @@ public class ConversationOperationsImpl implements ConversationOperations {
     @Override
     public Optional<ConversationView> findConversationById(String id, String userId) {
         return conversationRepository.findById(id)
-                .filter(conv -> userId != null && userId.equals(conv.userId()))
+                .filter(conv -> userId != null && userId.equals(conv.userId()) && workspace.isMember(conv.workspaceId(), userId))
                 .map(this::toView);
     }
 
@@ -75,6 +84,12 @@ public class ConversationOperationsImpl implements ConversationOperations {
 
     @Override
     public List<ConversationView> listConversations(String userId, String search, Boolean pinned, int limit, int offset) {
+        return listConversations(userId, search, pinned, limit, offset, null);
+    }
+
+    @Override
+    public List<ConversationView> listConversations(String userId, String search, Boolean pinned, int limit, int offset, String workspaceId) {
+        String scope = workspace.requireMember(workspaceId, userId);
         int safeLimit = Math.max(1, Math.min(limit <= 0 ? 20 : limit, 100));
         int safeOffset = Math.max(0, offset);
         String normalized = search == null ? null : search.strip();
@@ -89,12 +104,12 @@ public class ConversationOperationsImpl implements ConversationOperations {
                     .replace("%", "\\%")
                     .replace("_", "\\_") + "%";
             list = pinned == null
-                    ? conversationRepository.searchByUserId(userId, pattern, safeLimit, safeOffset)
-                    : conversationRepository.searchByUserIdAndPinned(userId, pinned, pattern, safeLimit, safeOffset);
+                    ? conversationRepository.searchByUserId(scope, userId, pattern, safeLimit, safeOffset)
+                    : conversationRepository.searchByUserIdAndPinned(scope, userId, pinned, pattern, safeLimit, safeOffset);
         } else if (pinned == null) {
-            list = conversationRepository.findByUserIdWithPaging(userId, safeLimit, safeOffset);
+            list = conversationRepository.findByUserIdWithPaging(scope, userId, safeLimit, safeOffset);
         } else {
-            list = conversationRepository.findByUserIdAndPinnedWithPaging(userId, pinned, safeLimit, safeOffset);
+            list = conversationRepository.findByUserIdAndPinnedWithPaging(scope, userId, pinned, safeLimit, safeOffset);
         }
 
         return list.stream()
@@ -106,7 +121,8 @@ public class ConversationOperationsImpl implements ConversationOperations {
     @Transactional
     public ConversationView setConversationPinned(String id, boolean pinned, String userId) {
         Conversation conv = conversationRepository.findById(id)
-                .orElseThrow(() -> new IllegalArgumentException("Conversation not found: " + id));
+                .filter(c -> userId != null && userId.equals(c.userId()) && workspace.isMember(c.workspaceId(), userId))
+                .orElseThrow(() -> new ConversationAccessDeniedException("Conversation access denied"));
 
         if (!conv.userId().equals(userId)) {
             throw new ConversationAccessDeniedException("Unauthorized: Conversation " + id + " is not owned by user " + userId);
@@ -117,7 +133,7 @@ public class ConversationOperationsImpl implements ConversationOperations {
             return toView(conv);
         }
 
-        conversationRepository.updatePinned(id, userId, pinned);
+        conversationRepository.updatePinned(id, conv.workspaceId(), userId, pinned);
 
         // Reload to verify final state (handles concurrent update or successful update without misjudging owner)
         Conversation current = conversationRepository.findById(id)
@@ -156,7 +172,7 @@ public class ConversationOperationsImpl implements ConversationOperations {
     }
 
     private ConversationView toView(Conversation c) {
-        return new ConversationView(c.id(), c.botId(), c.title(), c.userId(), c.pinned(), c.createdAt(), c.updatedAt());
+        return new ConversationView(c.id(), c.botId(), c.title(), c.userId(), c.workspaceId(), c.pinned(), c.createdAt(), c.updatedAt());
     }
 
     private MessageView toView(Message m) {

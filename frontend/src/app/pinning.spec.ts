@@ -15,6 +15,8 @@ describe('Issue #11 Frontend: Conversation Pinning & Dual-Section Sidebar', () =
         body = JSON.parse(opts?.body || '{}');
       } catch {}
 
+      if (body.query?.includes('Workspaces')) return Promise.resolve({ok:true, json:async () => ({data:{workspaces:[{id:'personal',name:'Personal',role:'MANAGER',personal:true}]}})});
+
       if (body.query?.includes('defaultLocalBot')) {
         return Promise.resolve({
           ok: true,

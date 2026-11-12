@@ -8,6 +8,7 @@ import io.github.samzhu.bot.conversation.internal.ConversationRepository;
 import io.github.samzhu.bot.conversation.internal.MessageRepository;
 import io.github.samzhu.bot.conversation.internal.web.ConversationGraphQLController;
 import io.github.samzhu.bot.identity.CurrentUserProvider;
+import io.github.samzhu.bot.workspace.WorkspaceOperations;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.jdbc.core.JdbcAggregateTemplate;
@@ -29,19 +30,19 @@ class ConversationPinningUnitTests {
         JdbcAggregateTemplate jdbcTemp = mock(JdbcAggregateTemplate.class);
         BotOperations botOps = mock(BotOperations.class);
 
-        ConversationOperationsImpl ops = new ConversationOperationsImpl(convRepo, msgRepo, jdbcTemp, botOps);
+        ConversationOperationsImpl ops = new ConversationOperationsImpl(convRepo, msgRepo, jdbcTemp, botOps, mock(WorkspaceOperations.class));
 
-        Conversation conv = new Conversation("c-1", "b-1", "Title", "foreign-user", false, Instant.now(), Instant.now());
+        Conversation conv = new Conversation("c-1", "b-1", "Title", "foreign-user", "workspace-1", false, Instant.now(), Instant.now());
         when(convRepo.findById("c-1")).thenReturn(Optional.of(conv));
 
         ConversationAccessDeniedException ex = assertThrows(
                 ConversationAccessDeniedException.class,
                 () -> ops.setConversationPinned("c-1", true, "caller-user")
         );
-        assertTrue(ex.getMessage().contains("caller-user"));
-        assertTrue(ex.getMessage().contains("Unauthorized"));
+        assertEquals("Conversation access denied", ex.getMessage());
+        assertFalse(ex.getMessage().contains("caller-user"));
 
-        verify(convRepo, never()).updatePinned(anyString(), anyString(), anyBoolean());
+        verify(convRepo, never()).updatePinned(anyString(), anyString(), anyString(), anyBoolean());
     }
 
     @Test
@@ -51,11 +52,13 @@ class ConversationPinningUnitTests {
         MessageRepository msgRepo = mock(MessageRepository.class);
         JdbcAggregateTemplate jdbcTemp = mock(JdbcAggregateTemplate.class);
 
-        ConversationOperationsImpl ops = new ConversationOperationsImpl(convRepo, msgRepo, jdbcTemp, mock(BotOperations.class));
+        WorkspaceOperations workspaces = mock(WorkspaceOperations.class);
+        when(workspaces.isMember("workspace-1", "owner-user")).thenReturn(true);
+        ConversationOperationsImpl ops = new ConversationOperationsImpl(convRepo, msgRepo, jdbcTemp, mock(BotOperations.class), workspaces);
 
-        Conversation initial = new Conversation("c-1", "b-1", "Title", "owner-user", false, Instant.now(), Instant.now());
+        Conversation initial = new Conversation("c-1", "b-1", "Title", "owner-user", "workspace-1", false, Instant.now(), Instant.now());
         when(convRepo.findById("c-1"))
-                .thenReturn(Optional.of(initial)) // first lookup succeeds
+                .thenReturn(Optional.of(initial)) // access check and update target
                 .thenReturn(Optional.empty());     // reload fails (unexpected internal error)
 
         IllegalStateException ex = assertThrows(
@@ -79,6 +82,8 @@ class ConversationPinningUnitTests {
         assertNotNull(error);
         assertEquals(ErrorType.FORBIDDEN, error.getErrorType());
         assertEquals("FORBIDDEN", error.getErrorType().toString());
-        assertEquals("Unauthorized: Conversation c-1 is not owned by user caller-1", error.getMessage());
+        assertEquals("Conversation access denied", error.getMessage());
+        assertEquals("CONVERSATION_ACCESS_DENIED", error.getExtensions().get("code"));
+        assertFalse(error.getMessage().contains("caller-1"));
     }
 }

@@ -18,12 +18,13 @@ public interface ExecutionOperations {
         SseEmitter emitter,
         String conflictMessage
     ) {
-        public enum Type { STARTED, EXISTING, CONFLICT, SERVICE_UNAVAILABLE }
+        public enum Type { STARTED, EXISTING, CONFLICT, SERVICE_UNAVAILABLE, ACCESS_DENIED }
     }
 
     record CancelRunOutcome(
         String runId,
         RunStatus finalStatus,
-        boolean cancelled
+        boolean cancelled,
+        boolean accessDenied
     ) {}
 }

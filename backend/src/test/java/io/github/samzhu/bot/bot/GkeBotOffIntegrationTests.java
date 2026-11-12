@@ -1,6 +1,7 @@
 package io.github.samzhu.bot.bot;
 
 import io.github.samzhu.bot.PostgresTestImage;
+import io.github.samzhu.bot.workspace.WorkspaceOperations;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -52,6 +53,9 @@ public class GkeBotOffIntegrationTests {
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
+    @Autowired
+    private WorkspaceOperations workspaces;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -61,6 +65,7 @@ public class GkeBotOffIntegrationTests {
     @BeforeEach
     void setUp() {
         baseUrl = "http://127.0.0.1:" + port;
+        workspaces.personal("dev-user");
         jdbcTemplate.update("""
             INSERT INTO bot (id, name, system_prompt, target, created_at, updated_at)
             VALUES ('bot-general', 'General Assistant', 'System prompt', 'LOCAL', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -115,8 +120,8 @@ public class GkeBotOffIntegrationTests {
 
         String convId = "conv-off-" + UUID.randomUUID();
         jdbcTemplate.update("""
-            INSERT INTO conversation (id, bot_id, title, user_id, pinned, created_at, updated_at)
-            VALUES (?, ?, 'Pre-existing GKE Conv', 'dev-user', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            INSERT INTO conversation (id, bot_id, title, user_id, pinned, created_at, updated_at, workspace_id)
+            VALUES (?, ?, 'Pre-existing GKE Conv', 'dev-user', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, (SELECT id FROM workspace WHERE personal_owner_id = 'dev-user'))
         """, convId, botId);
 
         int runCountBefore = jdbcTemplate.queryForObject("SELECT count(*) FROM chat_run", Integer.class);

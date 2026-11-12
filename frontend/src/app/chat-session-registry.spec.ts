@@ -8,6 +8,33 @@ function deferred<T>() {
 }
 
 describe('ChatSessionRegistry', () => {
+  it('captures workspace when creating a draft and keeps a rejected cancellation active', async () => {
+    const create = deferred<string>();
+    const running = deferred<RunResult>();
+    const transport: ChatSessionTransport = {createConversation: vi.fn(() => create.promise), run: vi.fn(() => running.promise), reconcile: vi.fn(), cancel: vi.fn(async () => ({status:'REJECTED' as const})), stopLocal: vi.fn()};
+    const registry = new ChatSessionRegistry(transport, () => 'run');
+    registry.edit('workspace:A:bot:x', 'raw A');
+    const task = registry.submit('workspace:A:bot:x', 'x', undefined, 'A');
+    registry.edit('workspace:B:bot:x', 'raw B');
+    expect(transport.createConversation).toHaveBeenCalledWith('x', 'A');
+    create.resolve('conv-A');
+    await vi.waitFor(() => expect(transport.run).toHaveBeenCalledOnce());
+    expect((await registry.stop('conversation:conv-A'))?.status).toBe('REJECTED');
+    expect(registry.session('conversation:conv-A').active()).toBe(true);
+    expect(registry.session('conversation:conv-A').draft()).toBe('');
+    expect(registry.session('workspace:B:bot:x').draft()).toBe('raw B');
+    expect(transport.stopLocal).not.toHaveBeenCalled();
+    running.resolve({status:'COMPLETED'}); await task;
+  });
+  it('keeps rejected raw separately if the source has a newer draft', async () => {
+    const run = deferred<RunResult>();
+    const transport: ChatSessionTransport = {createConversation:vi.fn(),run:vi.fn(() => run.promise),reconcile:vi.fn(),cancel:vi.fn()};
+    const registry = new ChatSessionRegistry(transport, () => 'run');
+    registry.edit('conversation:A','original raw'); const pending = registry.submit('conversation:A');
+    registry.edit('conversation:A','newer raw'); run.resolve({status:'REJECTED'}); await pending;
+    expect(registry.session('conversation:A').draft()).toBe('newer raw');
+    expect(registry.failedCreations('conversation:A')()).toEqual([{runId:'run',raw:'original raw'}]);
+  });
   it('deduplicates concurrent checks for one run', async () => {
     const check = deferred<RunResult>();
     const run = deferred<RunResult>();

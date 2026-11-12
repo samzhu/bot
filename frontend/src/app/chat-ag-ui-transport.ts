@@ -33,7 +33,7 @@ export class ChatAgUiTransport implements ChatSessionTransport {
           if (user) target.userByRun.set(target.source.nextRunId, user.id);
           const response = await this.request(url, init);
           target.httpStatus = response.status;
-          if ([400, 409, 503].includes(response.status)) {
+          if ([400, 404, 409, 503].includes(response.status)) {
             const body = await response.clone().json().catch(() => null);
             target.conflictCode = typeof body?.code === 'string' ? body.code : null;
           }
@@ -69,28 +69,29 @@ export class ChatAgUiTransport implements ChatSessionTransport {
     return entry;
   }
   agent(conversationId: string): AgUiAgent { return this.entry(conversationId).facade; }
-  hydrate(conversationId: string): Promise<any> {
-    if (this.hydrated.has(conversationId)) return Promise.resolve(this.hydrated.get(conversationId));
-    const existing = this.hydration.get(conversationId);
-    if (existing) return existing;
+  hydrate(conversationId: string, expectedWorkspaceId?: string): Promise<any> {
+    if (!expectedWorkspaceId && this.hydrated.has(conversationId)) return Promise.resolve(this.hydrated.get(conversationId));
     const entry = this.entry(conversationId);
-    entry.hydrating.set(true);
-    const task = (async () => {
-      try {
-        const data = await this.graphql(`query SessionHistory($id: ID!) { conversation(id: $id) { id botId title pinned createdAt updatedAt messages(limit: 20, offset: 0) { id runId role content interrupted createdAt } runs(limit: 50, offset: 0) { id status errorMessage } } }`, { id: conversationId });
-        if (!Array.isArray(data?.conversation?.messages)) throw new Error('Missing conversation history');
-        const statuses = new Map<string, string>((data.conversation.runs || []).map((run: {id: string; status: string}) => [run.id, run.status]));
-        this.mergeHistory(conversationId, data.conversation.messages.map((row: {runId: string}) => ({...row, runStatus: statuses.get(row.runId)})));
-        this.hydrated.set(conversationId, data.conversation);
-        entry.historyError.set(false);
-        return data.conversation;
-      } catch (error) {
-        entry.historyError.set(true);
-        throw error;
-      } finally { entry.hydrating.set(false); this.hydration.delete(conversationId); }
-    })();
-    this.hydration.set(conversationId, task);
-    return task;
+    let task = this.hydration.get(conversationId);
+    if (!task) {
+      entry.hydrating.set(true);
+      task = this.graphql(`query SessionHistory($id: ID!) { conversation(id: $id) { id workspaceId botId title pinned createdAt updatedAt messages(limit: 20, offset: 0) { id runId role content interrupted createdAt } runs(limit: 50, offset: 0) { id status errorMessage } } }`, { id: conversationId })
+        .then(data => {
+          if (!Array.isArray(data?.conversation?.messages)) throw new Error('Missing conversation history');
+          return data.conversation;
+        }).catch(error => { entry.historyError.set(true); throw error; })
+        .finally(() => { entry.hydrating.set(false); this.hydration.delete(conversationId); });
+      this.hydration.set(conversationId, task);
+    }
+    // A shared fetch is not a shared authorization decision: each caller checks its own scope.
+    return task.then(conversation => {
+      if (expectedWorkspaceId && conversation.workspaceId !== expectedWorkspaceId) throw new Error('Inaccessible conversation history');
+      const statuses = new Map<string, string>((conversation.runs || []).map((run: {id: string; status: string}) => [run.id, run.status]));
+      this.mergeHistory(conversationId, conversation.messages.map((row: {runId: string}) => ({...row, runStatus: statuses.get(row.runId)})));
+      this.hydrated.set(conversationId, conversation);
+      entry.historyError.set(false);
+      return conversation;
+    });
   }
   historyOffset(conversationId: string): number { return this.entry(conversationId).persistedIds().size; }
   mergeHistory(conversationId: string, rows: any[], prepend = false): void {
@@ -128,8 +129,8 @@ export class ChatAgUiTransport implements ChatSessionTransport {
       return merged;
     });
   }
-  async createConversation(botId: string): Promise<string> {
-    const data = await this.graphql(`mutation CreateConversation($botId: ID!, $title: String) { createConversation(botId: $botId, title: $title) { id botId title createdAt updatedAt } }`, { botId, title: 'New Conversation' });
+  async createConversation(botId: string, workspaceId?: string): Promise<string> {
+    const data = await this.graphql(`mutation CreateConversation($botId: ID!, $title: String, $workspaceId: ID) { createConversation(botId: $botId, title: $title, workspaceId: $workspaceId) { id workspaceId botId title createdAt updatedAt } }`, { botId, workspaceId, title: 'New Conversation' });
     if (!data?.createConversation?.id) throw new Error('Missing conversation');
     this.created.set(data.createConversation.id, data.createConversation);
     return data.createConversation.id;
@@ -158,7 +159,8 @@ export class ChatAgUiTransport implements ChatSessionTransport {
       return { status: 'REJECTED' };
     };
     const responseResult = (): RunResult | null => {
-      if ((entry.httpStatus === 409 && entry.conflictCode === 'RUN_CONFLICT') ||
+      if ((entry.httpStatus === 404 && entry.conflictCode === 'CONVERSATION_ACCESS_DENIED') ||
+          (entry.httpStatus === 409 && entry.conflictCode === 'RUN_CONFLICT') ||
           (entry.httpStatus === 400 && entry.conflictCode === 'INVALID_AG_UI_INPUT') ||
           (entry.httpStatus === 503 && entry.conflictCode === 'GKE_AGENT_NOT_CONNECTED')) return rejected();
       if (entry.httpStatus === 409 && entry.conflictCode === 'DUPLICATE_RUN') return { status: 'DUPLICATE' };
@@ -185,7 +187,10 @@ export class ChatAgUiTransport implements ChatSessionTransport {
   }
   async cancel(_conversationId: string, runId: string): Promise<RunResult> {
     const res = await this.request(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' });
-    if (!res.ok) return { status: 'UNKNOWN' };
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      return { status: res.status === 404 && body?.code === 'RUN_ACCESS_DENIED' ? 'REJECTED' : 'UNKNOWN' };
+    }
     const body = await res.json();
     return { status: body.status === 'COMPLETED' || body.status === 'FAILED' || body.status === 'CANCELLED' ? body.status : 'UNKNOWN' };
   }
@@ -194,7 +199,7 @@ export class ChatAgUiTransport implements ChatSessionTransport {
     const res = await this.request('/graphql', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query, variables }) });
     if (!res.ok) throw new Error(`GraphQL HTTP ${res.status}`);
     const result = await res.json();
-    if (result.errors?.length) throw new Error(result.errors[0].message);
+    if (result.errors?.length) throw Object.assign(new Error(result.errors[0].message), { extensions: result.errors[0].extensions });
     return result.data;
   }
 }

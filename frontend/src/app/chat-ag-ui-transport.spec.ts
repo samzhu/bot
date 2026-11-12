@@ -3,6 +3,31 @@ import { ChatAgUiTransport } from './chat-ag-ui-transport';
 import { ChatSessionRegistry } from './chat-session-registry';
 
 describe('ChatAgUiTransport', () => {
+  it('recognizes only the exact access-denied codes for start and cancel', async () => {
+    for (const [code, expected] of [['CONVERSATION_ACCESS_DENIED','REJECTED'], ['OTHER','UNKNOWN']] as const) {
+      const transport = new ChatAgUiTransport(vi.fn(async () => Response.json({code}, {status:404})));
+      expect((await transport.run('A', 'run', 'raw', () => {})).status).toBe(expected);
+    }
+    for (const [code, expected] of [['RUN_ACCESS_DENIED','REJECTED'], ['OTHER','UNKNOWN']] as const) {
+      const transport = new ChatAgUiTransport(vi.fn(async () => Response.json({code}, {status:404})));
+      expect((await transport.cancel('A', 'run')).status).toBe(expected);
+    }
+  });
+  it('retains GraphQL error extensions for workspace access denial', async () => {
+    const transport = new ChatAgUiTransport(vi.fn(async () => Response.json({errors:[{message:'denied',extensions:{code:'WORKSPACE_ACCESS_DENIED'}}]})));
+    await expect(transport.createConversation('bot', 'A')).rejects.toMatchObject({extensions:{code:'WORKSPACE_ACCESS_DENIED'}});
+  });
+  it.each([['B','A'], ['A','B']])('validates each concurrent hydration scope (%s then %s)', async (firstScope, secondScope) => {
+    let resolve!: (value: Response) => void;
+    const fetcher = vi.fn(() => new Promise<Response>(r => resolve = r));
+    const transport = new ChatAgUiTransport(fetcher);
+    const first = transport.hydrate('C', firstScope);
+    const second = transport.hydrate('C', secondScope);
+    resolve(Response.json({data:{conversation:{id:'C', workspaceId:'A', messages:[], runs:[]}}}));
+    const results = await Promise.allSettled([first, second]);
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(results.map(r => r.status)).toEqual([firstScope === 'A' ? 'fulfilled' : 'rejected', secondScope === 'A' ? 'fulfilled' : 'rejected']);
+  });
   it('calls the default browser fetch with its global receiver', async () => {
     const original = globalThis.fetch;
     try {

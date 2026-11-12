@@ -2,6 +2,7 @@ import { Injectable, computed, signal } from '@angular/core';
 
 export interface ConversationView {
   id: string;
+  workspaceId?: string;
   botId: string;
   title: string;
   pinned: boolean;
@@ -29,6 +30,9 @@ export interface RangeFetchResult {
   providedIn: 'root'
 })
 export class ConversationListStore {
+  private workspaceId: string | null = null;
+  setWorkspace(id: string | null): void { if (id === this.workspaceId) return; this.resetAll(); this.workspaceId = id; }
+
   // Dual Filtered Conversation Lists
   readonly pinnedConversations = signal<ConversationView[]>([]);
   readonly unpinnedConversations = signal<ConversationView[]>([]);
@@ -98,14 +102,15 @@ export class ConversationListStore {
    * Fetch a single page of conversations by pinned filter.
    * Respects backend validation (throws on !res.ok, errors, or invalid array).
    */
-  async fetchConversationsByPinned(pinned: boolean, limit = 20, offset = 0): Promise<ConversationView[]> {
+  async fetchConversationsByPinned(pinned: boolean, limit = 20, offset = 0, workspaceId = this.workspaceId): Promise<ConversationView[]> {
     const res = await fetch('/graphql', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        query: `query GetConversations($pinned: Boolean, $limit: Int, $offset: Int) {
-          conversations(pinned: $pinned, limit: $limit, offset: $offset) {
+        query: `query GetConversations($pinned: Boolean, $limit: Int, $offset: Int, $workspaceId: ID) {
+          conversations(pinned: $pinned, limit: $limit, offset: $offset, workspaceId: $workspaceId) {
             id
+            workspaceId
             botId
             title
             pinned
@@ -113,7 +118,7 @@ export class ConversationListStore {
             updatedAt
           }
         }`,
-        variables: { pinned, limit, offset }
+        variables: { pinned, limit, offset, workspaceId }
       })
     });
 
@@ -124,7 +129,7 @@ export class ConversationListStore {
     const json = await res.json();
     if (json.errors && json.errors.length > 0) {
       const msg = json.errors[0]?.message || 'GraphQL error fetching conversations';
-      throw new Error(`GraphQL query error: ${msg}`);
+      throw Object.assign(new Error(`GraphQL query error: ${msg}`), { extensions: json.errors[0]?.extensions });
     }
 
     if (!json.data || !Array.isArray(json.data.conversations)) {
@@ -142,7 +147,7 @@ export class ConversationListStore {
    * 3. Exact 100 peek: on 100 boundaries, peeks 1 item to determine hasMore; throws on error without swallowing.
    * 4. Deduplicates items by id while preserving server order.
    */
-  async fetchRangeByPinned(pinned: boolean, targetCount: number): Promise<RangeFetchResult> {
+  async fetchRangeByPinned(pinned: boolean, targetCount: number, workspaceId = this.workspaceId): Promise<RangeFetchResult> {
     const target = Math.max(20, targetCount);
     let offset = 0;
     const items: ConversationView[] = [];
@@ -153,21 +158,21 @@ export class ConversationListStore {
       if (remaining <= 100) {
         // Query remaining batch
         const batchLimit = remaining;
-        const batch = await this.fetchConversationsByPinned(pinned, batchLimit, offset);
+        const batch = await this.fetchConversationsByPinned(pinned, batchLimit, offset, workspaceId);
         items.push(...batch);
         offset += batch.length;
         if (batch.length < batchLimit) {
           hasMore = false;
         } else {
           // Exactly hit target: peek 1 item to determine exact hasMore (no swallowing errors!)
-          const peek = await this.fetchConversationsByPinned(pinned, 1, offset);
+          const peek = await this.fetchConversationsByPinned(pinned, 1, offset, workspaceId);
           hasMore = peek.length > 0;
         }
         break;
       } else {
         // Fetch chunk of 100 (server cap)
         const batchLimit = 100;
-        const batch = await this.fetchConversationsByPinned(pinned, batchLimit, offset);
+        const batch = await this.fetchConversationsByPinned(pinned, batchLimit, offset, workspaceId);
         items.push(...batch);
         offset += batch.length;
         if (batch.length < 100) {
@@ -445,7 +450,7 @@ export class ConversationListStore {
       if (this.activePinTokens.get(conversationId) !== opToken) return;
 
       if (json.errors && json.errors.length > 0) {
-        throw new Error(json.errors[0]?.message || 'Failed to update pin state');
+        throw Object.assign(new Error(json.errors[0]?.message || 'Failed to update pin state'), { extensions: json.errors[0]?.extensions });
       }
 
       const updated = json.data?.setConversationPinned;
@@ -526,11 +531,8 @@ export class ConversationListStore {
   }
 
   addCreatedConversation(conv: ConversationView): void {
-    this.activeConversation.set(conv);
-    this.unpinnedConversations.update(prev => {
-      if (prev.some(c => c.id === conv.id)) return prev;
-      return [conv, ...prev];
-    });
+    if (this.conversations().some(item => item.id === conv.id)) return;
+    this.unpinnedConversations.update(prev => [conv, ...prev]);
     this.unpinnedOffset.update(o => o + 1);
   }
 

@@ -117,7 +117,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         // 1. Verify conversation ownership
         Optional<ConversationView> convOpt = conversationOperations.findConversationById(conversationId, userId);
         if (convOpt.isEmpty()) {
-            return new StartRunOutcome(StartRunOutcome.Type.CONFLICT, null, null, "Conversation not found or access denied");
+            return new StartRunOutcome(StartRunOutcome.Type.ACCESS_DENIED, null, null, null);
         }
         ConversationView conv = convOpt.get();
 
@@ -497,6 +497,11 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
 
     @Override
     public CancelRunOutcome cancelRun(String runId, String userId) {
+        // Authorization precedes registry lookup so rejected callers cannot affect a live handle.
+        Optional<ChatRun> authorizedRun = runRepository.findById(runId);
+        if (authorizedRun.isEmpty() || conversationOperations.findConversationById(authorizedRun.get().conversationId(), userId).isEmpty()) {
+            return new CancelRunOutcome(null, null, false, true);
+        }
         var lifecycleGate = runRegistry.lifecycleGate(runId);
         RunHandle handle;
         lifecycleGate.lock();
@@ -507,20 +512,20 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                 // cannot be cancelled here while its starter later publishes an active handle.
                 Optional<ChatRun> runOpt = runRepository.findById(runId);
                 if (runOpt.isEmpty()) {
-                    return new CancelRunOutcome(runId, RunStatus.FAILED, false);
+                    return new CancelRunOutcome(null, null, false, true);
                 }
                 ChatRun run = runOpt.get();
                 if (conversationOperations.findConversationById(run.conversationId(), userId).isEmpty()) {
-                    return new CancelRunOutcome(runId, RunStatus.FAILED, false);
+                    return new CancelRunOutcome(null, null, false, true);
                 }
                 runRepository.updateTerminalStatus(runId, RunStatus.CANCELLED.name(), "Run cancelled by user", Instant.now());
                 RunStatus status = runRepository.findById(runId)
                         .map(r -> RunStatus.valueOf(r.status()))
                         .orElse(RunStatus.CANCELLED);
-                return new CancelRunOutcome(runId, status, status == RunStatus.CANCELLED);
+                return new CancelRunOutcome(runId, status, status == RunStatus.CANCELLED, false);
             }
             if (!handle.getOwnerId().equals(userId)) {
-                return new CancelRunOutcome(runId, RunStatus.FAILED, false);
+                return new CancelRunOutcome(null, null, false, true);
             }
             handle.requestCancellation();
         } finally {
@@ -529,7 +534,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         // A handle serializes its own terminal transition. Release the stripe first so
         // emitting its terminal frame cannot hold up unrelated runs sharing the stripe.
         RunStatus status = handle.cancel(userId);
-        return new CancelRunOutcome(runId, status, status == RunStatus.CANCELLED);
+        return new CancelRunOutcome(runId, status, status == RunStatus.CANCELLED, false);
     }
 
     private RunView toView(ChatRun r) {

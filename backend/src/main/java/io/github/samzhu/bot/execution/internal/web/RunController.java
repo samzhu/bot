@@ -38,6 +38,7 @@ public class RunController {
         var outcome = executionOperations.startRun(conversationId, request.clientRequestId(), request.message(), userId);
 
         return switch (outcome.type()) {
+            case ACCESS_DENIED -> ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("code", "CONVERSATION_ACCESS_DENIED"));
             case EXISTING -> ResponseEntity.ok()
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(outcome.existingRun());
@@ -71,6 +72,7 @@ public class RunController {
     public ResponseEntity<?> cancelRun(@PathVariable String runId) {
         String userId = currentUserProvider.getCurrentUserId();
         var outcome = executionOperations.cancelRun(runId, userId);
+        if (outcome.accessDenied()) return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("code", "RUN_ACCESS_DENIED"));
         return ResponseEntity.ok(Map.of(
                 "runId", outcome.runId(),
                 "status", outcome.finalStatus().name(),

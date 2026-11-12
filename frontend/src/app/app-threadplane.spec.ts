@@ -7,6 +7,7 @@ describe('ThreadPlane App integration', () => {
   it('renders the native chat surface and keeps navigation as a sibling', async () => {
     vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body || '{}'));
+      if (body.query?.includes('Workspaces')) return Response.json({data:{workspaces:[{id:'personal',name:'Personal',role:'MANAGER',personal:true}]}});
       if (body.query?.includes('defaultLocalBot')) return Response.json({data:{defaultLocalBot:null,bots:[]}});
       return Response.json({data:{conversations:[],bots:[],defaultLocalBot:null}});
     }));
@@ -23,6 +24,7 @@ describe('ThreadPlane App integration', () => {
   it('keeps a pending create submission on its source when the user switches bots', async () => {
     vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body || '{}'));
+      if (body.query?.includes('Workspaces')) return Response.json({data:{workspaces:[{id:'personal',name:'Personal',role:'MANAGER',personal:true}]}});
       if (body.query?.includes('defaultLocalBot')) return Response.json({data:{defaultLocalBot:null,bots:[]}});
       return Response.json({data:{conversations:[],bots:[],defaultLocalBot:null}});
     }));

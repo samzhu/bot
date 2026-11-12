@@ -1,6 +1,7 @@
 package io.github.samzhu.bot.conversation;
 
 import io.github.samzhu.bot.PostgresTestImage;
+import io.github.samzhu.bot.workspace.WorkspaceOperations;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -44,6 +45,7 @@ class ConversationSearchIntegrationTests {
 
     @LocalServerPort int port;
     @Autowired JdbcTemplate jdbc;
+    @Autowired WorkspaceOperations workspaces;
     final ObjectMapper json = new ObjectMapper();
     final HttpClient http = HttpClient.newHttpClient();
     final String prefix = "search-" + UUID.randomUUID() + "-";
@@ -57,8 +59,8 @@ class ConversationSearchIntegrationTests {
     }
 
     void insert(String suffix, String title, String owner, boolean pinned, String bot) {
-        jdbc.update("INSERT INTO conversation(id,bot_id,title,user_id,pinned,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
-                prefix + suffix, bot, title, owner, pinned, Timestamp.from(time), Timestamp.from(time));
+        jdbc.update("INSERT INTO conversation(id,bot_id,title,user_id,pinned,created_at,updated_at,workspace_id) VALUES (?,?,?,?,?,?,?,?)",
+                prefix + suffix, bot, title, owner, pinned, Timestamp.from(time), Timestamp.from(time), workspaces.personal(owner).id());
     }
 
     JsonNode query(String search, Boolean pinned, Integer limit, Integer offset) throws Exception {

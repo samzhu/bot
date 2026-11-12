@@ -1,3 +1,4 @@
+import { WorkspaceStore } from './workspace.store';
 import {
   Component,
   OnInit,
@@ -54,16 +55,21 @@ export interface GraphQLMessageView {
   styleUrl: './app.css'
 })
 export class App implements OnInit {
+  readonly workspaces = new WorkspaceStore();
+  private readonly sourceWorkspaces = new WeakMap<ChatSession, string>();
   readonly navigation = viewChild(ChatNavigationComponent);
   readonly navigationLayout = signal<ChatSidenavMode>('expanded');
   readonly chatTransport = new ChatAgUiTransport();
   private readonly sessionGeneration = signal(0);
+  private readonly verifiedConversationId = signal<string | null>(null);
   private readonly sourceSelections = new WeakMap<ChatSession, number>();
   private readonly selectedSource = signal<ChatSession | null>(null);
   readonly chatSessions = new ChatSessionRegistry(this.chatTransport, () => crypto.randomUUID(), (key, id, source) => {
     const created = this.chatTransport.created.get(id);
-    if (created) this.conversationStore.addCreatedConversation({ ...created, pinned: false });
+    if (created && this.sourceWorkspaces.get(source) === this.workspaces.selectedId()) this.conversationStore.addCreatedConversation({ ...created, pinned: false });
     if (this.sourceSelections.get(source) === this.selectionGeneration && this.chatKey() === key) {
+      if (created && this.sourceWorkspaces.get(source) === this.workspaces.selectedId()) this.conversationStore.setActiveConversation({ ...created, pinned: false });
+      this.verifiedConversationId.set(id);
       this.currentConversationId.set(id);
       this.activeConversationBot.set(this.activeDraftBot() || this.seedBot());
       this.activeDraftBot.set(null);
@@ -71,10 +77,10 @@ export class App implements OnInit {
     }
     this.sessionGeneration.update(n => n + 1);
   });
-  readonly chatKey = computed(() => this.currentConversationId() ? `conversation:${this.currentConversationId()}` : `bot:${(this.activeDraftBot() || this.seedBot())?.id ?? 'none'}`);
-  readonly chatSession = computed(() => { this.sessionGeneration(); return this.selectedSource() ?? this.chatSessions.session(this.chatKey()); });
-  readonly chatAgent = computed(() => this.chatTransport.agent(this.currentConversationId() || this.chatKey()));
-  readonly chatCanSend = computed(() => !this.isInitializing() && !this.chatSession().active() && !!this.currentBot()?.canChat);
+  readonly chatKey = computed(() => this.currentConversationId() ? `conversation:${this.currentConversationId()}` : `draft:${JSON.stringify([this.workspaces.selectedId(), (this.activeDraftBot() || this.seedBot())?.id ?? 'none'])}`);
+  readonly chatSession = computed(() => { this.sessionGeneration(); const id = this.currentConversationId(); if (id && this.verifiedConversationId() !== id) return this.chatSessions.session(`unverified:${id}`); return this.selectedSource() ?? this.chatSessions.session(this.chatKey()); });
+  readonly chatAgent = computed(() => this.chatTransport.agent(this.currentConversationId() && this.verifiedConversationId() !== this.currentConversationId() ? `unverified:${this.currentConversationId()}` : this.currentConversationId() || this.chatKey()));
+  readonly chatCanSend = computed(() => !this.isInitializing() && !!this.workspaces.selectedId() && (!this.currentConversationId() || this.verifiedConversationId() === this.currentConversationId()) && !this.chatSession().active() && !!this.currentBot()?.canChat);
   chatDraftChanged(text: string): void {
     this.chatSessions.editSource(this.chatSession(), text);
   }
@@ -85,7 +91,10 @@ export class App implements OnInit {
     this.chatSessions.editSource(source, raw);
     this.selectedSource.set(source);
     this.sourceSelections.set(source, this.selectionGeneration);
-    const task = this.chatSessions.submit(key, this.currentBot()?.id, source);
+    const workspaceId = this.workspaces.selectedId();
+    if (!workspaceId) return;
+    this.sourceWorkspaces.set(source, workspaceId);
+    const task = this.chatSessions.submit(key, this.currentBot()?.id, source, workspaceId);
     const runId = source.runId;
     this.sessionGeneration.update(n => n + 1);
     void task.then(async () => {
@@ -105,7 +114,9 @@ export class App implements OnInit {
     const source = this.chatSession();
     const runId = source.runId;
     const conversationId = source.conversationId;
-    void this.chatSessions.stop(key).then(async () => {
+    void this.chatSessions.stop(key).then(async result => {
+      if (result?.status === 'REJECTED') { if (this.chatKey() === key) this.streamError.set('無權取消此執行，狀態尚未確認。'); return; }
+      if (result?.status === 'UNKNOWN') { if (this.chatKey() === key) this.streamError.set('停止狀態尚未確認，請查詢原執行狀態。'); return; }
       if (conversationId && runId && source.result()?.status !== 'UNKNOWN') await this.chatTransport.reconcile(conversationId, runId);
     }).catch(() => {
       if (this.chatKey() === key) this.streamError.set('停止失敗，請再次確認執行狀態。');
@@ -123,12 +134,7 @@ export class App implements OnInit {
   }
   retryHistory(): void {
     const id = this.currentConversationId();
-    if (!id) return;
-    void this.chatTransport.hydrate(id).then(() => {
-      if (this.currentConversationId() === id) this.streamError.set(null);
-    }).catch(() => {
-      if (this.currentConversationId() === id) this.streamError.set('載入對話歷史失敗。');
-    });
+    if (id) void this.selectConversation(id);
   }
 
   onNavigationMode(mode: 'conversations' | 'bots'): void {
@@ -267,6 +273,11 @@ export class App implements OnInit {
 
   async ngOnInit(): Promise<void> {
     try {
+      await this.workspaces.load();
+      const workspaceId = this.workspaces.selectedId();
+      if (!workspaceId) return;
+      this.conversationStore.setWorkspace(workspaceId);
+      this.navigation()?.setWorkspace(workspaceId);
       await this.loadBots();
       await this.loadConversations();
 
@@ -389,11 +400,30 @@ export class App implements OnInit {
     return this.conversationStore.retryPinMutation();
   }
 
+  async selectWorkspace(id: string): Promise<void> {
+    if (id === this.workspaces.selectedId() || !this.workspaces.workspaces().some(item => item.id === id)) return;
+    this.selectionGeneration++;
+    this.workspaces.select(id);
+    this.conversationStore.setWorkspace(id);
+    this.navigation()?.setWorkspace(id);
+    await this.newConversation();
+    try { await this.conversationStore.loadConversations(false); }
+    catch { if (this.workspaces.selectedId() === id) this.streamError.set('工作區對話載入失敗，請重試。'); }
+  }
+  async retryWorkspaces(): Promise<void> {
+    await this.workspaces.load();
+    const id = this.workspaces.selectedId();
+    if (!id) return;
+    this.conversationStore.setWorkspace(id); this.navigation()?.setWorkspace(id);
+    await this.loadBots(); await this.loadConversations(); await this.newConversation();
+  }
+
   async selectConversation(id: string): Promise<void> {
     this.currentView.set('chat');
 
     const currentGen = ++this.selectionGeneration;
     this.selectedSource.set(null);
+    this.verifiedConversationId.set(null);
     this.currentConversationId.set(id);
     this.activeDraftBot.set(null);
     this.activeConversationBot.set(null);
@@ -430,7 +460,8 @@ export class App implements OnInit {
 
     try {
       const limit = 20;
-      const conversation = await this.chatTransport.hydrate(id);
+      const workspaceId = this.workspaces.selectedId();
+      const conversation = await this.chatTransport.hydrate(id, workspaceId ?? undefined);
       const json = { data: { conversation } };
 
       /*
@@ -444,6 +475,8 @@ export class App implements OnInit {
 
       if (json.data && json.data.conversation) {
         const conv = json.data.conversation;
+        if (conv.workspaceId !== workspaceId) { this.currentConversationId.set(null); this.conversationStore.setActiveConversation(null); this.removeStorageItem('bot_active_conversation_id'); this.streamError.set('無法存取此工作區的對話。'); return; }
+        this.verifiedConversationId.set(id);
         const view: ConversationView = {
           id: conv.id,
           botId: conv.botId,

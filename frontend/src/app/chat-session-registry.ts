@@ -2,7 +2,7 @@ import { signal, WritableSignal } from '@angular/core';
 
 export type RunResult = { status: 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'REJECTED' | 'DUPLICATE' | 'UNKNOWN' };
 export interface ChatSessionTransport {
-  createConversation(botId: string): Promise<string>;
+  createConversation(botId: string, workspaceId?: string): Promise<string>;
   run(conversationId: string, runId: string, raw: string, onDelta: (text: string) => void): Promise<RunResult>;
   reconcile(conversationId: string, runId: string): Promise<RunResult>;
   cancel(conversationId: string, runId: string): Promise<RunResult>;
@@ -21,7 +21,7 @@ export interface ChatSession {
 /** Run ownership is independent of whichever session the view currently projects. */
 export class ChatSessionRegistry {
   private readonly sessions = new Map<string, ChatSession>();
-  private readonly pending = new WeakMap<ChatSession, { raw: string; version: number; runId: string; settled: boolean }>();
+  private readonly pending = new WeakMap<ChatSession, { raw: string; version: number; runId: string; settled: boolean; key: string }>();
   private readonly creationFailures = new Map<string, WritableSignal<{ runId: string; raw: string }[]>>();
   private readonly checks = new WeakMap<ChatSession, { runId: string; task: Promise<void> }>();
   constructor(private readonly transport: ChatSessionTransport, private readonly newRunId: () => string = () => crypto.randomUUID(), private readonly onCreated?: (sourceKey: string, conversationId: string, source: ChatSession) => void) {}
@@ -52,16 +52,17 @@ export class ChatSessionRegistry {
     if (result.status === 'UNKNOWN' || result.status === 'DUPLICATE') return;
     pending.settled = true;
     if ((result.status === 'FAILED' || result.status === 'CANCELLED' || result.status === 'REJECTED') && source.draftVersion() === pending.version && !source.draft()) source.draft.set(pending.raw);
+    else if (result.status === 'REJECTED') this.failedCreations(source.conversationId ? `conversation:${source.conversationId}` : pending.key).update(items => [...items, {runId, raw: pending.raw}]);
     source.active.set(false);
   }
-  async submit(key: string, botId?: string, source = this.session(key)): Promise<void> {
+  async submit(key: string, botId?: string, source = this.session(key), workspaceId?: string): Promise<void> {
     const raw = source.draft();
     if (source.active() || !raw.trim()) return;
     const version = source.draftVersion();
     // A new draft must remain independent even while the old creation is pending.
     if (!source.conversationId && this.sessions.get(key) === source) this.sessions.delete(key);
     const runId = this.newRunId();
-    this.pending.set(source, { raw, version, runId, settled: false });
+    this.pending.set(source, { raw, version, runId, settled: false, key });
     source.runId = runId;
     source.active.set(true);
     source.result.set(null);
@@ -72,7 +73,7 @@ export class ChatSessionRegistry {
     try {
       if (!source.conversationId) {
         if (!botId) throw new Error('A bot is required to create a conversation');
-        source.conversationId = await this.transport.createConversation(botId);
+        source.conversationId = await this.transport.createConversation(botId, workspaceId);
         this.sessions.set(`conversation:${source.conversationId}`, source);
         this.onCreated?.(key, source.conversationId, source);
       }
@@ -117,7 +118,7 @@ export class ChatSessionRegistry {
     this.checks.set(source, { runId, task });
     return task;
   }
-  async stop(key: string): Promise<void> {
+  async stop(key: string): Promise<RunResult | undefined> {
     const source = this.session(key);
     if (!source.active() || !source.conversationId || !source.runId) return;
     const runId = source.runId;
@@ -127,5 +128,6 @@ export class ChatSessionRegistry {
       this.settle(source, runId, result);
       this.transport.stopLocal?.(source.conversationId, runId);
     }
+    return result;
   }
 }

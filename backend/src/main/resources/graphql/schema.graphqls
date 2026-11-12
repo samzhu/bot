@@ -1,3 +1,7 @@
+enum WorkspaceRole { MANAGER MEMBER }
+
+type Workspace { id: ID! name: String! role: WorkspaceRole! personal: Boolean! }
+
 enum RunStatus {
   PENDING
   RUNNING
@@ -71,6 +75,7 @@ type Run {
 }
 
 type Conversation {
+  workspaceId: ID!
   id: ID!
   botId: ID!
   title: String!
@@ -82,16 +87,18 @@ type Conversation {
 }
 
 type Query {
+  workspaces: [Workspace!]!
+  personalWorkspace: Workspace!
   bots(search: String, target: BotTarget, limit: Int = 20, offset: Int = 0): [Bot!]!
   bot(id: ID!): Bot
   defaultLocalBot: Bot
-  conversations(search: String, pinned: Boolean, limit: Int = 20, offset: Int = 0): [Conversation!]!
+  conversations(workspaceId: ID, search: String, pinned: Boolean, limit: Int = 20, offset: Int = 0): [Conversation!]!
   conversation(id: ID!): Conversation
   run(id: ID!): Run
 }
 
 type Mutation {
-  createConversation(botId: ID!, title: String): Conversation!
+  createConversation(botId: ID!, title: String, workspaceId: ID): Conversation!
   setConversationPinned(id: ID!, pinned: Boolean!): Conversation!
   createBot(input: CreateBotInput!): Bot!
   updateBot(input: UpdateBotInput!): Bot!

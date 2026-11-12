@@ -4,6 +4,7 @@ import { ChatSidenavComponent, ChatSidenavScrimComponent, ChatHistorySearchPalet
 import { ChatSearchStore } from './chat-search.store';
 import { BotStore } from './bot/bot-store';
 import { BotView, getBotExecutionModeDisplay } from './bot/bot.model';
+import type { Workspace } from './workspace.store';
 import { ConversationListStore, ConversationView } from './conversation-list-store';
 
 @Component({
@@ -15,6 +16,13 @@ import { ConversationListStore, ConversationView } from './conversation-list-sto
   styleUrl: './chat-navigation.component.css'
 })
 export class ChatNavigationComponent implements OnInit {
+  readonly workspaces = input<Workspace[]>([]);
+  readonly workspaceId = input<string | null>(null);
+  readonly workspaceLoading = input(false);
+  readonly workspaceError = input<string | null>(null);
+  readonly workspaceSelected = output<string>();
+  readonly workspaceRetry = output<void>();
+  setWorkspace(id: string | null): void { this.search.setWorkspace(id); this.conversationError.set(false); this.conversationLoading.set(false); }
   readonly activeConversationId = input<string | null>(null);
   readonly initializing = input(false);
   readonly conversationSelected = output<string>();

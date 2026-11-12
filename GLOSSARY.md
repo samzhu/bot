@@ -4,6 +4,9 @@ Ubiquitous language defining the core domain concepts for the chat system.
 
 ## Language
 
+* **Workspace**: 成員使用助理並歸屬對話與用量的工作範圍，可為個人或共用。
+* **WorkspaceMember**: 使用者在特定 Workspace 中的成員關係及其角色。
+
 * **Bot**: 具名稱、用途說明與工作指示的可管理助理或 Agent 定義，其對話執行可由不同環境（如本地或遠端執行環境）承接。
   * _Avoid_: ChatModel 或 ChatClient（底層推論基礎設施）。
 * **Conversation**: 使用者與某 Bot 之間持續、具備獨立身分識別且可重新開啟查閱的對話主題歷程。
