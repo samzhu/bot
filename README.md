@@ -33,6 +33,26 @@ An active profile (`local` or `test`) must be explicitly supplied; the applicati
 
 ## 3. Getting Started
 
+### Start Both Servers
+
+With Java 25, Node 26, Docker running, and frontend dependencies installed (`cd frontend && npm ci`), run from any directory:
+
+```bash
+# From the repository root: choose 1 (Mock AI) or 2 (Real AI)
+./dev.sh
+
+# Skip the menu: local mock model, no API key required
+./dev.sh --mock
+
+# Use the existing backend/config/application-real-ai.yaml through Spring Boot
+./dev.sh --real-ai
+```
+
+Open `http://localhost:4200`. Output stays in the terminal; **Ctrl+C stops both servers**.
+The script checks ports 8080/4200 and waits for the backend before starting Angular.
+Spring Boot manages Compose services; containers already running before startup remain running on exit.
+No database data is deleted. Use `./dev.sh --help` for usage.
+
 ### Step 1: Start Backend
 
 Spring Boot automatically boots and configures the PostgreSQL container defined in `backend/compose.yaml`.
