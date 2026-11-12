@@ -632,6 +632,34 @@ class UsageInvocationDurabilityIntegrationTests {
 
 
     @Test
+    void databaseCatalogMarkerFailureCannotInvokeProvider() throws Exception {
+        String conversation=createRaceConversation();
+        String requestId="failed-catalog-marker-"+UUID.randomUUID();
+        CountDownLatch recorded=watchNotDispatched();
+        jdbc.execute("""
+            CREATE FUNCTION pricing_marker_failure_fixture() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN IF NEW.started_at IS NOT NULL AND OLD.started_at IS NULL THEN
+              RAISE EXCEPTION 'marker fixture failure'; END IF; RETURN NEW; END $$
+            """);
+        jdbc.execute("CREATE TRIGGER pricing_marker_failure_fixture BEFORE UPDATE ON provider_attempt FOR EACH ROW EXECUTE FUNCTION pricing_marker_failure_fixture()");
+        try {
+            var response=post("/api/conversations/"+conversation+"/runs",Map.of("clientRequestId",requestId,"message","fixture"));
+            assertTrue(response.statusCode()>=500 || (response.statusCode()==200 && response.body().contains("run.failed")),response.body());
+            assertEquals(0,FAKE.calls.get()); assertEquals(0,FAKE.streams.get()); assertEquals(0,FAKE.subscriptions.get());
+            assertTrue(recorded.await(5,TimeUnit.SECONDS));
+            String id=runId(conversation,requestId);
+            var attempt=jdbc.queryForMap("select started_at,catalog_marker,execution_outcome from provider_attempt where run_id=?",id);
+            assertNull(attempt.get("started_at"));
+            assertEquals("NOT_DISPATCHED",attempt.get("execution_outcome"));
+            assertEquals("LEGACY_UNPRICED",attempt.get("catalog_marker"));
+        } finally {
+            jdbc.execute("DROP TRIGGER pricing_marker_failure_fixture ON provider_attempt");
+            jdbc.execute("DROP FUNCTION pricing_marker_failure_fixture()");
+            reset(ledger);
+        }
+    }
+
+    @Test
     void dispatchTimestampIsTakenAfterAttemptRowLockAcrossTaipeiMonth() throws Exception {
         String conversation = createRaceConversation();
         String requestId = "locked-dispatch-month-" + UUID.randomUUID();

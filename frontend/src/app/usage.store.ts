@@ -1,7 +1,19 @@
 import { signal } from '@angular/core';
 
 export interface NativeUsageValue { value: string | null; presence: 'PRESENT' | 'NULL_VALUE' | 'MISSING' | 'UNKNOWN'; meaning: string; }
-export interface UsageCost { status: string; amount: string | null; currency: string; }
+export type UsageCostStatus = 'UNPRICED' | 'COMPLETE' | 'PARTIAL' | 'UNKNOWN' | 'NOT_DISPATCHED';
+export interface UsageCostLineItem {
+  category: string; nativeQuantity: string | null; unit: string; meaning: string;
+  rate: string | null; rateBasis: string; exactAmount: string | null; storedAmount: string | null; reasons: string[];
+}
+export interface UsageCost {
+  status: UsageCostStatus; amount: string | null; knownSubtotal: string | null; completeAmount: string | null; currency: string;
+  simulation: boolean; needsReprice: boolean; sourceProjectionVersion: string; estimateSourceVersion: string | null;
+  currentRevision: string | null; priceRevision: string | null; priceSnapshotId: string | null; priceSourceReference: string | null;
+  priceEffectiveFrom: string | null; priceEffectiveUntil: string | null; calculatorVersion: string | null; sourceSnapshotId: string | null;
+  sourceLayer: string | null; schemaVersion: string | null; adapterVersion: string | null; captureVersion: string | null;
+  captureCompleteness: string | null; semantic: string | null; ordinal: string | null; reasons: string[]; lineItems: UsageCostLineItem[];
+}
 export interface UsageAttempt {
   id: string; workspaceId: string; runId: string | null; providerRequestId: string | null; providerResponseId: string | null; preparedAt: string; startedAt: string | null; finishedAt: string | null;
   provider: string; endpoint: string; model: string; channel: string; executionOutcome: string;
@@ -15,7 +27,7 @@ export interface UsageSnapshot {
   rawUsage: string | null; captureReason: string | null; capturedAt: string;
 }
 interface Page<T> { nodes: T[]; pageInfo: { hasNextPage: boolean; endCursor: string | null }; }
-const fields = `id workspaceId runId providerRequestId providerResponseId preparedAt startedAt finishedAt provider endpoint model channel executionOutcome usagePresence captureCompleteness projectionError projectionState projectionVersion effectiveSnapshotId attemptCoverage simulation input {value presence meaning} output {value presence meaning} cacheRead {value presence meaning} cacheWrite {value presence meaning} cost {status amount currency}`;
+const fields = `id workspaceId runId providerRequestId providerResponseId preparedAt startedAt finishedAt provider endpoint model channel executionOutcome usagePresence captureCompleteness projectionError projectionState projectionVersion effectiveSnapshotId attemptCoverage simulation input {value presence meaning} output {value presence meaning} cacheRead {value presence meaning} cacheWrite {value presence meaning} cost {status knownSubtotal completeAmount currency simulation needsReprice sourceProjectionVersion estimateSourceVersion currentRevision priceRevision priceSnapshotId priceSourceReference priceEffectiveFrom priceEffectiveUntil calculatorVersion sourceSnapshotId sourceLayer schemaVersion adapterVersion captureVersion captureCompleteness semantic ordinal reasons lineItems {category nativeQuantity unit meaning rate rateBasis exactAmount storedAmount reasons}}`;
 const snapshotFields = `id eventId ordinal semantic sourceLayer schemaVersion adapterVersion captureVersion captureCompleteness rawState rawUsage captureReason capturedAt`;
 
 export class UsageStore {

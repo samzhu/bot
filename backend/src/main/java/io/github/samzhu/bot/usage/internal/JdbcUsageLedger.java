@@ -14,10 +14,12 @@ import java.util.UUID;
 public class JdbcUsageLedger implements UsageLedger {
     private final JdbcTemplate jdbc;
     private final java.time.Clock clock;
+    private final io.github.samzhu.bot.usage.internal.pricing.CatalogActivation catalog;
 
-    public JdbcUsageLedger(JdbcTemplate jdbc, java.time.Clock clock) {
+    public JdbcUsageLedger(JdbcTemplate jdbc, java.time.Clock clock, io.github.samzhu.bot.usage.internal.pricing.CatalogActivation catalog) {
         this.jdbc = jdbc;
         this.clock = clock;
+        this.catalog = catalog;
     }
 
     @Override
@@ -58,14 +60,16 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'IN_PROGRESS','PENDING','UNKNOWN','MISSING')
         if (rows.isEmpty()
                 || !"IN_PROGRESS".equals(rows.getFirst()[0])
                 || rows.getFirst()[1] != null) return false;
-        Instant decisionTime = decision.apply(clock);
-        if (decisionTime == null) return false;
+        var sampled = catalog.sample(clock, decision);
+        if (sampled == null) return false;
         return jdbc.update(
                         """
-UPDATE provider_attempt SET started_at=?,projection_version=projection_version+1
+UPDATE provider_attempt SET started_at=?,catalog_marker=?,catalog_revision_id=?,projection_version=projection_version+1
 WHERE id=? AND execution_outcome='IN_PROGRESS' AND started_at IS NULL
 """,
-                        Timestamp.from(decisionTime),
+                        Timestamp.from(sampled.startedAt()),
+                        sampled.revisionId() == null ? "NO_CATALOG" : "CAPTURED",
+                        sampled.revisionId(),
                         attemptId)
                 == 1;
     }

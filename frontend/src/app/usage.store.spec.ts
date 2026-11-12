@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { UsageStore } from './usage.store';
 
-const attempt = (id: string) => ({id,workspaceId:'A',preparedAt:'2026-01-01T00:00:00.123456Z',startedAt:null,provider:'gemini',model:'m',simulation:false,cost:{status:'UNPRICED',amount:null,currency:'USD'}});
+const unpricedCost = () => ({status:'UNPRICED',amount:null,knownSubtotal:null,completeAmount:null,currency:'USD',simulation:false,needsReprice:false,sourceProjectionVersion:'1',estimateSourceVersion:null,currentRevision:null,priceRevision:null,priceSnapshotId:null,priceSourceReference:null,priceEffectiveFrom:null,priceEffectiveUntil:null,calculatorVersion:null,sourceSnapshotId:null,sourceLayer:null,schemaVersion:null,adapterVersion:null,captureVersion:null,captureCompleteness:null,semantic:null,ordinal:null,reasons:[],lineItems:[]});
+const attempt = (id: string) => ({id,workspaceId:'A',preparedAt:'2026-01-01T00:00:00.123456Z',startedAt:null,provider:'gemini',model:'m',simulation:false,cost:unpricedCost()});
 describe('personal usage', () => {
   it('clears cached snapshots and refuses download when access is revoked', async () => {
     const snapshot = {id:'s',rawUsage:'null',rawState:'JSONB'};
@@ -74,7 +75,7 @@ describe('personal usage', () => {
     await store.setWorkspace('A'); await store.loadMore();
     expect(store.attempts().map(row => row.id)).toEqual(['1','2']);
     expect(JSON.parse(request.mock.calls[1][1].body).variables).toEqual({workspaceId:'A',first:20,after:'opaque'});
-    expect(store.attempts()[0].cost).toEqual({status:'UNPRICED',amount:null,currency:'USD'});
+    expect(store.attempts()[0].cost).toEqual(unpricedCost());
   });
   it('clears previously visible usage on scope change and ignores late results', async () => {
     let resolve!: (value:Response)=>void;

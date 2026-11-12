@@ -1,8 +1,9 @@
 import { Component, Input, OnChanges, OnDestroy, output } from '@angular/core';
 import { NativeUsageValue, UsageSnapshot, UsageStore } from './usage.store';
+import { CostExplanationComponent } from './cost-explanation.component';
 
 @Component({
-  selector: 'app-usage', standalone: true,
+  selector: 'app-usage', standalone: true, imports: [CostExplanationComponent],
   template: `
     <section class="usage" role="region" tabindex="0" aria-label="個人用量內容，可垂直捲動">
       <button type="button" (click)="back.emit()">返回對話</button>
@@ -12,12 +13,12 @@ import { NativeUsageValue, UsageSnapshot, UsageStore } from './usage.store';
       @if (!store.loading() && !store.error() && !store.attempts().length) { <p>目前沒有用量紀錄。</p> }
       @if (store.attempts().length) {
         <div class="table-scroll" role="region" tabindex="0" aria-label="個人用量表格，可水平捲動">
-          <table><caption>個人用量</caption><thead><tr><th scope="col">登記時間</th><th scope="col">供應商／模型</th><th scope="col">Input</th><th scope="col">Output</th><th scope="col">Cache read</th><th scope="col">Cache write</th><th scope="col">費用</th><th scope="col">明細</th></tr></thead>
+          <table><caption>個人用量</caption><thead><tr><th scope="col">登記時間</th><th scope="col">供應商／模型</th><th scope="col">Input</th><th scope="col">Output</th><th scope="col">Cache read</th><th scope="col">Cache write</th><th scope="col">費用估算</th><th scope="col">明細</th></tr></thead>
           <tbody>@for (row of store.attempts(); track row.id) {
             <tr><th scope="row">{{row.preparedAt}}</th><td>{{row.provider}} / {{row.model}} @if (row.simulation) { <strong>模擬</strong> } <small>逐次呼叫涵蓋：{{row.attemptCoverage === 'VERIFIED' ? '已驗證' : '未知'}}</small></td>
               <td>{{value(row.input)}} <small>{{row.input.meaning}}</small></td><td>{{value(row.output)}} <small>{{row.output.meaning}}</small></td>
               <td>{{value(row.cacheRead)}} <small>{{row.cacheRead.meaning}}</small></td><td>{{value(row.cacheWrite)}} <small>{{row.cacheWrite.meaning}}</small></td>
-              <td>{{row.cost.status}} · {{row.cost.amount ?? '未知'}} {{row.cost.currency}}</td>
+              <td><app-cost-explanation [cost]="row.cost" [compact]="true" /></td>
               <td><button type="button" (click)="store.selectAttempt(row.id)" [attr.aria-label]="'查看 '+row.provider+' '+row.model+' '+row.preparedAt+' 的明細'">查看明細</button></td></tr>
           }</tbody></table>
         </div>
@@ -32,6 +33,7 @@ import { NativeUsageValue, UsageSnapshot, UsageStore } from './usage.store';
             <p>投影 {{attempt.projectionState}} · 版本 {{attempt.projectionVersion}} · 生效快照 {{attempt.effectiveSnapshotId ?? '無'}}</p>
             @if (attempt.projectionError) { <p>{{attempt.projectionError}}</p> }
             <p>Provider request ID：{{attempt.providerRequestId ?? '未提供'}} · response ID：{{attempt.providerResponseId ?? '未提供'}}</p>
+            <app-cost-explanation [cost]="attempt.cost" />
           }
           @if (store.snapshotsLoading()) { <p role="status">載入明細中…</p> }
           @if (store.snapshotsError()) { <p role="alert">{{store.snapshotsError()}} <button type="button" (click)="store.loadMoreSnapshots()">重試</button></p> }

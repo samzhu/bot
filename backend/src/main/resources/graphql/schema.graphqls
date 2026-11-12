@@ -111,7 +111,20 @@ enum RawUsageState { JSONB TEXT_FALLBACK UNAVAILABLE }
 enum ProjectionState { VALID MISSING UNKNOWN }
 enum NativeValuePresence { PRESENT NULL_VALUE MISSING UNKNOWN }
 type NativeUsageValue { value: String presence: NativeValuePresence! meaning: String! }
-type UsageCost { status: String! amount: String currency: String! }
+enum UsageCostStatus { UNPRICED COMPLETE PARTIAL UNKNOWN NOT_DISPATCHED }
+type UsageCostLineItem {
+ category: String! nativeQuantity: String unit: String! meaning: String!
+ rate: String rateBasis: String! exactAmount: String storedAmount: String reasons: [String!]!
+}
+type UsageCost {
+ status: UsageCostStatus! amount: String @deprecated(reason: "Use completeAmount")
+ knownSubtotal: String completeAmount: String currency: String! simulation: Boolean! needsReprice: Boolean!
+ sourceProjectionVersion: String! estimateSourceVersion: String currentRevision: ID priceRevision: String
+ priceSnapshotId: ID priceSourceReference: String priceEffectiveFrom: String priceEffectiveUntil: String
+ calculatorVersion: String sourceSnapshotId: ID sourceLayer: String schemaVersion: String
+ adapterVersion: String captureVersion: String captureCompleteness: String semantic: String ordinal: String
+ reasons: [String!]! lineItems: [UsageCostLineItem!]!
+}
 type UsagePageInfo { hasNextPage: Boolean! endCursor: String }
 type UsageAttemptConnection { nodes: [UsageAttempt!]! pageInfo: UsagePageInfo! }
 type UsageSnapshotConnection { nodes: [UsageSnapshot!]! pageInfo: UsagePageInfo! }

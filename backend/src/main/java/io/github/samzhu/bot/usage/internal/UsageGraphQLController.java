@@ -23,12 +23,15 @@ public class UsageGraphQLController {
     private final JdbcTemplate jdbc;
     private final CurrentUserProvider user;
     private final WorkspaceOperations workspace;
+    private final io.github.samzhu.bot.usage.UsageCostOperations costs;
 
     public UsageGraphQLController(
-            JdbcTemplate jdbc, CurrentUserProvider user, WorkspaceOperations workspace) {
+            JdbcTemplate jdbc, CurrentUserProvider user, WorkspaceOperations workspace,
+            io.github.samzhu.bot.usage.UsageCostOperations costs) {
         this.jdbc = jdbc;
         this.user = user;
         this.workspace = workspace;
+        this.costs = costs;
     }
 
     public record Attempt(
@@ -262,11 +265,25 @@ public class UsageGraphQLController {
     }
 
     @SchemaMapping(typeName = "UsageAttempt", field = "cost")
-    public Map<String, Object> cost(Attempt attempt) {
+    public java.util.Map<String, Object> cost(Attempt attempt) {
+        if (myUsageAttempt(attempt.workspaceId(), attempt.id()) == null)
+            throw new WorkspaceAccessDeniedException();
+        var c = costs.readCosts(java.util.List.of(attempt.id())).get(attempt.id());
+        if (c == null) throw new WorkspaceAccessDeniedException();
         var result = new java.util.HashMap<String, Object>();
-        result.put("status", "UNPRICED");
-        result.put("amount", null);
-        result.put("currency", "USD");
+        result.put("status", c.status()); result.put("amount", c.completeAmount());
+        result.put("knownSubtotal", c.knownSubtotal()); result.put("completeAmount", c.completeAmount());
+        result.put("currency", c.currency()); result.put("simulation", c.simulation());
+        result.put("needsReprice", c.needsReprice()); result.put("sourceProjectionVersion", c.sourceProjectionVersion());
+        result.put("estimateSourceVersion", c.estimateSourceVersion()); result.put("currentRevision", c.currentRevision());
+        result.put("priceRevision", c.priceRevision()); result.put("priceSnapshotId", c.priceSnapshotId());
+        result.put("priceSourceReference", c.priceSourceReference()); result.put("priceEffectiveFrom", c.priceEffectiveFrom());
+        result.put("priceEffectiveUntil", c.priceEffectiveUntil()); result.put("calculatorVersion", c.calculatorVersion());
+        result.put("sourceSnapshotId", c.sourceSnapshotId()); result.put("sourceLayer", c.sourceLayer());
+        result.put("schemaVersion", c.schemaVersion()); result.put("adapterVersion", c.adapterVersion());
+        result.put("captureVersion", c.captureVersion()); result.put("captureCompleteness", c.captureCompleteness());
+        result.put("semantic", c.semantic()); result.put("ordinal", c.ordinal());
+        result.put("reasons", c.reasons()); result.put("lineItems", c.lineItems());
         return result;
     }
 

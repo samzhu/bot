@@ -38,6 +38,9 @@ import java.util.UUID;
 class UsageLedgerIntegrationTests {
     @LocalServerPort int port;
     @Autowired JdbcTemplate jdbc;
+    @Autowired io.github.samzhu.bot.usage.internal.pricing.PricingPublisher pricingPublisher;
+    @Autowired io.github.samzhu.bot.identity.CurrentUserProvider currentUser;
+    @Autowired io.github.samzhu.bot.usage.internal.pricing.CatalogActivation catalogActivation;
     @Autowired io.github.samzhu.bot.execution.internal.UsageInvocation invocation;
     @Autowired io.github.samzhu.bot.execution.internal.RunRegistry runRegistry;
     @org.springframework.test.context.bean.override.mockito.MockitoSpyBean io.github.samzhu.bot.usage.UsageLedger ledger;
@@ -741,7 +744,7 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
         var fixed =
                 java.time.Clock.fixed(
                         java.time.Instant.parse("2026-01-31T16:00:00Z"), java.time.ZoneOffset.UTC);
-        var controlled = new io.github.samzhu.bot.usage.internal.JdbcUsageLedger(jdbc, fixed);
+        var controlled = new io.github.samzhu.bot.usage.internal.JdbcUsageLedger(jdbc, fixed, catalogActivation);
         String id =
                 controlled.begin(
                         new io.github.samzhu.bot.usage.UsageLedger.Dispatch(
@@ -1275,5 +1278,96 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
             assertEquals("UNKNOWN",jdbc.queryForObject("select execution_outcome from provider_attempt where run_id=?",String.class,run));
             assertFalse(response.body().contains("private-error-sentinel"));
         } finally { org.mockito.Mockito.reset(ledger); }
+    }
+    @Test
+    void currentCostGraphqlIsAuthorizedAndStaleAmountsAreSuppressed() throws Exception {
+        String workspace=graph("{ personalWorkspace { id } }").path("data").path("personalWorkspace").path("id").asText();
+        String id=ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(null,workspace,currentUser.getCurrentUserId(),"GOOGLE","generateContent","unknown-model","GEMINI_API","1",false,"UNKNOWN"));
+        assertTrue(ledger.markDispatched(id,java.time.Clock::instant));
+        ledger.finish(id,"SUCCEEDED");
+        assertTrue(pricingPublisher.recompute(id));
+        String query="{ myUsageAttempt(workspaceId: \""+workspace+"\", id: \""+id+"\") { cost { status amount knownSubtotal completeAmount currency simulation needsReprice sourceProjectionVersion estimateSourceVersion currentRevision priceRevision priceSnapshotId priceSourceReference priceEffectiveFrom priceEffectiveUntil calculatorVersion sourceSnapshotId sourceLayer schemaVersion adapterVersion captureVersion captureCompleteness semantic ordinal reasons lineItems { category nativeQuantity unit meaning rate rateBasis exactAmount storedAmount reasons } } } }";
+        var response=graph(query);
+        assertFalse(response.has("errors"),response.toString());
+        var cost=response.path("data").path("myUsageAttempt").path("cost");
+        assertEquals("UNKNOWN",cost.path("status").asText()); assertTrue(cost.path("completeAmount").isNull());
+        assertFalse(cost.path("needsReprice").asBoolean());
+        assertEquals(cost.path("sourceProjectionVersion").asText(),cost.path("estimateSourceVersion").asText());
+        ledger.append(id,new io.github.samzhu.bot.usage.UsageLedger.Snapshot("cost-late",1,"CUMULATIVE","FAKE_RAW","1","1","1","COMPLETE","{\"promptTokenCount\":7}"));
+        var stale=graph(query).path("data").path("myUsageAttempt").path("cost");
+        assertEquals("UNKNOWN",stale.path("status").asText()); assertTrue(stale.path("needsReprice").asBoolean());
+        assertTrue(stale.path("knownSubtotal").isNull()); assertTrue(stale.path("completeAmount").isNull());
+        assertTrue(stale.path("reasons").toString().contains("SOURCE_CHANGED"));
+        String other="pricing-private-"+UUID.randomUUID();
+        jdbc.update("insert into workspace(id,name) values (?,?)",other,"private");
+        var denied=graph("{ myUsageAttempt(workspaceId: \""+other+"\", id: \""+id+"\") { cost { status } } }");
+        assertTrue(denied.has("errors"),denied.toString());
+    }
+    @Test
+    void pricedCostGraphqlShowsImmutablePriceProvenanceAndExactAmounts() throws Exception {
+        String workspace=graph("{ personalWorkspace { id } }").path("data").path("personalWorkspace").path("id").asText();
+        String rev="graphql-pricing-"+UUID.randomUUID();
+        var rates=Map.of("input","1","cache_read","0.1","output","2","thoughts","2","tool_input","1");
+        var fixture=new io.github.samzhu.bot.pricing.PriceSnapshot("GOOGLE","generateContent","fixture-graphql","GEMINI_API","fixture-price",rates);
+        catalogActivation.publish(rev,"fixture-only",List.of(new io.github.samzhu.bot.pricing.PriceCatalog.Entry(fixture,java.time.Instant.parse("2000-01-01T00:00:00Z"),java.time.Instant.parse("2100-01-01T00:00:00Z"))));
+        String id=ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(null,workspace,currentUser.getCurrentUserId(),"GOOGLE","generateContent","fixture-graphql","GEMINI_API","1",true,"VERIFIED"));
+        assertTrue(ledger.markDispatched(id,java.time.Clock::instant));
+        ledger.append(id,new io.github.samzhu.bot.usage.UsageLedger.Snapshot("priced",1,"FINAL","FAKE_RAW","1","1","1","COMPLETE","{\"promptTokenCount\":1000,\"cachedContentTokenCount\":200,\"candidatesTokenCount\":300,\"thoughtsTokenCount\":100,\"toolUsePromptTokenCount\":0}"));
+        ledger.finish(id,"SUCCEEDED");
+        assertTrue(pricingPublisher.recompute(id));
+        String q="{ myUsageAttempt(workspaceId: \""+workspace+"\",id: \""+id+"\") { cost { status knownSubtotal completeAmount priceRevision priceSnapshotId priceSourceReference priceEffectiveFrom priceEffectiveUntil reasons lineItems { category nativeQuantity rate exactAmount storedAmount reasons } } } }";
+        var result=graph(q); assertFalse(result.has("errors"),result.toString());
+        var cost=result.path("data").path("myUsageAttempt").path("cost");
+        assertEquals("PARTIAL",cost.path("status").asText()); assertEquals("0.001620000000",cost.path("knownSubtotal").asText());
+        assertTrue(cost.path("completeAmount").isNull()); assertEquals("fixture-price",cost.path("priceRevision").asText());
+        assertEquals("fixture-only",cost.path("priceSourceReference").asText()); assertFalse(cost.path("priceSnapshotId").asText().isEmpty());
+        assertEquals("2000-01-01T00:00:00Z",cost.path("priceEffectiveFrom").asText());
+        assertEquals("2100-01-01T00:00:00Z",cost.path("priceEffectiveUntil").asText());
+        assertTrue(cost.path("reasons").toString().contains("EXTRA_COST_UNKNOWN"));
+        assertEquals("800",cost.path("lineItems").get(0).path("nativeQuantity").asText());
+    }
+    @Test
+    void threeTrustedNativeFixtureEstimatesReachPublicGraphqlWithoutRealRuntime() throws Exception {
+        String workspace=graph("{ personalWorkspace { id } }").path("data").path("personalWorkspace").path("id").asText();
+        var start=java.time.Instant.parse("2000-01-01T00:00:00Z"); var end=java.time.Instant.parse("2100-01-01T00:00:00Z");
+        var entries=List.of(
+            new io.github.samzhu.bot.pricing.PriceCatalog.Entry(new io.github.samzhu.bot.pricing.PriceSnapshot("FAKE_OPENAI","responses-fixture-ttl","fixture-openai","FAKE","openai-test",Map.of("input","1","cache_read","0.1","cache_write_30m","1.25","cache_write_12h","2.5","output","2")),start,end),
+            new io.github.samzhu.bot.pricing.PriceCatalog.Entry(new io.github.samzhu.bot.pricing.PriceSnapshot("FAKE_ANTHROPIC","messages","fixture-anthropic","FAKE","anthropic-test",Map.of("input","1","cache_read","0.1","cache_write_5m","1.25","cache_write_1h","2","output","2")),start,end),
+            new io.github.samzhu.bot.pricing.PriceCatalog.Entry(new io.github.samzhu.bot.pricing.PriceSnapshot("FAKE_GEMINI","generateContent","fixture-gemini","FAKE","gemini-test",Map.of("input","1","cache_read","0.1","output","2","thoughts","2","tool_input","1")),start,end));
+        catalogActivation.publish("pricing-fixtures-"+UUID.randomUUID(),"synthetic-only",entries);
+        String[][] fixtures={
+          {"FAKE_OPENAI","responses-fixture-ttl","fixture-openai","{\"input_tokens\":1000,\"input_tokens_details\":{\"cached_tokens\":200,\"cache_write_tokens\":300,\"cache_write\":{\"30m\":100,\"12h\":200}},\"output_tokens\":400,\"output_tokens_details\":{\"reasoning_tokens\":100}}","0.001945000000"},
+          {"FAKE_ANTHROPIC","messages","fixture-anthropic","{\"input_tokens\":500,\"cache_read_input_tokens\":200,\"cache_creation_input_tokens\":300,\"cache_creation\":{\"ephemeral_5m_input_tokens\":100,\"ephemeral_1h_input_tokens\":200},\"output_tokens\":400}","0.001845000000"},
+          {"FAKE_GEMINI","generateContent","fixture-gemini","{\"promptTokenCount\":1000,\"cachedContentTokenCount\":200,\"candidatesTokenCount\":300,\"thoughtsTokenCount\":100,\"toolUsePromptTokenCount\":0,\"totalTokenCount\":1400}","0.001620000000"}};
+        for(var f:fixtures) {
+            String id=ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(null,workspace,currentUser.getCurrentUserId(),f[0],f[1],f[2],"FAKE","1",true,"VERIFIED"));
+            assertTrue(ledger.markDispatched(id,java.time.Clock::instant));
+            ledger.append(id,new io.github.samzhu.bot.usage.UsageLedger.Snapshot("fixture",1,"FINAL","FAKE_RAW","pricing-fixture-v1","1","1","COMPLETE",f[3]));
+            ledger.finish(id,"SUCCEEDED"); assertTrue(pricingPublisher.recompute(id)); assertFalse(pricingPublisher.recompute(id));
+            var response=graph("{ myUsageAttempt(workspaceId: \""+workspace+"\", id: \""+id+"\") { cost { status simulation completeAmount knownSubtotal currency reasons } } }");
+            assertFalse(response.has("errors"),response.toString()); var cost=response.path("data").path("myUsageAttempt").path("cost");
+            assertEquals("COMPLETE",cost.path("status").asText()); assertTrue(cost.path("simulation").asBoolean());
+            assertEquals(f[4],cost.path("completeAmount").asText()); assertEquals(f[4],cost.path("knownSubtotal").asText()); assertEquals("USD",cost.path("currency").asText());
+            if ("FAKE_OPENAI".equals(f[0])) {
+                // Test-only fault injection: a changed rate alters money under the same identity.
+                jdbc.update("update usage_price_snapshot set rates=jsonb_set(rates,'{input}',to_jsonb('2'::text)) where attempt_id=?",id);
+                try {
+                    assertThrows(io.github.samzhu.bot.usage.internal.pricing.PricingPublisher.Conflict.class,() -> pricingPublisher.recompute(id));
+                    assertEquals(1,jdbc.queryForObject("select count(*) from usage_cost_estimate where attempt_id=?",Integer.class,id));
+                    assertEquals(f[4],graph("{ myUsageAttempt(workspaceId: \""+workspace+"\",id: \""+id+"\") { cost { completeAmount } } }").path("data").path("myUsageAttempt").path("cost").path("completeAmount").asText());
+                } finally {
+                    jdbc.update("update usage_price_snapshot set rates=jsonb_set(rates,'{input}',to_jsonb('1'::text)) where attempt_id=?",id);
+                }
+            }
+        }
+        String unsupported=ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(null,workspace,currentUser.getCurrentUserId(),"FAKE_GEMINI","generateContent","fixture-gemini","FAKE","1",true,"VERIFIED"));
+        assertTrue(ledger.markDispatched(unsupported,java.time.Clock::instant));
+        String unsupportedRaw=fixtures[2][3].replace("{","{\"unknown_modality\":1,");
+        ledger.append(unsupported,new io.github.samzhu.bot.usage.UsageLedger.Snapshot("unsupported",1,"FINAL","FAKE_RAW","pricing-fixture-v1","1","1","COMPLETE",unsupportedRaw));
+        ledger.finish(unsupported,"SUCCEEDED"); assertTrue(pricingPublisher.recompute(unsupported));
+        var unsafe=graph("{ myUsageAttempt(workspaceId: \""+workspace+"\", id: \""+unsupported+"\") { cost { status completeAmount reasons } } }");
+        var cost=unsafe.path("data").path("myUsageAttempt").path("cost");
+        assertNotEquals("COMPLETE",cost.path("status").asText()); assertTrue(cost.path("completeAmount").isNull());
+        assertTrue(cost.path("reasons").toString().contains("EXTRA_COST_UNKNOWN"));
     }
 }
