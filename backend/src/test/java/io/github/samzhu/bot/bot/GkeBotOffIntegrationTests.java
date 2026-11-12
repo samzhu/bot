@@ -1,5 +1,7 @@
 package io.github.samzhu.bot.bot;
 
+import io.github.samzhu.bot.PostgresTestImage;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.samzhu.bot.BotApplication;
@@ -16,7 +18,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
 import org.testcontainers.postgresql.PostgreSQLContainer;
-import org.testcontainers.utility.DockerImageName;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -41,7 +42,7 @@ public class GkeBotOffIntegrationTests {
         @Bean
         @ServiceConnection
         PostgreSQLContainer postgresContainer() {
-            return new PostgreSQLContainer(DockerImageName.parse("postgres:16-alpine"));
+            return PostgresTestImage.container();
         }
     }
 
