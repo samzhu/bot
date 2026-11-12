@@ -63,10 +63,26 @@ public class LocalDataSeedInitializer implements ApplicationRunner {
     public void run(ApplicationArguments args) {
         log.info("Starting LocalDataSeedInitializer for demonstration conversations...");
 
-        // 1. Ensure default bot exists for local development
+        // 1. Ensure default local bot exists for local development
         jdbcTemplate.update("""
-            INSERT INTO bot (id, name, system_prompt, created_at)
-            VALUES ('bot-general', 'General Assistant', 'You are a helpful, accurate, and concise AI coding assistant.', CURRENT_TIMESTAMP)
+            INSERT INTO bot (id, name, target, system_prompt, created_at, updated_at)
+            VALUES ('bot-general', 'General Assistant', 'LOCAL', 'You are a helpful, accurate, and concise AI coding assistant.', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (id) DO NOTHING;
+        """);
+
+        // 2. Ensure demonstration GKE autonomous agent definition exists for local development simulation
+        jdbcTemplate.update("""
+            INSERT INTO bot (id, name, target, description, instructions, owner_id, created_at, updated_at)
+            VALUES (
+                'bot-gke-research',
+                'GKE Research Agent (Simulated)',
+                'GKE_REMOTE',
+                '示範用 GKE 遠端自主代理，目前處於本機 Spring AI 模擬模式。',
+                'You are a local Spring AI simulation of a research agent planned for Gemini Enterprise Agent Platform / GKE; cloud deployment is not connected. Assist the user with in-depth technical research and analysis.',
+                'dev-user',
+                CURRENT_TIMESTAMP,
+                CURRENT_TIMESTAMP
+            )
             ON CONFLICT (id) DO NOTHING;
         """);
 

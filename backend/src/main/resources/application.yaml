@@ -4,6 +4,8 @@ bot:
   run:
     timeout: 180s
     heartbeat-interval: 15s
+  gke:
+    execution-mode: OFF
 
 spring:
   application:

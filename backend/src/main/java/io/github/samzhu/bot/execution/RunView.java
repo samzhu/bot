@@ -17,6 +17,7 @@ public record RunView(
     String clientRequestId,
     String promptText,
     String status,
+    String executionMode,
     String errorMessage,
     Instant createdAt,
     Instant updatedAt

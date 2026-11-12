@@ -1,0 +1,12 @@
+{
+  "/graphql": {
+    "target": "http://127.0.0.1:8181",
+    "secure": false,
+    "changeOrigin": true
+  },
+  "/api": {
+    "target": "http://127.0.0.1:8181",
+    "secure": false,
+    "changeOrigin": true
+  }
+}

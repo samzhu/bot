@@ -15,6 +15,27 @@ describe('Issue #11 Frontend: Conversation Pinning & Dual-Section Sidebar', () =
         body = JSON.parse(opts?.body || '{}');
       } catch {}
 
+      if (body.query?.includes('defaultLocalBot')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({
+            data: {
+              defaultLocalBot: {
+                id: 'bot-1',
+                name: 'General Assistant',
+                target: 'LOCAL',
+                connectionStatus: 'NOT_APPLICABLE',
+                executionMode: 'LOCAL',
+                canChat: true,
+                createdAt: '2026-01-01',
+                updatedAt: '2026-01-01'
+              }
+            }
+          })
+        });
+      }
+
       if (body.query?.includes('bots')) {
         return Promise.resolve({
           ok: true,

@@ -1,14 +1,39 @@
-<div class="layout-container">
+<div class="layout-container" [attr.aria-busy]="isInitializing()">
   <!-- 240px Sidebar -->
   <aside class="sidebar">
     <div class="sidebar-header">
       <div class="workspace-title">Herdr Bot</div>
+      @if (isInitializing()) {
+        <div class="initial-loading-hint" data-testid="initial-loading-hint" aria-live="polite">載入中...</div>
+      }
     </div>
 
     <!-- Seed Bot Indicator -->
     <div class="seed-bot-card">
       <div class="seed-bot-label">Seed Bot</div>
       <div class="seed-bot-name">{{ seedBot()?.name || 'General Assistant' }}</div>
+    </div>
+
+    <!-- View Switcher -->
+    <div class="sidebar-view-nav">
+      <button
+        type="button"
+        class="sidebar-nav-tab-btn"
+        [class.active]="currentView() === 'chat'"
+        data-testid="nav-chat-view-btn"
+        (click)="switchToChatView()"
+      >
+        <span>對話列表</span>
+      </button>
+      <button
+        type="button"
+        class="sidebar-nav-tab-btn"
+        [class.active]="currentView() === 'bots'"
+        data-testid="bot-manager-nav-btn"
+        (click)="switchToBotManager()"
+      >
+        <span>Bot 管理</span>
+      </button>
     </div>
 
 
@@ -178,26 +203,68 @@
     }
   </aside>
 
-  <!-- Main Chat Area -->
+  <!-- Main Area (Chat or Bot Manager) -->
   <main class="main-area">
-    <!-- Top Header -->
-    <header class="header">
-      <div class="header-title">{{ currentTitle() }}</div>
-      <div class="header-actions">
-        <copilot-chat-toolbar-button
-          variant="primary"
-          title="+ New Chat"
-          data-testid="new-chat-btn"
-          [disabled]="isStreaming() || isSubmitting()"
-          (clicked)="newConversation()"
-        >
-          <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-            <path d="M10.75 4.75a.75.75 0 00-1.5 0v4.5h-4.5a.75.75 0 000 1.5h4.5v4.5a.75.75 0 001.5 0v-4.5h4.5a.75.75 0 000-1.5h-4.5v-4.5z" />
-          </svg>
-        </copilot-chat-toolbar-button>
-        <span class="action-btn-text">New Chat</span>
-      </div>
-    </header>
+    @if (currentView() === 'bots') {
+      <app-bot-manager (startChat)="openBotDraft($event)"></app-bot-manager>
+    } @else {
+      <!-- Top Header -->
+      <header class="header">
+        <div class="header-main-info">
+          <div class="header-title-row">
+            <h1 class="header-title" data-testid="chat-header-title">{{ currentTitle() }}</h1>
+            @if (currentBot(); as bot) {
+              @let modeInfo = getModeDisplay(bot);
+              <div class="header-bot-meta" data-testid="header-bot-meta">
+                <span class="header-bot-name" [title]="bot.name" data-testid="header-bot-name">{{ bot.name }}</span>
+                <span class="header-bot-target" data-testid="header-bot-target">[{{ bot.target }}]</span>
+                <span
+                  class="header-connection-status"
+                  [class.status-not-connected]="bot.connectionStatus === 'NOT_CONNECTED'"
+                  data-testid="header-connection-status"
+                >
+                  {{ bot.connectionStatus }}
+                </span>
+                <span
+                  class="header-mode-badge"
+                  [class.badge-simulated]="modeInfo.isSimulated"
+                  [class.badge-disabled]="!bot.canChat"
+                  data-testid="header-execution-mode"
+                >
+                  {{ modeInfo.badgeText }}
+                </span>
+              </div>
+            }
+          </div>
+        </div>
+        <div class="header-actions">
+          <copilot-chat-toolbar-button
+            variant="primary"
+            title="+ New Chat"
+            data-testid="new-chat-btn"
+            [disabled]="isStreaming() || isSubmitting()"
+            (clicked)="newConversation()"
+          >
+            <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path d="M10.75 4.75a.75.75 0 00-1.5 0v4.5h-4.5a.75.75 0 000 1.5h4.5v4.5a.75.75 0 001.5 0v-4.5h4.5a.75.75 0 000-1.5h-4.5v-4.5z" />
+            </svg>
+          </copilot-chat-toolbar-button>
+          <span class="action-btn-text">New Chat</span>
+        </div>
+      </header>
+
+      @if (currentBot(); as bot) {
+        @let modeInfo = getModeDisplay(bot);
+        @if (modeInfo.isSimulated) {
+          <div class="simulation-banner" data-testid="simulation-banner" role="status">
+            <span><strong>本機模擬模式：</strong>{{ modeInfo.description }}（真實基礎設施未連線）</span>
+          </div>
+        } @else if (!bot.canChat) {
+          <div class="disabled-bot-banner" data-testid="disabled-bot-banner" role="alert">
+            <span><strong>未連線（停用）：</strong>{{ modeInfo.description }}，目前無法發送訊息，草稿內容將被妥善保留。</span>
+          </div>
+        }
+      }
 
     <!-- Pin Error Banners (placed in main area below header, outside scrollable sidebar & chat view) -->
     @if (pinMutationError()) {
@@ -326,7 +393,30 @@
       </ng-template>
 
       <ng-template #nativeInputTpl>
-        <copilot-chat-input [mode]="isStreaming() ? 'processing' : 'input'">
+        <copilot-chat-input #chatInput [mode]="isStreaming() ? 'processing' : 'input'">
+          <!-- Textarea slot: intercepts Enter key when sending is disabled (e.g. OFF mode) without muting or clearing input -->
+          <ng-template #textArea
+            let-value="value"
+            let-autoFocus="autoFocus"
+            let-disabled="disabled"
+            let-maxRows="maxRows"
+            let-placeholder="placeholder"
+            let-onKeyDown="onKeyDown"
+            let-onChange="onChange"
+          >
+            <textarea
+              copilotChatTextarea
+              [inputValue]="value"
+              [inputAutoFocus]="autoFocus"
+              [inputDisabled]="disabled"
+              [inputClass]="chatInput.defaultTextAreaClass()"
+              [inputMaxRows]="maxRows"
+              [inputPlaceholder]="placeholder"
+              (keyDown)="handleTextareaKeyDown($event, onKeyDown)"
+              (valueChange)="onChange($event)"
+            ></textarea>
+          </ng-template>
+
           <!-- Send button slot: Stop generation during streaming, native send button when idle -->
           <ng-template #sendButton let-disabled="disabled" let-send="send">
             @if (isStreaming()) {
@@ -346,7 +436,7 @@
               </div>
             } @else {
               <copilot-chat-send-button
-                [disabled]="disabled || isSubmitting()"
+                [disabled]="disabled || isSubmitting() || isInitializing() || !canSend()"
                 data-testid="send-message-btn"
                 (clicked)="send()"
               ></copilot-chat-send-button>
@@ -362,5 +452,6 @@
         </copilot-chat-input>
       </ng-template>
     </copilot-chat-view>
+    }
   </main>
 </div>

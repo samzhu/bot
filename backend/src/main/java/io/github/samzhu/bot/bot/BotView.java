@@ -5,5 +5,14 @@ import java.time.Instant;
 public record BotView(
     String id,
     String name,
-    Instant createdAt
+    String description,
+    String instructions,
+    BotTarget target,
+    ConnectionStatus connectionStatus,
+    BotExecutionMode executionMode,
+    String statusReason,
+    boolean canChat,
+    Instant createdAt,
+    Instant updatedAt,
+    String ownerId
 ) {}

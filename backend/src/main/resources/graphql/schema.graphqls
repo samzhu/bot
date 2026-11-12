@@ -6,10 +6,47 @@ enum RunStatus {
   CANCELLED
 }
 
+enum BotTarget {
+  LOCAL
+  GKE_REMOTE
+}
+
+enum ConnectionStatus {
+  NOT_APPLICABLE
+  NOT_CONNECTED
+}
+
+enum BotExecutionMode {
+  LOCAL
+  SPRING_AI_SIMULATION
+  UNAVAILABLE
+}
+
 type Bot {
   id: ID!
   name: String!
+  description: String
+  instructions: String
+  target: BotTarget!
+  connectionStatus: ConnectionStatus!
+  executionMode: BotExecutionMode!
+  statusReason: String
+  canChat: Boolean!
   createdAt: String!
+  updatedAt: String!
+}
+
+input CreateBotInput {
+  name: String!
+  description: String
+  instructions: String
+}
+
+input UpdateBotInput {
+  id: ID!
+  name: String!
+  description: String
+  instructions: String
 }
 
 type Message {
@@ -27,6 +64,7 @@ type Run {
   conversationId: ID!
   clientRequestId: String!
   status: RunStatus!
+  executionMode: String!
   errorMessage: String
   createdAt: String!
   updatedAt: String!
@@ -44,8 +82,9 @@ type Conversation {
 }
 
 type Query {
-  bots(limit: Int = 20, offset: Int = 0): [Bot!]!
+  bots(search: String, target: BotTarget, limit: Int = 20, offset: Int = 0): [Bot!]!
   bot(id: ID!): Bot
+  defaultLocalBot: Bot
   conversations(pinned: Boolean, limit: Int = 20, offset: Int = 0): [Conversation!]!
   conversation(id: ID!): Conversation
   run(id: ID!): Run
@@ -54,4 +93,6 @@ type Query {
 type Mutation {
   createConversation(botId: ID!, title: String): Conversation!
   setConversationPinned(id: ID!, pinned: Boolean!): Conversation!
+  createBot(input: CreateBotInput!): Bot!
+  updateBot(input: UpdateBotInput!): Bot!
 }

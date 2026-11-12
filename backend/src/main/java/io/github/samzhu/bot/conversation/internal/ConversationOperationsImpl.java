@@ -1,5 +1,8 @@
 package io.github.samzhu.bot.conversation.internal;
 
+import io.github.samzhu.bot.bot.BotOperations;
+import io.github.samzhu.bot.bot.BotView;
+import io.github.samzhu.bot.bot.GkeAgentNotConnectedException;
 import io.github.samzhu.bot.conversation.ConversationAccessDeniedException;
 import io.github.samzhu.bot.conversation.ConversationOperations;
 import io.github.samzhu.bot.conversation.ConversationView;
@@ -10,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -19,18 +23,30 @@ public class ConversationOperationsImpl implements ConversationOperations {
     private final ConversationRepository conversationRepository;
     private final MessageRepository messageRepository;
     private final JdbcAggregateTemplate jdbcAggregateTemplate;
+    private final BotOperations botOperations;
 
     public ConversationOperationsImpl(
             ConversationRepository conversationRepository,
             MessageRepository messageRepository,
-            JdbcAggregateTemplate jdbcAggregateTemplate) {
+            JdbcAggregateTemplate jdbcAggregateTemplate,
+            BotOperations botOperations) {
         this.conversationRepository = conversationRepository;
         this.messageRepository = messageRepository;
         this.jdbcAggregateTemplate = jdbcAggregateTemplate;
+        this.botOperations = Objects.requireNonNull(botOperations, "botOperations must not be null");
     }
 
     @Override
     public ConversationView createConversation(String botId, String title, String userId) {
+        Optional<BotView> botOpt = botOperations.findById(botId, userId);
+        if (botOpt.isEmpty()) {
+            throw new IllegalArgumentException("Bot not found: " + botId);
+        }
+        BotView bot = botOpt.get();
+        if (!bot.canChat()) {
+            throw new GkeAgentNotConnectedException("GKE Agent is not connected and cannot start conversations");
+        }
+
         String convId = UUID.randomUUID().toString();
         String safeTitle = (title == null || title.isBlank()) ? "New Conversation" : title.trim();
         Instant now = Instant.now();

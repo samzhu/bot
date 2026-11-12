@@ -9,6 +9,11 @@ import java.time.Instant;
 public record Bot(
     @Id String id,
     String name,
+    String target,
+    String description,
+    String instructions,
     String systemPrompt,
-    Instant createdAt
+    String ownerId,
+    Instant createdAt,
+    Instant updatedAt
 ) {}

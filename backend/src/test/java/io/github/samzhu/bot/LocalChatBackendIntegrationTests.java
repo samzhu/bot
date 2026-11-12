@@ -152,8 +152,8 @@ class LocalChatBackendIntegrationTests {
 
     @Test
     void test1_SeedBotAndGraphQLQueriesAndPagination() throws Exception {
-        // Query bots
-        String query = "{\"query\":\"query { bots(limit: 10, offset: 0) { id name } }\"}";
+        // Query bots and authoritative defaultLocalBot
+        String query = "{\"query\":\"query { bots(limit: 10, offset: 0) { id name target } defaultLocalBot { id name target } }\"}";
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/graphql"))
                 .header("Content-Type", "application/json")
@@ -165,7 +165,11 @@ class LocalChatBackendIntegrationTests {
         JsonNode root = objectMapper.readTree(resp.body());
         JsonNode bots = root.path("data").path("bots");
         assertTrue(bots.isArray() && bots.size() > 0);
-        assertEquals("bot-general", bots.get(0).path("id").asText());
+        assertTrue(bots.findValuesAsText("id").contains("bot-general"), "bots list must contain local seed bot-general");
+
+        JsonNode defaultLocalBot = root.path("data").path("defaultLocalBot");
+        assertEquals("bot-general", defaultLocalBot.path("id").asText(), "authoritative defaultLocalBot must be bot-general");
+        assertEquals("LOCAL", defaultLocalBot.path("target").asText());
 
         // Create conversation and query it
         String convId = createTestConversation("Test 1 Conv");
@@ -564,7 +568,7 @@ class LocalChatBackendIntegrationTests {
         String runId = UUID.randomUUID().toString();
         ChatRun completedRun = new ChatRun(
                 runId, convId, clientReqId, "prompt",
-                RunStatus.COMPLETED.name(), null, Instant.now(), Instant.now()
+                RunStatus.COMPLETED.name(), "LOCAL", null, Instant.now(), Instant.now()
         );
         jdbcAggregateTemplate.insert(completedRun);
 
@@ -594,7 +598,7 @@ class LocalChatBackendIntegrationTests {
         String cancelledRunId = UUID.randomUUID().toString();
         ChatRun cancelledRun = new ChatRun(
                 cancelledRunId, convId, "req-cancel-dup", "prompt",
-                RunStatus.CANCELLED.name(), "Run cancelled by user", Instant.now(), Instant.now()
+                RunStatus.CANCELLED.name(), "LOCAL", "Run cancelled by user", Instant.now(), Instant.now()
         );
         jdbcAggregateTemplate.insert(cancelledRun);
 
@@ -936,7 +940,7 @@ class LocalChatBackendIntegrationTests {
 
         ChatRun orphan = new ChatRun(
                 orphanRunId, convId, "req-orphan", "prompt",
-                RunStatus.RUNNING.name(), null, Instant.now(), Instant.now()
+                RunStatus.RUNNING.name(), "LOCAL", null, Instant.now(), Instant.now()
         );
         jdbcAggregateTemplate.insert(orphan);
 
@@ -2007,7 +2011,7 @@ class LocalChatBackendIntegrationTests {
         Instant now = Instant.now();
 
         // 1. Insert chat_run in conv1
-        ChatRun run = new ChatRun(runId, conv1, "req-cfk", "hello", RunStatus.RUNNING.name(), null, now, now);
+        ChatRun run = new ChatRun(runId, conv1, "req-cfk", "hello", RunStatus.RUNNING.name(), "LOCAL", null, now, now);
         jdbcAggregateTemplate.insert(run);
 
         // 2. Inserting message with conv2 (mismatched conversation_id) must fail composite FK fk_msg_conv_run
@@ -2075,7 +2079,7 @@ class LocalChatBackendIntegrationTests {
         // 4. Send message to conv1 (the older conversation)
         String runId = UUID.randomUUID().toString();
         Instant now = Instant.now();
-        ChatRun run = new ChatRun(runId, conv1, "req-touch-order", "Order message", RunStatus.RUNNING.name(), null, now, now);
+        ChatRun run = new ChatRun(runId, conv1, "req-touch-order", "Order message", RunStatus.RUNNING.name(), "LOCAL", null, now, now);
         jdbcAggregateTemplate.insert(run);
         conversationOperations.appendMessage(conv1, "USER", "Order message", runId, false);
 
@@ -2171,6 +2175,14 @@ class LocalChatBackendIntegrationTests {
 
         // Run seed initializer
         localDataSeedInitializer.run(null);
+
+        // 0. Verify Seed Bots: both default LOCAL and synthetic GKE_REMOTE exist
+        var defaultBot = botRepository.findById("bot-general").orElseThrow();
+        assertEquals("LOCAL", defaultBot.target());
+        var gkeSeedBot = botRepository.findById("bot-gke-research").orElseThrow();
+        assertEquals("GKE_REMOTE", gkeSeedBot.target());
+        assertEquals("dev-user", gkeSeedBot.ownerId());
+        assertNotNull(gkeSeedBot.instructions());
 
         // 1. Verify 3 conversations exist
         var completedConv = conversationRepository.findById("seed-conv-completed-01").orElseThrow();

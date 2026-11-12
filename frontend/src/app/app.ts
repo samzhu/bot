@@ -14,6 +14,7 @@ import {
   ChatState,
   CopilotChatView,
   CopilotChatInput,
+  CopilotChatTextarea,
   CopilotChatToolbarButton,
   CopilotChatSendButton,
   CopilotChatAssistantMessage,
@@ -31,10 +32,26 @@ import {
 } from './conversation-list-store';
 export type { ConversationView, PinMutationError, PinRefreshError };
 
-export interface BotView {
+import { BotManagerComponent } from './bot/bot-manager.component';
+import { BotStore } from './bot/bot-store';
+import {
+  BotView,
+  BotTarget,
+  BotExecutionMode,
+  BotConnectionStatus,
+  getBotExecutionModeDisplay
+} from './bot/bot.model';
+export type { BotView, BotTarget, BotExecutionMode, BotConnectionStatus };
+
+export interface RunView {
   id: string;
-  name: string;
+  conversationId: string;
+  clientRequestId: string;
+  status: string;
+  executionMode?: BotExecutionMode;
+  errorMessage?: string;
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface GraphQLMessageView {
@@ -61,6 +78,8 @@ export interface PendingRequestInfo {
   tempAssistantId: string;
   isFromNewDraft?: boolean;
   submittedSnapshot?: string;
+  draftBotId?: string;
+  sourceConvId?: string;
 }
 
 @Component({
@@ -70,11 +89,13 @@ export interface PendingRequestInfo {
     CommonModule,
     CopilotChatView,
     CopilotChatInput,
+    CopilotChatTextarea,
     CopilotChatToolbarButton,
     CopilotChatSendButton,
     CopilotChatAssistantMessage,
     CopilotChatAssistantMessageToolbar,
-    CopilotChatAssistantMessageCopyButton
+    CopilotChatAssistantMessageCopyButton,
+    BotManagerComponent
   ],
   providers: [
     /*
@@ -95,6 +116,10 @@ export class App extends ChatState implements OnInit {
   // Injected feature stores
   readonly draftStore = inject(DraftStore);
   readonly conversationStore = inject(ConversationListStore);
+  readonly botStore = inject(BotStore);
+
+  // View state: 'chat' for conversation view, 'bots' for Bot Manager view
+  readonly currentView = signal<'chat' | 'bots'>('chat');
 
   // Concurrency lock for creation and submission
   readonly isSubmitting = signal<boolean>(false);
@@ -106,7 +131,8 @@ export class App extends ChatState implements OnInit {
   readonly inputValue: WritableSignal<string> = signal('');
 
   // Application State
-  readonly bots = signal<BotView[]>([]);
+  readonly bots = this.botStore.bots;
+  readonly defaultLocalBot = this.botStore.defaultLocalBot;
 
   // Delegated Conversation List & Pinning State (managed authoritatively by ConversationListStore)
   readonly pinnedConversations = this.conversationStore.pinnedConversations;
@@ -134,6 +160,7 @@ export class App extends ChatState implements OnInit {
   readonly messages = signal<ExtendedMessage[]>([]);
   readonly isStreaming = signal<boolean>(false);
   readonly isCancelling = signal<boolean>(false);
+  readonly isInitializing = signal<boolean>(true);
   readonly activeRunId = signal<string | null>(null);
   readonly pendingRequest = signal<PendingRequestInfo | null>(null);
   readonly streamError = signal<string | null>(null);
@@ -156,8 +183,90 @@ export class App extends ChatState implements OnInit {
     this.messageOffset.update(offset => offset + messageCount);
   }
 
-  // Derived state
-  readonly seedBot = computed<BotView | null>(() => this.bots()[0] || null);
+  // Derived state: authoritative defaultLocalBot strictly from query, zero list guessing or fallback
+  readonly seedBot = computed<BotView | null>(() => this.defaultLocalBot() || null);
+
+  // Active draft Bot when working in unpersisted draft view (e.g. via openBotDraft or newConversation)
+  readonly activeDraftBot = signal<BotView | null>(null);
+
+  // Authoritatively loaded Bot for currently active conversation
+  readonly activeConversationBot = signal<BotView | null>(null);
+
+  // Unified active Bot for current view (either from active draft or active conversation)
+  readonly currentBot = computed<BotView | null>(() => {
+    if (this.currentConversationId()) {
+      return this.activeConversationBot();
+    }
+    return this.activeDraftBot() || this.seedBot();
+  });
+
+  // Unified chat capability check: strictly obeys bot execution mode (UNAVAILABLE / OFF is disabled)
+  readonly canSend = computed<boolean>(() => {
+    if (this.isInitializing() || this.isStreaming() || this.isSubmitting()) {
+      return false;
+    }
+    const convId = this.currentConversationId();
+    if (convId) {
+      const bot = this.activeConversationBot();
+      return !!bot && bot.canChat;
+    }
+    const bot = this.activeDraftBot() || this.seedBot();
+    return !!bot && bot.canChat;
+  });
+
+  getModeDisplay(bot: BotView) {
+    return getBotExecutionModeDisplay(bot);
+  }
+
+  switchToChatView(): void {
+    this.currentView.set('chat');
+  }
+
+  switchToBotManager(): void {
+    this.saveCurrentDraft();
+    this.currentView.set('bots');
+  }
+
+  private saveCurrentDraft(): void {
+    const text = this.inputValue();
+    const convId = this.currentConversationId();
+    if (convId) {
+      this.draftStore.setConversationDraft(convId, text);
+    } else {
+      const draftBot = this.activeDraftBot() || this.seedBot();
+      if (draftBot) {
+        this.draftStore.setBotDraft(draftBot.id, text);
+        if (this.defaultLocalBot() && this.defaultLocalBot()?.id === draftBot.id) {
+          this.draftStore.setDraft(text);
+        }
+      }
+    }
+  }
+
+  openBotDraft(bot: BotView): void {
+    if (this.isStreaming() || this.isSubmitting()) return;
+
+    this.currentView.set('chat');
+    this.selectionGeneration++;
+
+    this.saveCurrentDraft();
+
+    this.currentConversationId.set(null);
+    this.conversationStore.setActiveConversation(null);
+    this.removeStorageItem('bot_active_conversation_id');
+    this.activeDraftBot.set(bot);
+    this.activeConversationBot.set(null);
+    this.messages.set([]);
+    this.messageOffset.set(20);
+    this.hasMoreMessages.set(false);
+    this.streamError.set(null);
+    this.isRecovering.set(false);
+    this.isCancelling.set(false);
+    this.pendingRequest.set(null);
+
+    const savedDraft = this.draftStore.getBotDraft(bot.id);
+    this.restoreInput(savedDraft);
+  }
 
   readonly currentConversation = computed<ConversationView | null>(() => {
     const id = this.currentConversationId();
@@ -175,7 +284,12 @@ export class App extends ChatState implements OnInit {
 
   readonly currentTitle = computed<string>(() => {
     const conv = this.currentConversation();
-    return conv ? (conv.title || 'Untitled') : 'New Conversation';
+    if (conv) return conv.title || 'Untitled';
+    const draftBot = this.activeDraftBot();
+    if (draftBot && draftBot.id !== this.defaultLocalBot()?.id) {
+      return `${draftBot.name} (草稿)`;
+    }
+    return 'New Conversation';
   });
 
   readonly lastMessageInterrupted = computed<boolean>(() => {
@@ -193,22 +307,26 @@ export class App extends ChatState implements OnInit {
   });
 
   async ngOnInit(): Promise<void> {
-    await this.loadBots();
-    await this.loadConversations();
+    try {
+      await this.loadBots();
+      await this.loadConversations();
 
-    // Check localStorage for previously active conversation to survive reloads
-    const savedId = this.getStorageItem('bot_active_conversation_id');
-    const existing = this.conversations().find(c => c.id === savedId);
+      // Check localStorage for previously active conversation to survive reloads
+      const savedId = this.getStorageItem('bot_active_conversation_id');
+      const existing = this.conversations().find(c => c.id === savedId);
 
-    if (existing) {
-      await this.selectConversation(existing.id);
-    } else if (savedId) {
-      // Saved conversation is beyond the initial paginated list; load directly by id
-      await this.selectConversation(savedId);
-    } else if (this.conversations().length > 0) {
-      await this.selectConversation(this.conversations()[0].id);
-    } else if (this.seedBot()) {
-      await this.newConversation();
+      if (existing) {
+        await this.selectConversation(existing.id);
+      } else if (savedId) {
+        // Saved conversation is beyond the initial paginated list; load directly by id
+        await this.selectConversation(savedId);
+      } else if (this.conversations().length > 0) {
+        await this.selectConversation(this.conversations()[0].id);
+      } else if (this.seedBot()) {
+        await this.newConversation();
+      }
+    } finally {
+      this.isInitializing.set(false);
     }
   }
 
@@ -249,19 +367,16 @@ export class App extends ChatState implements OnInit {
 
   async loadBots(): Promise<void> {
     try {
-      const res = await fetch('/graphql', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: `query { bots(limit: 20, offset: 0) { id name createdAt } }`
-        })
-      });
-      const json = await res.json();
-      if (json.data && json.data.bots) {
-        this.bots.set(json.data.bots);
+      await this.botStore.loadBots();
+      const def = this.defaultLocalBot();
+      if (def) {
+        const startupLegacy = this.draftStore.getDraft();
+        if (startupLegacy && !this.draftStore.getBotDraft(def.id)) {
+          this.draftStore.setBotDraft(def.id, startupLegacy);
+        }
       }
     } catch (err) {
-      console.error('Failed to load bots:', err);
+      console.error('Failed to load bots via BotStore:', err);
     }
   }
 
@@ -325,22 +440,48 @@ export class App extends ChatState implements OnInit {
   async selectConversation(id: string): Promise<void> {
     if (this.isStreaming() || this.isSubmitting()) return;
 
+    this.currentView.set('chat');
+
     // Save unsent input of current conversation or draft before switching
-    const prevId = this.currentConversationId();
-    if (prevId) {
-      this.draftStore.setConversationDraft(prevId, this.inputValue());
-    } else {
-      this.draftStore.setDraft(this.inputValue());
-    }
+    this.saveCurrentDraft();
 
     const currentGen = ++this.selectionGeneration;
     this.currentConversationId.set(id);
+    this.activeDraftBot.set(null);
+    this.activeConversationBot.set(null);
     this.setStorageItem('bot_active_conversation_id', id);
     this.completedRunIds.clear();
     this.messageOffset.set(20);
     this.hasMoreMessages.set(false);
     this.streamError.set(null);
     this.isRecovering.set(false);
+
+    // Initial check if we already have the conversation in store
+    const existingConv = this.conversationStore.findConversation(id);
+    if (existingConv && existingConv.botId) {
+      const targetBotId = existingConv.botId;
+      const localMatch = this.botStore.bots().find(b => b.id === targetBotId) ||
+        (this.defaultLocalBot()?.id === targetBotId ? this.defaultLocalBot() : null);
+      if (localMatch) {
+        this.activeConversationBot.set(localMatch);
+      } else {
+        this.botStore.loadBot(targetBotId).then(loaded => {
+          if (this.selectionGeneration === currentGen && this.currentConversationId() === id) {
+            if (loaded && loaded.id === targetBotId) {
+              this.activeConversationBot.set(loaded);
+            } else {
+              this.activeConversationBot.set(null);
+            }
+          }
+        }).catch(() => {
+          if (this.selectionGeneration === currentGen && this.currentConversationId() === id) {
+            this.activeConversationBot.set(null);
+          }
+        });
+      }
+    } else {
+      this.activeConversationBot.set(null);
+    }
 
     // Restore unsent draft input for this conversation (if any) to signal and DOM
     this.restoreInput(this.draftStore.getConversationDraft(id));
@@ -397,6 +538,35 @@ export class App extends ChatState implements OnInit {
           updatedAt: conv.updatedAt || ''
         };
         this.conversationStore.setActiveConversation(view);
+
+        // Resolve conversation's Bot if not already resolved
+        if (conv.botId) {
+          const targetBotId = conv.botId;
+          const currentLoaded = this.activeConversationBot();
+          if (!currentLoaded || currentLoaded.id !== targetBotId) {
+            const localMatch = this.botStore.bots().find(b => b.id === targetBotId) ||
+              (this.defaultLocalBot()?.id === targetBotId ? this.defaultLocalBot() : null);
+            if (localMatch) {
+              this.activeConversationBot.set(localMatch);
+            } else {
+              this.botStore.loadBot(targetBotId).then(loaded => {
+                if (this.selectionGeneration === currentGen && this.currentConversationId() === id) {
+                  if (loaded && loaded.id === targetBotId) {
+                    this.activeConversationBot.set(loaded);
+                  } else {
+                    this.activeConversationBot.set(null);
+                  }
+                }
+              }).catch(() => {
+                if (this.selectionGeneration === currentGen && this.currentConversationId() === id) {
+                  this.activeConversationBot.set(null);
+                }
+              });
+            }
+          }
+        } else {
+          this.activeConversationBot.set(null);
+        }
         const rawMessages: GraphQLMessageView[] = conv.messages || [];
         const runs: any[] = conv.runs || [];
         const failedRunIds = new Set(runs.filter(r => r.status === 'FAILED').map(r => r.id));
@@ -529,19 +699,19 @@ export class App extends ChatState implements OnInit {
   async newConversation(): Promise<void> {
     if (this.isStreaming() || this.isSubmitting()) return;
 
+    this.currentView.set('chat');
+
     // Invalidate any in-flight asynchronous conversation selection
     this.selectionGeneration++;
 
-    const prevId = this.currentConversationId();
-    if (prevId) {
-      this.draftStore.setConversationDraft(prevId, this.inputValue());
-    } else {
-      this.draftStore.setDraft(this.inputValue());
-    }
+    this.saveCurrentDraft();
 
+    const defaultBot = this.seedBot();
     this.currentConversationId.set(null);
     this.conversationStore.setActiveConversation(null);
     this.removeStorageItem('bot_active_conversation_id');
+    this.activeDraftBot.set(defaultBot);
+    this.activeConversationBot.set(null);
     this.messages.set([]);
     this.messageOffset.set(20);
     this.hasMoreMessages.set(false);
@@ -551,7 +721,8 @@ export class App extends ChatState implements OnInit {
     this.pendingRequest.set(null);
 
     // Restore unsent draft text to signal and DOM
-    this.restoreInput(this.draftStore.getDraft());
+    const draftText = defaultBot ? (this.draftStore.getBotDraft(defaultBot.id) || this.draftStore.getDraft()) : this.draftStore.getDraft();
+    this.restoreInput(draftText);
   }
 
   /*
@@ -595,14 +766,51 @@ export class App extends ChatState implements OnInit {
     }
   }
 
+  /*
+   * WHY / CAPABILITY-GUARDED KEYBOARD HANDLER:
+   * CopilotKit's CopilotChatInput.handleKeyDown() unconditionally calls this.send() on unshifted Enter,
+   * which synchronously executes changeInput("") and textAreaRef.setValue(""), wiping the user's draft
+   * before checking capability or awaiting asynchronous submission.
+   * By intercepting the public #textArea slot, we prevent default and suppress slot.onKeyDown()
+   * whenever canSend() is false (e.g. UNAVAILABLE/OFF execution mode).
+   * Shift+Enter (newlines) and IME composition (e.g. CJK confirmation) remain completely unblocked,
+   * and capable bots (e.g. SIMULATION or LOCAL) delegate directly to the SDK handler.
+   */
+  handleTextareaKeyDown(event: KeyboardEvent, onKeyDown?: (e: KeyboardEvent) => void): void {
+    if (event.isComposing || event.keyCode === 229) {
+      return;
+    }
+    if (event.key === 'Enter' && !event.shiftKey) {
+      if (!this.canSend()) {
+        event.preventDefault();
+        return;
+      }
+    }
+    onKeyDown?.(event);
+  }
+
   // --- ChatState Abstract Implementations ---
 
   override changeInput(value: string): void {
     this.inputValue.set(value);
     const id = this.currentConversationId();
     if (!id) {
+      const draftBot = this.activeDraftBot() || this.seedBot();
       if (!this.isSubmitting() || value.trim().length > 0) {
-        this.draftStore.setDraft(value);
+        if (draftBot) {
+          this.draftStore.setBotDraft(draftBot.id, value);
+          if (this.defaultLocalBot() && this.defaultLocalBot()?.id === draftBot.id) {
+            this.draftStore.setDraft(value);
+          }
+        } else if (this.isInitializing()) {
+          /*
+           * WHY: During cold-start initialization before default local bot metadata resolves,
+           * user input represents an unbound startup draft for "+ New Chat".
+           * It is preserved in the legacy single-draft buffer until defaultLocalBot resolves,
+           * at which point it is associated with defaultLocalBot.id (never assumed to be GKE).
+           */
+          this.draftStore.setDraft(value);
+        }
       }
     } else {
       if (!this.isSubmitting() || value.trim().length > 0) {
@@ -614,10 +822,90 @@ export class App extends ChatState implements OnInit {
   override async submitInput(value?: string, retryClientRequestId?: string, targetConvId?: string): Promise<void> {
     const rawInput = this.inputValue();
     const text = (value !== undefined && value.trim() ? value : rawInput).trim();
-    if (!text || this.isStreaming() || this.isSubmitting()) return;
+    if (!text || this.isStreaming() || this.isSubmitting() || this.isInitializing()) {
+      if (this.isInitializing() && text) {
+        // While initializing, preserve input text/draft and do not emit mutations
+        const draftSnapshot = (rawInput && rawInput.trim() === text) ? rawInput : (value !== undefined ? value : text);
+        const draftBot = this.activeDraftBot() || this.seedBot();
+        if (draftBot) {
+          this.draftStore.setBotDraft(draftBot.id, draftSnapshot);
+          if (this.defaultLocalBot() && this.defaultLocalBot()?.id === draftBot.id) {
+            this.draftStore.setDraft(draftSnapshot);
+          }
+        } else {
+          /*
+           * WHY: During cold-start initialization before default local bot metadata resolves,
+           * user input represents an unbound startup draft for "+ New Chat".
+           * It is preserved in the legacy single-draft buffer until defaultLocalBot resolves,
+           * at which point it is associated with defaultLocalBot.id (never assumed to be GKE).
+           */
+          this.draftStore.setDraft(draftSnapshot);
+        }
+        this.restoreInput(draftSnapshot);
+      }
+      return;
+    }
 
+    const pending = this.pendingRequest();
     // Snapshot exact raw input before submission so trailing whitespace/newlines are preserved on create/run failure
-    const draftSnapshot = (rawInput && rawInput.trim() === text) ? rawInput : (value !== undefined ? value : text);
+    const draftSnapshot = retryClientRequestId && pending?.submittedSnapshot
+      ? pending.submittedSnapshot
+      : ((rawInput && rawInput.trim() === text) ? rawInput : (value !== undefined ? value : text));
+
+    // Execution target convId: explicit target, or pending conversation on retry, or current active conversation
+    let convId = targetConvId || (retryClientRequestId ? pending?.conversationId : undefined) || this.currentConversationId() || undefined;
+
+    const isNewDraft = retryClientRequestId ? (pending?.isFromNewDraft ?? false) : !convId;
+    const originBot = isNewDraft ? (this.activeDraftBot() || this.seedBot()) : null;
+
+    // Strict Rule: New draft origin => draftBotId = bot.id, sourceConvId = undefined
+    // History origin => draftBotId = undefined, sourceConvId = convId
+    // Retry => exactly preserve origin from pending
+    const originDraftBotId = retryClientRequestId ? pending?.draftBotId : (isNewDraft ? originBot?.id : undefined);
+    const sourceConvId = retryClientRequestId ? pending?.sourceConvId : (isNewDraft ? undefined : convId);
+
+    // Guard: if current bot cannot send (e.g. UNAVAILABLE/OFF mode or missing bot), strictly refuse to mutate and preserve draft text!
+    if (!this.canSend()) {
+      if (!convId) {
+        if (!originBot) {
+          this.streamError.set('未配置預設本地助理，目前無法建立對話');
+        } else if (!originBot.canChat) {
+          this.streamError.set('助理目前處於未連線（停用）狀態，無法發送訊息');
+        }
+      } else {
+        const convBot = this.activeConversationBot();
+        if (!convBot) {
+          this.streamError.set('助理資料載入中或不存在，目前無法發送訊息');
+        } else if (!convBot.canChat) {
+          this.streamError.set('助理目前處於未連線（停用）狀態，無法發送訊息');
+        }
+      }
+      if (convId) {
+        this.draftStore.setConversationDraft(convId, draftSnapshot);
+      } else {
+        if (originDraftBotId) {
+          this.draftStore.setBotDraft(originDraftBotId, draftSnapshot);
+          if (this.defaultLocalBot() && this.defaultLocalBot()?.id === originDraftBotId) {
+            this.draftStore.setDraft(draftSnapshot);
+          }
+        }
+      }
+      this.restoreInput(draftSnapshot);
+      return;
+    }
+
+    // Guard: if starting from draft and no authoritative default or draft bot is available, strictly refuse to submit mutation
+    if (isNewDraft && !originBot) {
+      this.streamError.set('未配置預設本地助理，目前無法建立對話');
+      if (originDraftBotId) {
+        this.draftStore.setBotDraft(originDraftBotId, draftSnapshot);
+        if (this.defaultLocalBot() && this.defaultLocalBot()?.id === originDraftBotId) {
+          this.draftStore.setDraft(draftSnapshot);
+        }
+      }
+      this.restoreInput(draftSnapshot);
+      return;
+    }
 
     /*
      * WHY: Concurrency lock for creation and submission.
@@ -626,12 +914,7 @@ export class App extends ChatState implements OnInit {
      */
     this.isSubmitting.set(true);
 
-    const pending = this.pendingRequest();
-    const isNewDraft = !targetConvId && !this.currentConversationId();
-    // Preserve draft ownership across retries (e.g. if initial run returns 500 after successful create)
-    const isFromNewDraft = retryClientRequestId ? (pending?.isFromNewDraft ?? false) : isNewDraft;
-    const sourceConvId = targetConvId || this.currentConversationId();
-    let convId = sourceConvId;
+    const isFromNewDraft = isNewDraft;
     const submitGen = this.selectionGeneration;
     const clientRequestId = retryClientRequestId || ('req-' + crypto.randomUUID());
     let tempUserId = 'temp-u-' + Date.now();
@@ -640,14 +923,19 @@ export class App extends ChatState implements OnInit {
     try {
       // 1. Deferred Creation: create conversation on first valid submission if starting from draft
       if (!convId) {
-        let bot = this.seedBot();
+        let bot = originBot;
         if (!bot) {
           await this.loadBots();
-          bot = this.seedBot();
+          bot = this.activeDraftBot() || this.seedBot();
         }
         if (!bot) {
-          this.streamError.set('No active bot available to start conversation');
-          this.draftStore.setDraft(draftSnapshot);
+          this.streamError.set('未配置預設本地助理，目前無法建立對話');
+          if (originDraftBotId) {
+            this.draftStore.setBotDraft(originDraftBotId, draftSnapshot);
+            if (this.defaultLocalBot()?.id === originDraftBotId) {
+              this.draftStore.setDraft(draftSnapshot);
+            }
+          }
           this.restoreInput(draftSnapshot);
           return;
         }
@@ -675,7 +963,12 @@ export class App extends ChatState implements OnInit {
 
           if (!res.ok) {
             this.streamError.set(`建立對話失敗：HTTP ${res.status}`);
-            this.draftStore.setDraft(draftSnapshot);
+            if (originDraftBotId) {
+              this.draftStore.setBotDraft(originDraftBotId, draftSnapshot);
+              if (this.defaultLocalBot()?.id === originDraftBotId) {
+                this.draftStore.setDraft(draftSnapshot);
+              }
+            }
             this.restoreInput(draftSnapshot);
             return;
           }
@@ -684,7 +977,12 @@ export class App extends ChatState implements OnInit {
           if (json.errors && json.errors.length > 0) {
             const errorMsg = json.errors[0]?.message || 'Failed to create conversation';
             this.streamError.set(`建立對話失敗：${errorMsg}`);
-            this.draftStore.setDraft(draftSnapshot);
+            if (originDraftBotId) {
+              this.draftStore.setBotDraft(originDraftBotId, draftSnapshot);
+              if (this.defaultLocalBot()?.id === originDraftBotId) {
+                this.draftStore.setDraft(draftSnapshot);
+              }
+            }
             this.restoreInput(draftSnapshot);
             return;
           }
@@ -707,18 +1005,30 @@ export class App extends ChatState implements OnInit {
               return;
             }
 
+            this.activeConversationBot.set(bot);
+            this.activeDraftBot.set(null);
             this.currentConversationId.set(newConv.id);
             this.setStorageItem('bot_active_conversation_id', newConv.id);
           } else {
             this.streamError.set('建立對話失敗：無回應資料');
-            this.draftStore.setDraft(draftSnapshot);
+            if (originDraftBotId) {
+              this.draftStore.setBotDraft(originDraftBotId, draftSnapshot);
+              if (this.defaultLocalBot()?.id === originDraftBotId) {
+                this.draftStore.setDraft(draftSnapshot);
+              }
+            }
             this.restoreInput(draftSnapshot);
             return;
           }
         } catch (err: any) {
           console.error('Failed to create conversation on backend:', err);
           this.streamError.set(`建立對話失敗，請重試：${err?.message || err}`);
-          this.draftStore.setDraft(draftSnapshot);
+          if (originDraftBotId) {
+            this.draftStore.setBotDraft(originDraftBotId, draftSnapshot);
+            if (this.defaultLocalBot()?.id === originDraftBotId) {
+              this.draftStore.setDraft(draftSnapshot);
+            }
+          }
           this.restoreInput(draftSnapshot);
           return;
         }
@@ -769,7 +1079,9 @@ export class App extends ChatState implements OnInit {
         tempUserId,
         tempAssistantId,
         isFromNewDraft,
-        submittedSnapshot: draftSnapshot
+        submittedSnapshot: draftSnapshot,
+        draftBotId: originDraftBotId,
+        sourceConvId: sourceConvId
       });
       this.streamError.set(null);
 
@@ -796,18 +1108,7 @@ export class App extends ChatState implements OnInit {
         if (this.currentConversationId() !== convId) return;
 
         if (response.ok) {
-          // Clear draft only for the submission source once officially accepted by server
-          if (isFromNewDraft) {
-            const curDraft = this.draftStore.getDraft();
-            if (!curDraft || curDraft === draftSnapshot || curDraft.trim() === text) {
-              this.draftStore.clearDraft();
-            }
-          } else if (sourceConvId) {
-            const convDraft = this.draftStore.getConversationDraft(sourceConvId);
-            if (!convDraft || convDraft === draftSnapshot || convDraft.trim() === text) {
-              this.draftStore.deleteConversationDraft(sourceConvId);
-            }
-          }
+          // Input was accepted by backend for processing. Clear immediate input field for user comfort:
           if (this.inputValue().trim() === text) {
             this.inputValue.set('');
           }
@@ -817,14 +1118,19 @@ export class App extends ChatState implements OnInit {
           const result = await this.reconcileAuthoritativeMessages(convId, runId, tempUserId, tempAssistantId);
           if (this.currentConversationId() !== convId) return;
 
-          if (result.isTerminal) {
+          const isTerminal = result.isTerminal || json.status === 'COMPLETED' || json.status === 'FAILED' || json.status === 'CANCELLED';
+          const finalStatus = result.status || json.status;
+
+          if (isTerminal) {
+            if (finalStatus === 'COMPLETED') {
+              this.handleRunCompleted(this.pendingRequest());
+              this.streamError.set(null);
+            } else {
+              this.handleRunFailedOrCancelled(this.pendingRequest());
+              this.streamError.set(result.errorMessage || json.errorMessage ? `執行失敗: ${result.errorMessage || json.errorMessage}` : '執行失敗');
+            }
             this.pendingRequest.set(null);
             this.activeRunId.set(null);
-            if (result.status === 'FAILED') {
-              this.streamError.set(result.errorMessage ? `執行失敗: ${result.errorMessage}` : '執行失敗');
-            } else {
-              this.streamError.set(null);
-            }
           } else {
             // Still active on backend: enter bounded polling / recovery
             this.activeRunId.set(runId);
@@ -834,42 +1140,33 @@ export class App extends ChatState implements OnInit {
         } else if (response.status === 409) {
           // 409 Conflict: rejected by server, clear optimistic rows and restore input
           this.removeOptimisticMessages(tempUserId, tempAssistantId);
+          this.handleRunFailedOrCancelled(this.pendingRequest());
           this.pendingRequest.set(null);
           this.streamError.set(json.error || 'Another active run is in progress for this conversation');
-          this.restoreInput(draftSnapshot);
           return;
         } else {
+          this.handleRunFailedOrCancelled(this.pendingRequest());
           throw new Error(json.error || `Request failed with status ${response.status}`);
         }
       }
 
       if (!response.ok || !response.body) {
+        this.handleRunFailedOrCancelled(this.pendingRequest());
         throw new Error(`Stream request failed with status ${response.status}`);
       }
 
-      // Clear draft only for the submission source once officially accepted by server (200 SSE Stream)
-      if (isFromNewDraft) {
-        const curDraft = this.draftStore.getDraft();
-        if (!curDraft || curDraft === draftSnapshot || curDraft.trim() === text) {
-          this.draftStore.clearDraft();
-        }
-      } else if (sourceConvId) {
-        const convDraft = this.draftStore.getConversationDraft(sourceConvId);
-        if (!convDraft || convDraft === draftSnapshot || convDraft.trim() === text) {
-          this.draftStore.deleteConversationDraft(sourceConvId);
-        }
-      }
+      // 200 SSE Stream accepted. Clear input box for user, but DraftStore retention is governed by terminal status
       if (this.inputValue().trim() === text) {
         this.inputValue.set('');
       }
 
       await this.readSseStream(response.body, tempUserId, tempAssistantId, convId);
       if (this.currentConversationId() !== convId) return;
-      this.pendingRequest.set(null);
     } catch (err: any) {
       console.error('Streaming or network error:', err);
       if (convId && this.currentConversationId() === convId) {
         this.isStreaming.set(false);
+        this.handleRunFailedOrCancelled(this.pendingRequest());
         await this.reconcileOrRecoverRun(convId, clientRequestId, tempUserId, tempAssistantId);
       }
     } finally {
@@ -880,13 +1177,99 @@ export class App extends ChatState implements OnInit {
     }
   }
 
-  retryPending(): void {
+  async retryPending(): Promise<void> {
     const pending = this.pendingRequest();
     if (!pending || this.isStreaming() || this.isRecovering()) return;
-    if (this.currentConversationId() !== pending.conversationId) {
-      this.selectConversation(pending.conversationId);
+    if (pending.conversationId && this.currentConversationId() !== pending.conversationId) {
+      await this.selectConversation(pending.conversationId);
     }
-    this.submitInput(pending.message, pending.clientRequestId, pending.conversationId);
+    const rawToRetry = pending.submittedSnapshot || pending.message;
+    await this.submitInput(rawToRetry, pending.clientRequestId, pending.conversationId);
+  }
+
+  private handleRunCompleted(pending: PendingRequestInfo | null): void {
+    if (!pending) return;
+    const { draftBotId, sourceConvId, submittedSnapshot, isFromNewDraft } = pending;
+    if (draftBotId || isFromNewDraft) {
+      if (draftBotId) {
+        const curDraft = this.draftStore.getBotDraft(draftBotId);
+        if (!curDraft || curDraft === submittedSnapshot) {
+          this.draftStore.clearBotDraft(draftBotId);
+        }
+      }
+      if (this.defaultLocalBot() && this.defaultLocalBot()?.id === draftBotId) {
+        const curLegacy = this.draftStore.getDraft();
+        if (!curLegacy || curLegacy === submittedSnapshot) {
+          this.draftStore.clearDraft();
+        }
+      }
+      if (pending.conversationId) {
+        const curConvDraft = this.draftStore.getConversationDraft(pending.conversationId);
+        if (!curConvDraft || curConvDraft === submittedSnapshot) {
+          this.draftStore.deleteConversationDraft(pending.conversationId);
+        }
+      }
+    } else if (sourceConvId) {
+      const curDraft = this.draftStore.getConversationDraft(sourceConvId);
+      if (!curDraft || curDraft === submittedSnapshot) {
+        this.draftStore.deleteConversationDraft(sourceConvId);
+      }
+    }
+  }
+
+  private handleRunFailedOrCancelled(pending: PendingRequestInfo | null): void {
+    if (!pending) return;
+    const { draftBotId, sourceConvId, submittedSnapshot, isFromNewDraft } = pending;
+    if (!submittedSnapshot) return;
+
+    if (draftBotId || isFromNewDraft) {
+      // 1. Restore into in-memory DraftStore for origin draftBot
+      if (draftBotId) {
+        const curDraft = this.draftStore.getBotDraft(draftBotId);
+        if (!curDraft || curDraft === submittedSnapshot) {
+          this.draftStore.setBotDraft(draftBotId, submittedSnapshot);
+        }
+      }
+      if (this.defaultLocalBot() && this.defaultLocalBot()?.id === draftBotId) {
+        const curLegacy = this.draftStore.getDraft();
+        if (!curLegacy || curLegacy === submittedSnapshot) {
+          this.draftStore.setDraft(submittedSnapshot);
+        }
+      }
+
+      // If convId was created before run failed, also store draft for this conversationId
+      if (pending.conversationId) {
+        const curConvDraft = this.draftStore.getConversationDraft(pending.conversationId);
+        if (!curConvDraft || curConvDraft === submittedSnapshot) {
+          this.draftStore.setConversationDraft(pending.conversationId, submittedSnapshot);
+        }
+      }
+
+      // 2. Restore to visible input strictly when still on the exact origin:
+      // (!convId && currentBot()?.id === draftBotId) || (convId && convId === pending.conversationId)
+      const convId = this.currentConversationId();
+      const isStillOnOrigin = (!convId && this.currentBot()?.id === draftBotId) || (!!convId && convId === pending.conversationId);
+      if (isStillOnOrigin) {
+        const currentInput = this.inputValue();
+        if (!currentInput || currentInput === submittedSnapshot) {
+          this.restoreInput(submittedSnapshot);
+        }
+      }
+    } else if (sourceConvId) {
+      // 1. Restore into in-memory DraftStore for origin conversation
+      const curDraft = this.draftStore.getConversationDraft(sourceConvId);
+      if (!curDraft || curDraft === submittedSnapshot) {
+        this.draftStore.setConversationDraft(sourceConvId, submittedSnapshot);
+      }
+
+      // 2. Only restore into visible input if user is still on this conversation and hasn't edited anything new
+      if (this.currentConversationId() === sourceConvId) {
+        const currentInput = this.inputValue();
+        if (!currentInput || currentInput === submittedSnapshot) {
+          this.restoreInput(submittedSnapshot);
+        }
+      }
+    }
   }
 
   private removeOptimisticMessages(tempUserId: string, tempAssistantId: string): void {
@@ -982,13 +1365,15 @@ export class App extends ChatState implements OnInit {
           if (this.currentConversationId() !== convId) return;
 
           if (result.isTerminal) {
+            if (matchedRun.status === 'COMPLETED') {
+              this.handleRunCompleted(this.pendingRequest());
+              this.streamError.set(null);
+            } else {
+              this.handleRunFailedOrCancelled(this.pendingRequest());
+              this.streamError.set(`執行失敗: ${matchedRun.errorMessage || '未知錯誤'}`);
+            }
             this.pendingRequest.set(null);
             this.activeRunId.set(null);
-            if (matchedRun.status === 'FAILED') {
-              this.streamError.set(`執行失敗: ${matchedRun.errorMessage || '未知錯誤'}`);
-            } else {
-              this.streamError.set(null);
-            }
             return;
           }
         }
@@ -1043,13 +1428,15 @@ export class App extends ChatState implements OnInit {
           if (this.currentConversationId() !== convId) return false;
 
           if (result.isTerminal) {
+            if (polledRun.status === 'COMPLETED') {
+              this.handleRunCompleted(this.pendingRequest());
+              this.streamError.set(null);
+            } else {
+              this.handleRunFailedOrCancelled(this.pendingRequest());
+              this.streamError.set(polledRun.errorMessage ? `執行失敗: ${polledRun.errorMessage}` : '執行失敗');
+            }
             this.pendingRequest.set(null);
             this.activeRunId.set(null);
-            if (polledRun.status === 'FAILED') {
-              this.streamError.set(polledRun.errorMessage ? `執行失敗: ${polledRun.errorMessage}` : '執行失敗');
-            } else {
-              this.streamError.set(null);
-            }
             return true;
           }
         }
@@ -1254,6 +1641,8 @@ export class App extends ChatState implements OnInit {
           return m;
         })
       );
+      this.handleRunCompleted(this.pendingRequest());
+      this.pendingRequest.set(null);
       this.activeRunId.set(null);
       this.onRunTerminal(data.runId, 2);
     } else if (eventType === 'run.cancelled' || eventType === 'run.failed') {
@@ -1279,6 +1668,7 @@ export class App extends ChatState implements OnInit {
           return m;
         });
       });
+      this.handleRunFailedOrCancelled(this.pendingRequest());
       this.activeRunId.set(null);
       this.onRunTerminal(data.runId, hasAssistant ? 2 : 1);
       if (eventType === 'run.failed') {

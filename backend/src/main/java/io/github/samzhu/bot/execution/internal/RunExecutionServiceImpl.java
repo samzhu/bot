@@ -1,6 +1,7 @@
 package io.github.samzhu.bot.execution.internal;
 
 import io.github.samzhu.bot.bot.BotOperations;
+import io.github.samzhu.bot.bot.BotView;
 import io.github.samzhu.bot.conversation.ConversationOperations;
 import io.github.samzhu.bot.conversation.ConversationView;
 import io.github.samzhu.bot.conversation.MessageView;
@@ -111,6 +112,22 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         }
         ConversationView conv = convOpt.get();
 
+        // 1.1 Verify bot availability and resolve execution mode
+        // WHY / ARCHITECTURAL DEFENSE:
+        // Checking bot availability before any DB write, chat_run query, or model/session invocation guarantees
+        // zero side-effects when attempting to execute against a disconnected GKE agent (HTTP 503 GKE_AGENT_NOT_CONNECTED).
+        //
+        // TODO: Currently a local development Spring AI simulation. When GCP project, official agent endpoint,
+        // credentials/identity, and event protocols are established, replace with Gemini Enterprise Agent Platform
+        // integration (retaining GKE deployment architecture, not turning into arbitrary managed runtime).
+        // Preserves cancel/dedup/session contracts.
+        Optional<BotView> botOpt = botOperations.findById(conv.botId(), userId);
+        if (botOpt.isEmpty() || !botOpt.get().canChat()) {
+            return new StartRunOutcome(StartRunOutcome.Type.SERVICE_UNAVAILABLE, null, null, "GKE_AGENT_NOT_CONNECTED");
+        }
+        BotView bot = botOpt.get();
+        String actualExecutionMode = bot.executionMode().name();
+
         // 2. ClientRequestId deduplication check
         Optional<ChatRun> existing = runRepository.findByConversationIdAndClientRequestId(conversationId, clientRequestId);
         if (existing.isPresent()) {
@@ -128,7 +145,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         // We let the database unique indexes (uq_active_run_per_conv and uq_client_request_per_conv) adjudicate.
         String runId = UUID.randomUUID().toString();
         Instant now = Instant.now();
-        ChatRun newRun = new ChatRun(runId, conversationId, clientRequestId, message, RunStatus.RUNNING.name(), null, now, now);
+        ChatRun newRun = new ChatRun(runId, conversationId, clientRequestId, message, RunStatus.RUNNING.name(), actualExecutionMode, null, now, now);
 
         final String[] userMsgHolder = new String[1];
         try {
@@ -198,7 +215,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         // 6. Build prompt context using standard SessionService findOrCreate & bounded getActiveMessages (last 10 turns = 20 messages)
         List<org.springframework.ai.chat.messages.Message> aiMessages = new ArrayList<>();
         try {
-            botOperations.findSystemPromptById(conv.botId())
+            botOperations.getEffectiveSystemPrompt(conv.botId(), userId)
                     .filter(sp -> !sp.isBlank())
                     .ifPresent(sp -> aiMessages.add(new SystemMessage(sp)));
 
@@ -445,6 +462,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                 r.clientRequestId(),
                 r.inputText(),
                 r.status(),
+                r.executionMode() == null ? "LOCAL" : r.executionMode(),
                 r.errorMessage(),
                 r.createdAt(),
                 r.updatedAt()

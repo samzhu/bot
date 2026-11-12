@@ -2,6 +2,7 @@ package io.github.samzhu.bot.conversation.internal.web;
 
 import graphql.GraphQLError;
 import graphql.GraphqlErrorBuilder;
+import io.github.samzhu.bot.bot.GkeAgentNotConnectedException;
 import io.github.samzhu.bot.conversation.ConversationAccessDeniedException;
 import io.github.samzhu.bot.conversation.ConversationOperations;
 import io.github.samzhu.bot.conversation.ConversationView;
@@ -16,6 +17,7 @@ import org.springframework.graphql.execution.ErrorType;
 import org.springframework.stereotype.Controller;
 
 import java.util.List;
+import java.util.Map;
 
 @Controller
 public class ConversationGraphQLController {
@@ -73,6 +75,15 @@ public class ConversationGraphQLController {
         return GraphqlErrorBuilder.newError()
                 .errorType(ErrorType.FORBIDDEN)
                 .message(ex.getMessage())
+                .build();
+    }
+
+    @GraphQlExceptionHandler
+    public GraphQLError handleGkeAgentNotConnected(GkeAgentNotConnectedException ex) {
+        return GraphqlErrorBuilder.newError()
+                .errorType(ErrorType.BAD_REQUEST)
+                .message(ex.getMessage())
+                .extensions(Map.of("code", "GKE_AGENT_NOT_CONNECTED"))
                 .build();
     }
 }

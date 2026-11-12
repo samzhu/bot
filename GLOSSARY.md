@@ -4,7 +4,7 @@ Ubiquitous language defining the core domain concepts for the chat system.
 
 ## Language
 
-* **Bot**: 供使用者選擇、具備自訂名稱與系統指示的助理角色設定。
+* **Bot**: 具名稱、用途說明與工作指示的可管理助理或 Agent 定義，其對話執行可由不同環境（如本地或遠端執行環境）承接。
   * _Avoid_: ChatModel 或 ChatClient（底層推論基礎設施）。
 * **Conversation**: 使用者與某 Bot 之間持續、具備獨立身分識別且可重新開啟查閱的對話主題歷程。
   * _Avoid_: Session（模型推論記憶脈絡）。

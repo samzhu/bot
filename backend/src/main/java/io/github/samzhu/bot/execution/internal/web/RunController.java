@@ -52,6 +52,15 @@ public class RunController {
                         .contentType(MediaType.APPLICATION_JSON)
                         .body(body);
             }
+            case SERVICE_UNAVAILABLE -> {
+                Map<String, Object> body = new java.util.LinkedHashMap<>();
+                body.put("error", outcome.conflictMessage() != null ? outcome.conflictMessage() : "GKE_AGENT_NOT_CONNECTED");
+                body.put("code", "GKE_AGENT_NOT_CONNECTED");
+                body.put("status", 503);
+                yield ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body(body);
+            }
             case STARTED -> ResponseEntity.ok()
                     .contentType(MediaType.TEXT_EVENT_STREAM)
                     .body(outcome.emitter());

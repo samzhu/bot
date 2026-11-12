@@ -17,7 +17,7 @@ public interface ExecutionOperations {
         SseEmitter emitter,
         String conflictMessage
     ) {
-        public enum Type { STARTED, EXISTING, CONFLICT }
+        public enum Type { STARTED, EXISTING, CONFLICT, SERVICE_UNAVAILABLE }
     }
 
     record CancelRunOutcome(

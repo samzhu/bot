@@ -1,6 +1,7 @@
 package io.github.samzhu.bot.conversation;
 
 import graphql.GraphQLError;
+import io.github.samzhu.bot.bot.BotOperations;
 import io.github.samzhu.bot.conversation.internal.Conversation;
 import io.github.samzhu.bot.conversation.internal.ConversationOperationsImpl;
 import io.github.samzhu.bot.conversation.internal.ConversationRepository;
@@ -26,8 +27,9 @@ class ConversationPinningUnitTests {
         ConversationRepository convRepo = mock(ConversationRepository.class);
         MessageRepository msgRepo = mock(MessageRepository.class);
         JdbcAggregateTemplate jdbcTemp = mock(JdbcAggregateTemplate.class);
+        BotOperations botOps = mock(BotOperations.class);
 
-        ConversationOperationsImpl ops = new ConversationOperationsImpl(convRepo, msgRepo, jdbcTemp);
+        ConversationOperationsImpl ops = new ConversationOperationsImpl(convRepo, msgRepo, jdbcTemp, botOps);
 
         Conversation conv = new Conversation("c-1", "b-1", "Title", "foreign-user", false, Instant.now(), Instant.now());
         when(convRepo.findById("c-1")).thenReturn(Optional.of(conv));
@@ -49,7 +51,7 @@ class ConversationPinningUnitTests {
         MessageRepository msgRepo = mock(MessageRepository.class);
         JdbcAggregateTemplate jdbcTemp = mock(JdbcAggregateTemplate.class);
 
-        ConversationOperationsImpl ops = new ConversationOperationsImpl(convRepo, msgRepo, jdbcTemp);
+        ConversationOperationsImpl ops = new ConversationOperationsImpl(convRepo, msgRepo, jdbcTemp, mock(BotOperations.class));
 
         Conversation initial = new Conversation("c-1", "b-1", "Title", "owner-user", false, Instant.now(), Instant.now());
         when(convRepo.findById("c-1"))

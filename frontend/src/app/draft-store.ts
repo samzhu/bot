@@ -13,8 +13,11 @@ import { Injectable, signal } from '@angular/core';
   providedIn: 'root'
 })
 export class DraftStore {
-  // Single frontend draft text for "+ New Chat" (unpersisted conversation)
+  // Legacy single frontend draft text for "+ New Chat" (unpersisted conversation)
   private readonly newChatDraft = signal<string>('');
+
+  // Per-bot unsaved draft inputs for unpersisted conversations, keyed by botId
+  private readonly botDrafts = new Map<string, string>();
 
   // Per-conversation unsaved draft inputs, keyed by conversationId
   private readonly conversationDrafts = new Map<string, string>();
@@ -29,6 +32,26 @@ export class DraftStore {
 
   clearDraft(): void {
     this.newChatDraft.set('');
+  }
+
+  getBotDraft(botId: string): string {
+    return this.botDrafts.get(botId) || '';
+  }
+
+  setBotDraft(botId: string, text: string): void {
+    if (text) {
+      this.botDrafts.set(botId, text);
+    } else {
+      this.botDrafts.delete(botId);
+    }
+  }
+
+  clearBotDraft(botId: string): void {
+    this.botDrafts.delete(botId);
+  }
+
+  deleteBotDraft(botId: string): void {
+    this.botDrafts.delete(botId);
   }
 
   getConversationDraft(conversationId: string): string {
@@ -53,6 +76,7 @@ export class DraftStore {
 
   resetAll(): void {
     this.newChatDraft.set('');
+    this.botDrafts.clear();
     this.conversationDrafts.clear();
   }
 }
