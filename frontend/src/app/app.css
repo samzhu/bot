@@ -38,31 +38,6 @@
   letter-spacing: -0.01em;
 }
 
-/* Seed Bot Indicator */
-.seed-bot-card {
-  margin: 12px 12px 8px 12px;
-  padding: 10px 12px;
-  background-color: #ffffff;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  flex-shrink: 0;
-}
-
-.seed-bot-label {
-  font-size: 11px;
-  text-transform: uppercase;
-  font-weight: 600;
-  color: #6b7280;
-  letter-spacing: 0.04em;
-}
-
-.seed-bot-name {
-  font-size: 13px;
-  font-weight: 600;
-  color: #1f2937;
-  margin-top: 2px;
-}
-
 /* Sidebar View Navigation Tabs */
 .sidebar-view-nav {
   display: flex;
@@ -320,27 +295,6 @@
   vertical-align: middle;
 }
 
-.header-bot-target {
-  color: #6b7280;
-  font-weight: 500;
-  flex-shrink: 0;
-}
-
-.header-connection-status {
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 11px;
-  font-weight: 500;
-  background-color: #f3f4f6;
-  color: #4b5563;
-  flex-shrink: 0;
-}
-
-.header-connection-status.status-not-connected {
-  background-color: #fee2e2;
-  color: #991b1b;
-}
-
 .header-mode-badge {
   padding: 2px 8px;
   border-radius: 12px;
@@ -486,11 +440,6 @@
 
   .sidebar-header {
     padding: 8px 12px;
-  }
-
-  .seed-bot-card {
-    margin: 4px 12px;
-    padding: 6px 10px;
   }
 
   .sidebar-section-title {

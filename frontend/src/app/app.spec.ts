@@ -1348,7 +1348,7 @@ describe('App', () => {
       app.openBotDraft(botA);
       expect(createCalls).toBe(0);
       expect(app.currentConversationId()).toBeNull();
-      expect(app.currentTitle()).toContain(botA.name);
+      expect(app.currentBot()?.id).toBe(botA.id);
 
       app.inputValue.set('Draft for Bot A');
       app.draftStore.setBotDraft(botA.id, 'Draft for Bot A');
@@ -1357,7 +1357,7 @@ describe('App', () => {
       app.openBotDraft(botSim);
       expect(createCalls).toBe(0);
       expect(app.currentConversationId()).toBeNull();
-      expect(app.currentTitle()).toContain(botSim.name);
+      expect(app.specifiedBot()?.id).toBe(botSim.id);
       expect(app.inputValue()).toBe('');
 
       app.inputValue.set('Draft for Bot Sim');
@@ -1407,12 +1407,111 @@ describe('App', () => {
       const banner = compiled.querySelector('[data-testid="simulation-banner"]');
       expect(banner).toBeTruthy();
       expect(banner?.textContent).toContain('本機模擬模式：');
+      expect(banner?.textContent).toContain('Bot 以本機模擬執行，正式 Agent 尚未連線。');
+      expect(banner?.textContent).not.toMatch(/模擬內容|假|Fake|SPRING_AI|GKE/);
 
       const sendHost = compiled.querySelector('[data-testid="send-message-btn"]') as HTMLElement;
       const innerBtn = sendHost?.querySelector('button') as HTMLButtonElement | null;
       const isDisabled = (sendHost as any)?.disabled ?? innerBtn?.disabled ?? sendHost?.hasAttribute('disabled');
       expect(isDisabled).toBe(false);
       expect(app.canSend()).toBe(true);
+    });
+
+    describe('Issue #22: general chat vs specified Bot context', () => {
+      it('general new chat shows no Seed Bot card, persona, target or connection labels', async () => {
+        const fixture = TestBed.createComponent(App);
+        const app = fixture.componentInstance;
+        await vi.waitFor(() => expect(app.isInitializing()).toBe(false));
+        fixture.detectChanges();
+        const el = fixture.nativeElement as HTMLElement;
+        expect(el.querySelector('.seed-bot-card')).toBeNull();
+        expect(el.querySelector('[data-testid="header-bot-meta"]')).toBeNull();
+        expect(el.querySelector('[data-testid="header-bot-target"]')).toBeNull();
+        expect(el.querySelector('[data-testid="header-connection-status"]')).toBeNull();
+        expect(el.textContent).not.toContain('Seed Bot');
+        expect(el.textContent).not.toContain('General Assistant');
+        expect(el.textContent).not.toContain('GKE_REMOTE');
+        expect(app.specifiedBot()).toBeNull();
+        expect(app.canSend()).toBe(true);
+        expect(app.currentBot()?.id).toBe('bot-1');
+      });
+
+      it('specified Bot shows name once with short sim/off badge, no enum or target text; New Chat returns to general with default draft', async () => {
+        const fixture = TestBed.createComponent(App);
+        const app = fixture.componentInstance;
+        await vi.waitFor(() => expect(app.isInitializing()).toBe(false));
+
+        app.inputValue.set('default draft text');
+        app.openBotDraft(botSim);
+        fixture.detectChanges();
+        const el = fixture.nativeElement as HTMLElement;
+        expect(el.querySelector('[data-testid="header-bot-name"]')?.textContent?.trim()).toBe('Bot Simulation');
+        expect(el.querySelector('[data-testid="chat-header-title"]')?.textContent).not.toContain('Bot Simulation');
+        expect(el.querySelector('[data-testid="header-execution-mode"]')?.textContent?.trim()).toBe('模擬');
+        expect(el.querySelector('[data-testid="header-bot-target"]')).toBeNull();
+        expect(el.querySelector('[data-testid="header-connection-status"]')).toBeNull();
+        expect(el.querySelector('[data-testid="header-bot-meta"]')?.textContent).not.toMatch(/GKE_REMOTE|NOT_CONNECTED|SPRING_AI/);
+
+        app.openBotDraft(botBOff);
+        fixture.detectChanges();
+        expect(el.querySelector('[data-testid="header-execution-mode"]')?.textContent?.trim()).toBe('停用');
+
+        await app.newConversation();
+        fixture.detectChanges();
+        expect(app.specifiedBot()).toBeNull();
+        expect(app.currentBot()?.id).toBe('bot-1');
+        expect(app.inputValue()).toBe('default draft text');
+        expect(el.querySelector('[data-testid="header-bot-meta"]')).toBeNull();
+        expect(el.querySelector('[data-testid="simulation-banner"]')).toBeNull();
+        expect(el.querySelector('[data-testid="disabled-bot-banner"]')).toBeNull();
+      });
+
+      it('historical conversation of default bot shows no bot labels; other Bot shows name only', async () => {
+        const fixture = TestBed.createComponent(App);
+        const app = fixture.componentInstance;
+        await vi.waitFor(() => expect(app.isInitializing()).toBe(false));
+        app.currentConversationId.set('conv-h');
+        app.activeConversationBot.set(defaultTestLocalBot);
+        fixture.detectChanges();
+        const el = fixture.nativeElement as HTMLElement;
+        expect(el.querySelector('[data-testid="header-bot-meta"]')).toBeNull();
+        app.activeConversationBot.set(botSim);
+        fixture.detectChanges();
+        expect(el.querySelector('[data-testid="header-bot-name"]')?.textContent?.trim()).toBe('Bot Simulation');
+        expect(el.querySelector('[data-testid="header-bot-meta"]')?.textContent).not.toMatch(/GKE_REMOTE|NOT_CONNECTED/);
+      });
+
+      it('LOCAL history bot shows no bot name/type even when defaultLocalBot is null', async () => {
+        const fixture = TestBed.createComponent(App);
+        const app = fixture.componentInstance;
+        await vi.waitFor(() => expect(app.isInitializing()).toBe(false));
+        app.botStore.defaultLocalBot.set(null as any);
+        app.currentConversationId.set('conv-local-h');
+        app.activeConversationBot.set(botA); // LOCAL
+        fixture.detectChanges();
+        const el = fixture.nativeElement as HTMLElement;
+        expect(app.specifiedBot()).toBeNull();
+        expect(el.querySelector('[data-testid="header-bot-meta"]')).toBeNull();
+        expect(el.textContent).not.toContain('Bot A (Active)');
+        expect(el.textContent).not.toMatch(/LOCAL|NOT_APPLICABLE/);
+        // known GKE independent bot is still shown while default is unknown
+        app.activeConversationBot.set(botSim);
+        fixture.detectChanges();
+        expect(el.querySelector('[data-testid="header-bot-name"]')?.textContent?.trim()).toBe('Bot Simulation');
+      });
+
+      it('missing defaultLocalBot is explicit, disables send and never falls back to list[0]', async () => {
+        const fixture = TestBed.createComponent(App);
+        const app = fixture.componentInstance;
+        await vi.waitFor(() => expect(app.isInitializing()).toBe(false));
+        app.botStore.defaultLocalBot.set(null as any);
+        app.activeDraftBot.set(null);
+        fixture.detectChanges();
+        expect(app.isDefaultBotMissing()).toBe(true);
+        expect(app.canSend()).toBe(false);
+        expect(app.currentBot()).toBeNull();
+        expect((fixture.nativeElement as HTMLElement).querySelector('[data-testid="default-bot-missing-banner"]')).toBeTruthy();
+      });
     });
 
     it('history submission success or failure leaves unsubmitted new draft of the same bot untouched', async () => {

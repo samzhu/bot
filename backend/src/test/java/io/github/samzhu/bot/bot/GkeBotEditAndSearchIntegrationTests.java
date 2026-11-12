@@ -640,4 +640,74 @@ public class GkeBotEditAndSearchIntegrationTests {
         assertEquals(List.of("bot-gke-tie-02", "bot-gke-tie-01"), tiePage2Ids,
                 "Identical updated_at must be deterministically ordered by id DESC on second page without drift");
     }
+
+    @Test
+    @DisplayName("11. Managed scope (#20): empty query fixed to GKE_REMOTE never mixes newer LOCAL or other-owner bots across pages")
+    void testManagedScopeEmptyQueryAcrossPages() throws Exception {
+        String tag = UUID.randomUUID().toString().substring(0, 8);
+        Timestamp created = Timestamp.from(Instant.parse("2026-01-01T00:00:00Z"));
+        // Own GKE bots are OLDER than every foreign/LOCAL row, so a "fetch a page then drop rows" implementation
+        // would return short or empty pages instead of the owner's own independent bots.
+        for (int i = 1; i <= 3; i++) {
+            jdbcTemplate.update("""
+                INSERT INTO bot (id, name, target, description, instructions, owner_id, created_at, updated_at)
+                VALUES (?, ?, 'GKE_REMOTE', 'own', '', 'dev-user', ?, ?)
+            """, "scope-own-" + tag + "-" + i, "Scope Own " + i, created,
+                    Timestamp.from(Instant.parse("2026-01-0" + i + "T00:00:00Z")));
+        }
+        for (int i = 1; i <= 4; i++) {
+            jdbcTemplate.update("""
+                INSERT INTO bot (id, name, target, description, instructions, owner_id, created_at, updated_at)
+                VALUES (?, ?, 'LOCAL', 'local', '', 'dev-user', ?, ?)
+            """, "scope-local-" + tag + "-" + i, "Scope Local " + i, created,
+                    Timestamp.from(Instant.parse("2030-01-0" + i + "T00:00:00Z")));
+        }
+        for (int i = 1; i <= 3; i++) {
+            jdbcTemplate.update("""
+                INSERT INTO bot (id, name, target, description, instructions, owner_id, created_at, updated_at)
+                VALUES (?, ?, 'GKE_REMOTE', 'foreign', '', 'someone-else', ?, ?)
+            """, "scope-foreign-" + tag + "-" + i, "Scope Foreign " + i, created,
+                    Timestamp.from(Instant.parse("2031-01-0" + i + "T00:00:00Z")));
+        }
+
+        String query = """
+            query ManagedBots($limit: Int, $offset: Int) {
+              defaultLocalBot { id target }
+              bots(target: GKE_REMOTE, limit: $limit, offset: $offset) { id target }
+            }
+        """;
+
+        java.util.List<String> collected = new java.util.ArrayList<>();
+        for (int offset = 0; offset < 200; offset += 2) {
+            JsonNode res = executeGraphQL(objectMapper.writeValueAsString(Map.of(
+                    "query", query,
+                    "variables", Map.of("limit", 2, "offset", offset))));
+            assertFalse(res.has("errors"));
+            // defaultLocalBot stays available and untouched alongside the managed query
+            assertEquals("LOCAL", res.path("data").path("defaultLocalBot").path("target").asText());
+            JsonNode page = res.path("data").path("bots");
+            for (JsonNode b : page) {
+                assertEquals("GKE_REMOTE", b.path("target").asText());
+                collected.add(b.path("id").asText());
+            }
+            if (page.size() < 2) {
+                break;
+            }
+        }
+
+        assertEquals(collected.size(), collected.stream().distinct().count(), "No duplicates across pages");
+        for (int i = 1; i <= 3; i++) {
+            assertTrue(collected.contains("scope-own-" + tag + "-" + i));
+        }
+        assertTrue(collected.stream().noneMatch(id -> id.startsWith("scope-local-" + tag)));
+        assertTrue(collected.stream().noneMatch(id -> id.startsWith("scope-foreign-" + tag)));
+        assertTrue(collected.stream().noneMatch(id -> id.equals("bot-general")));
+
+        // Existing LOCAL data is preserved (no delete/modify of defaultLocalBot or LOCAL rows)
+        Integer localRows = jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM bot WHERE id LIKE ?", Integer.class, "scope-local-" + tag + "-%");
+        assertEquals(4, localRows);
+        assertEquals("LOCAL", jdbcTemplate.queryForObject(
+                "SELECT target FROM bot WHERE id = 'bot-general'", String.class));
+    }
 }

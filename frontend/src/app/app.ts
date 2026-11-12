@@ -200,6 +200,25 @@ export class App extends ChatState implements OnInit {
     return this.activeDraftBot() || this.seedBot();
   });
 
+  /*
+   * WHY: General chat (default assistant) must not expose persona/target/connection labels (PDF p.110).
+   * The default bot stays the internal binding (defaultLocalBot query, never list[0]); only a bot that is
+   * explicitly different from it is surfaced as a "specified Bot" context in header/banner.
+   */
+  readonly specifiedBot = computed<BotView | null>(() => {
+    const bot = this.currentConversationId() ? this.activeConversationBot() : this.activeDraftBot();
+    // Only independent remote (GKE_REMOTE) Bots are a "specified Bot". LOCAL is the internal built-in
+    // assistant class, so it is excluded by observable target even when the defaultLocalBot query
+    // failed or was cleared to null (unknown default must not turn every bot into a specified one).
+    // The id check is kept as an extra guard for a resolved default.
+    return bot && bot.target === 'GKE_REMOTE' && bot.id !== this.defaultLocalBot()?.id ? bot : null;
+  });
+
+  // General new chat without a resolvable defaultLocalBot: explicit notice, send stays disabled.
+  readonly isDefaultBotMissing = computed<boolean>(() =>
+    !this.isInitializing() && !this.currentConversationId() && !this.activeDraftBot() && !this.defaultLocalBot()
+  );
+
   // Unified chat capability check: strictly obeys bot execution mode (UNAVAILABLE / OFF is disabled)
   readonly canSend = computed<boolean>(() => {
     if (this.isInitializing() || this.isStreaming() || this.isSubmitting()) {
@@ -285,10 +304,7 @@ export class App extends ChatState implements OnInit {
   readonly currentTitle = computed<string>(() => {
     const conv = this.currentConversation();
     if (conv) return conv.title || 'Untitled';
-    const draftBot = this.activeDraftBot();
-    if (draftBot && draftBot.id !== this.defaultLocalBot()?.id) {
-      return `${draftBot.name} (草稿)`;
-    }
+    // Bot name is shown once in the header meta line, never duplicated in the title.
     return 'New Conversation';
   });
 

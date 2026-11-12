@@ -1,9 +1,9 @@
 <div class="bot-manager-container">
-  <!-- Top Navigation / Header -->
+  <!-- PDF p.57: 「機器人」標題、說明與右上「新增 Bot」 -->
   <header class="manager-header">
     <div class="manager-header-info">
-      <h1 class="manager-title">Bot 管理中心</h1>
-      <p class="manager-subtitle">檢視並管理所有代理人設規格。GKE 自主代理現階段以 Spring AI 進行本機功能模擬驗證。</p>
+      <h1 class="manager-title">機器人</h1>
+      <p class="manager-subtitle">管理額外建立的獨立 Bot；一般對話不需建立 Bot。</p>
     </div>
     <div class="manager-actions">
       <button
@@ -11,17 +11,16 @@
         type="button"
         class="primary-action-btn"
         data-testid="create-bot-modal-btn"
-        (click)="openCreateDialog(createBtn)"
+        (click)="openCreate(createBtn)"
       >
         <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
           <path d="M10.75 4.75a.75.75 0 00-1.5 0v4.5h-4.5a.75.75 0 000 1.5h4.5v4.5a.75.75 0 001.5 0v-4.5h4.5a.75.75 0 000-1.5h-4.5v-4.5z" />
         </svg>
-        <span>新增 GKE 代理</span>
+        <span>新增 Bot</span>
       </button>
     </div>
   </header>
 
-  <!-- Global Manager Error Banner -->
   @if (botStore.error()) {
     <div class="manager-error-banner" role="alert" data-testid="bot-store-error">
       <span>{{ botStore.error() }}</span>
@@ -29,7 +28,6 @@
     </div>
   }
 
-  <!-- Search & Target Filter Toolbar -->
   <div class="manager-toolbar" data-testid="bot-manager-toolbar">
     <div class="search-filter-group">
       <div class="search-box">
@@ -40,38 +38,38 @@
           type="search"
           class="filter-search-input"
           data-testid="bot-search-input"
-          placeholder="搜尋代理名稱或用途..."
+          placeholder="搜尋機器人名稱或用途"
           [value]="searchQuery()"
           (input)="onSearchInput($event)"
-          aria-label="搜尋代理名稱或用途"
+          aria-label="搜尋機器人名稱或用途"
         />
       </div>
 
       <div class="target-filter-box">
-        <label for="target-filter-select" class="visually-hidden">篩選目標型態</label>
+        <label for="status-filter-select" class="visually-hidden">篩選連線狀態</label>
         <select
-          id="target-filter-select"
+          id="status-filter-select"
           class="filter-target-select"
-          data-testid="target-filter-select"
-          [value]="selectedTarget()"
-          (change)="onTargetChange($event)"
-          aria-label="篩選目標型態"
+          data-testid="status-filter-select"
+          [value]="selectedStatus()"
+          (change)="onStatusChange($event)"
         >
-          <option value="ALL">全部目標</option>
-          <option value="LOCAL">本機助理</option>
-          <option value="GKE_REMOTE">GKE 代理</option>
+          <option value="ALL">全部狀態</option>
+          <option value="NOT_CONNECTED">未連線</option>
         </select>
       </div>
     </div>
   </div>
 
-  <!-- Cards Grid View -->
   <main class="manager-grid-area">
-    @if (botStore.isLoading() && botStore.bots().length === 0) {
-      <div class="loading-state" data-testid="bots-loading-indicator">載入代理清單中...</div>
-    } @else if (botStore.bots().length === 0) {
+    <!-- Store 與首頁共用；管理查詢完成前（或失敗後）不能把其他查詢的舊清單當成管理結果。 -->
+    @if (botStore.isLoading() && !hasManagedResult()) {
+      <div class="loading-state" data-testid="bots-loading-indicator">載入機器人清單中...</div>
+    } @else if (botStore.error()) {
+      <div class="empty-state">清單尚未載入，請重試。</div>
+    } @else if (botStore.bots().length === 0 && currentOffset() === 0) {
       <div class="empty-state" data-testid="bots-empty-state">
-        <p>目前尚無符合條件的代理定義。</p>
+        <p>目前沒有符合條件的機器人。</p>
       </div>
     } @else {
       <div class="cards-grid">
@@ -79,85 +77,46 @@
           @let modeInfo = getModeDisplay(bot);
           <article class="bot-card" [attr.data-testid]="'bot-card-' + bot.id">
             <div class="card-header">
-              <div class="card-title-group">
-                <h2 class="card-name">{{ bot.name }}</h2>
-                <span class="target-tag" [class.local-tag]="bot.target === 'LOCAL'" [class.gke-tag]="bot.target === 'GKE_REMOTE'">
-                  {{ bot.target }}
-                </span>
-              </div>
-              <span
-                class="status-pill"
-                [class.pill-simulated]="modeInfo.isSimulated"
-                [class.pill-local]="bot.target === 'LOCAL'"
-                [class.pill-disabled]="!bot.canChat"
-                [attr.data-testid]="'status-pill-' + bot.id"
-              >
-                {{ modeInfo.badgeText }}
-              </span>
+              <span class="bot-avatar" aria-hidden="true">{{ initialOf(bot) }}</span>
+              <h2 class="card-name">{{ bot.name }}</h2>
+              <span class="target-tag">自訂 Bot</span>
             </div>
 
-            <div class="card-body">
-              <p class="card-description">{{ bot.description || '無詳細說明' }}</p>
+            <p class="card-description">{{ bot.description || '尚未填寫用途說明' }}</p>
 
-              <div class="status-detail-box">
-                <div class="detail-row">
-                  <span class="detail-label">連線狀態:</span>
-                  <span class="detail-value" [attr.data-testid]="'connection-status-' + bot.id">
-                    {{ bot.connectionStatus }}
-                  </span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">對話狀態:</span>
-                  <span class="detail-value" [class.chat-enabled]="bot.canChat" [class.chat-disabled]="!bot.canChat">
-                    {{ bot.canChat ? '可開始對話' : '未開放 (嚴格阻斷)' }}
-                  </span>
-                </div>
-                @if (bot.statusReason) {
-                  <div class="detail-row reason-row">
-                    <span class="detail-label">備註說明:</span>
-                    <span class="detail-value reason-text">{{ bot.statusReason }}</span>
-                  </div>
-                }
-              </div>
-
-              @if (bot.instructions) {
-                <div class="instructions-preview">
-                  <div class="instructions-label">待部署工作指示規格:</div>
-                  <pre class="instructions-content">{{ bot.instructions }}</pre>
-                </div>
-              }
-            </div>
+            <!-- 只保留簡短且真實的模擬／未連線提示；不顯示 enum、指示全文與技術明細 -->
+            <p
+              class="card-status-hint"
+              [class.pill-simulated]="modeInfo.isSimulated"
+              [attr.data-testid]="'status-pill-' + bot.id"
+            >
+              {{ modeInfo.badgeText }}
+            </p>
 
             <footer class="card-footer">
-              <span class="timestamp-text">建立於: {{ bot.createdAt | date:'yyyy-MM-dd HH:mm' }}</span>
-              <div class="card-actions-group">
-                @if (isEditable(bot)) {
-                  <button
-                    #editBtn
-                    type="button"
-                    class="card-action-btn edit-btn"
-                    [attr.data-testid]="'edit-bot-btn-' + bot.id"
-                    (click)="openEditDialog(bot, editBtn)"
-                  >
-                    編輯
-                  </button>
-                }
-                <button
-                  type="button"
-                  class="card-action-btn open-draft-btn"
-                  [attr.data-testid]="'open-draft-btn-' + bot.id"
-                  (click)="onOpenDraft(bot)"
-                >
-                  開啟草稿
-                </button>
-              </div>
+              <button
+                type="button"
+                class="card-action-btn open-draft-btn"
+                [attr.data-testid]="'open-draft-btn-' + bot.id"
+                (click)="onOpenDraft(bot)"
+              >
+                開始對話
+              </button>
+              <button
+                #editBtn
+                type="button"
+                class="card-action-btn edit-btn"
+                [attr.data-testid]="'edit-bot-btn-' + bot.id"
+                (click)="openEdit(bot, editBtn)"
+              >
+                設定
+              </button>
             </footer>
           </article>
         }
       </div>
 
-      <!-- Pagination Controls (20 per page, offset-based) -->
-      <nav class="manager-pagination" aria-label="Bot 分頁導覽" data-testid="bot-pagination">
+      <nav class="manager-pagination" aria-label="機器人分頁導覽" data-testid="bot-pagination">
         <button
           type="button"
           class="pagination-btn"
@@ -179,140 +138,9 @@
         </button>
       </nav>
     }
+
+    <p class="manager-footnote" data-testid="manager-footnote">正式 Agent 尚未連線，請依各 Bot 狀態開始對話</p>
   </main>
 
-  <!-- Native Modal Dialog for Creating/Editing GKE Bot -->
-  <dialog
-    #botDialog
-    class="bot-modal-dialog"
-    data-testid="create-bot-dialog"
-    [attr.data-mode]="dialogMode()"
-    aria-labelledby="bot-dialog-title"
-    aria-modal="true"
-    (cancel)="onDialogCancel($event)"
-  >
-    <div class="dialog-content-wrapper">
-      <div class="dialog-header">
-        <h2 id="bot-dialog-title" class="dialog-title">
-          {{ dialogMode() === 'create' ? '新增 GKE 代理定義' : '編輯 GKE 代理定義' }}
-        </h2>
-        <button
-          type="button"
-          class="dialog-close-btn"
-          aria-label="關閉對話框"
-          data-testid="dialog-close-x-btn"
-          (click)="closeDialog()"
-        >
-          ✕
-        </button>
-      </div>
-
-      <div class="dialog-body">
-        <div class="dialog-notice-box">
-          <p><strong>連線狀態說明：</strong>GKE 代理目前處於「未連線 (NOT_CONNECTED)」狀態。目前以 Spring AI 在本機模擬 Agent，尚未連接正式 Agent 平台；工作指示會在模擬對話中生效。</p>
-        </div>
-
-        @if (formError()) {
-          <div class="dialog-error-banner" role="alert" data-testid="form-error-banner">
-            {{ formError() }}
-          </div>
-        }
-
-        <form (submit)="$event.preventDefault(); submitBot()" class="bot-creation-form" novalidate>
-          <!-- Bot Name Field (Official Signal Forms Binding, Required trimmed 1-100 chars) -->
-          <div class="form-field-group">
-            <label for="bot-name-input" class="form-label">
-              代理名稱 <span class="required-indicator" aria-hidden="true">*</span>
-            </label>
-            <input
-              id="bot-name-input"
-              type="text"
-              class="form-text-input"
-              data-testid="bot-name-input"
-              [class.input-error]="botForm.name().invalid() && botForm.name().touched()"
-              [formField]="botForm.name"
-              placeholder="例如: GKE Data Processing Assistant"
-              aria-required="true"
-              [attr.aria-invalid]="botForm.name().invalid() && botForm.name().touched()"
-              [attr.aria-describedby]="botForm.name().invalid() && botForm.name().touched() ? 'bot-name-error' : null"
-            />
-            @if (botForm.name().invalid() && botForm.name().touched()) {
-              <div id="bot-name-error" class="field-error-text" role="alert" data-testid="bot-name-error">
-                {{ botForm.name().errors()[0]?.message || '名稱為必填項目且不可為空白' }}
-              </div>
-            }
-          </div>
-
-          <!-- Description Field (Official Signal Forms Binding, Optional <= 2000 chars) -->
-          <div class="form-field-group">
-            <label for="bot-desc-input" class="form-label">
-              用途說明 (選填，最多 2,000 字元)
-            </label>
-            <textarea
-              id="bot-desc-input"
-              class="form-textarea-input"
-              data-testid="bot-desc-input"
-              rows="3"
-              [class.input-error]="botForm.description().invalid() && botForm.description().touched()"
-              [formField]="botForm.description"
-              placeholder="請簡要說明此 GKE 代理之目標職責、預期任務或所屬領域..."
-              [attr.aria-invalid]="botForm.description().invalid() && botForm.description().touched()"
-              [attr.aria-describedby]="botForm.description().invalid() && botForm.description().touched() ? 'bot-desc-error' : null"
-            ></textarea>
-            @if (botForm.description().invalid() && botForm.description().touched()) {
-              <div id="bot-desc-error" class="field-error-text" role="alert" data-testid="bot-desc-error">
-                {{ botForm.description().errors()[0]?.message || '用途說明長度不可超過 2,000 字元' }}
-              </div>
-            }
-          </div>
-
-          <!-- Pending Instructions Field (Official Signal Forms Binding, Optional <= 10000 chars) -->
-          <div class="form-field-group">
-            <label for="bot-instructions-input" class="form-label">
-              待部署工作指示 (選填，最多 10,000 字元)
-            </label>
-            <div class="field-help-text">
-              配置未來部署至 GKE 叢集時運行之完整工作提示詞規格（目前於本機模擬推論中生效）。
-            </div>
-            <textarea
-              id="bot-instructions-input"
-              class="form-textarea-input instructions-textarea"
-              data-testid="bot-instructions-input"
-              rows="6"
-              [class.input-error]="botForm.instructions().invalid() && botForm.instructions().touched()"
-              [formField]="botForm.instructions"
-              placeholder="輸入待部署工作指示，例如：You are an expert autonomous Kubernetes agent responsible for..."
-              [attr.aria-invalid]="botForm.instructions().invalid() && botForm.instructions().touched()"
-              [attr.aria-describedby]="botForm.instructions().invalid() && botForm.instructions().touched() ? 'bot-instructions-error' : null"
-            ></textarea>
-            @if (botForm.instructions().invalid() && botForm.instructions().touched()) {
-              <div id="bot-instructions-error" class="field-error-text" role="alert" data-testid="bot-instructions-error">
-                {{ botForm.instructions().errors()[0]?.message || '待部署工作指示長度不可超過 10,000 字元' }}
-              </div>
-            }
-          </div>
-
-          <!-- Dialog Footer Actions -->
-          <div class="dialog-actions-footer">
-            <button
-              type="button"
-              class="secondary-dialog-btn"
-              data-testid="cancel-dialog-btn"
-              (click)="closeDialog()"
-            >
-              取消
-            </button>
-            <button
-              type="submit"
-              class="primary-dialog-btn"
-              data-testid="submit-bot-btn"
-              [disabled]="botForm().invalid() || isSubmitting()"
-            >
-              {{ isSubmitting() ? '儲存中...' : (dialogMode() === 'create' ? '儲存定義' : '儲存變更') }}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  </dialog>
+  <app-bot-editor #editor (saved)="onSaved($event)"></app-bot-editor>
 </div>

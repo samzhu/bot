@@ -8,12 +8,6 @@
       }
     </div>
 
-    <!-- Seed Bot Indicator -->
-    <div class="seed-bot-card">
-      <div class="seed-bot-label">Seed Bot</div>
-      <div class="seed-bot-name">{{ seedBot()?.name || 'General Assistant' }}</div>
-    </div>
-
     <!-- View Switcher -->
     <div class="sidebar-view-nav">
       <button
@@ -213,26 +207,20 @@
         <div class="header-main-info">
           <div class="header-title-row">
             <h1 class="header-title" data-testid="chat-header-title">{{ currentTitle() }}</h1>
-            @if (currentBot(); as bot) {
+            @if (specifiedBot(); as bot) {
               @let modeInfo = getModeDisplay(bot);
               <div class="header-bot-meta" data-testid="header-bot-meta">
                 <span class="header-bot-name" [title]="bot.name" data-testid="header-bot-name">{{ bot.name }}</span>
-                <span class="header-bot-target" data-testid="header-bot-target">[{{ bot.target }}]</span>
-                <span
-                  class="header-connection-status"
-                  [class.status-not-connected]="bot.connectionStatus === 'NOT_CONNECTED'"
-                  data-testid="header-connection-status"
-                >
-                  {{ bot.connectionStatus }}
-                </span>
-                <span
-                  class="header-mode-badge"
-                  [class.badge-simulated]="modeInfo.isSimulated"
-                  [class.badge-disabled]="!bot.canChat"
-                  data-testid="header-execution-mode"
-                >
-                  {{ modeInfo.badgeText }}
-                </span>
+                @if (modeInfo.isSimulated || !bot.canChat) {
+                  <span
+                    class="header-mode-badge"
+                    [class.badge-simulated]="modeInfo.isSimulated"
+                    [class.badge-disabled]="!bot.canChat"
+                    data-testid="header-execution-mode"
+                  >
+                    {{ modeInfo.isSimulated ? '模擬' : '停用' }}
+                  </span>
+                }
               </div>
             }
           </div>
@@ -253,17 +241,21 @@
         </div>
       </header>
 
-      @if (currentBot(); as bot) {
+      @if (specifiedBot(); as bot) {
         @let modeInfo = getModeDisplay(bot);
         @if (modeInfo.isSimulated) {
           <div class="simulation-banner" data-testid="simulation-banner" role="status">
-            <span><strong>本機模擬模式：</strong>{{ modeInfo.description }}（真實基礎設施未連線）</span>
+            <span><strong>本機模擬模式：</strong>Bot 以本機模擬執行，正式 Agent 尚未連線。</span>
           </div>
         } @else if (!bot.canChat) {
           <div class="disabled-bot-banner" data-testid="disabled-bot-banner" role="alert">
-            <span><strong>未連線（停用）：</strong>{{ modeInfo.description }}，目前無法發送訊息，草稿內容將被妥善保留。</span>
+            <span><strong>未連線（停用）：</strong>目前無法送出，草稿已保留。</span>
           </div>
         }
+      } @else if (isDefaultBotMissing()) {
+        <div class="disabled-bot-banner" data-testid="default-bot-missing-banner" role="alert">
+          <span><strong>一般助理無法使用：</strong>找不到預設助理，暫時無法送出訊息。</span>
+        </div>
       }
 
     <!-- Pin Error Banners (placed in main area below header, outside scrollable sidebar & chat view) -->

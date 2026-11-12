@@ -361,9 +361,25 @@ describe('Bot Management, Signal Forms & Search/Paging Integration', () => {
     });
   });
 
-  describe('BotManagerComponent & Official Signal Forms', () => {
+  describe('BotManagerComponent (獨立 Bot 管理清單, PDF p.57/66)', () => {
     let fixture: any;
     let component: BotManagerComponent;
+
+    const getBotsCalls = () =>
+      fetchMock.mock.calls
+        .map((c: any[]) => JSON.parse(c[1]?.body || '{}'))
+        .filter((b: any) => b.query?.includes('query GetBots'));
+    const lastGetBots = () => getBotsCalls().at(-1);
+    const text = () => (fixture.nativeElement as HTMLElement).textContent || '';
+    const q = (sel: string) => (fixture.nativeElement as HTMLElement).querySelector(sel) as HTMLElement | null;
+
+    // fetch 為 fake Promise；讓出數個 macrotask 後再重繪，確保 signal 已更新（不依賴 zone）。
+    async function settle() {
+      for (let i = 0; i < 3; i++) {
+        await new Promise(r => setTimeout(r, 0));
+        fixture.detectChanges();
+      }
+    }
 
     beforeEach(async () => {
       await TestBed.configureTestingModule({
@@ -374,525 +390,178 @@ describe('Bot Management, Signal Forms & Search/Paging Integration', () => {
       fixture = TestBed.createComponent(BotManagerComponent);
       component = fixture.componentInstance;
       fixture.detectChanges();
+      await settle();
     });
 
-    it('initializes official Signal Forms botForm with required and maxLength schema', () => {
-      expect(component.botForm).toBeDefined();
-      expect(component.botModel()).toEqual({
-        name: '',
-        description: '',
-        instructions: ''
-      });
-      expect(component.botForm.name().invalid()).toBe(true);
+    it('initial query is fixed to GKE_REMOTE at offset 0 and never lists the default LOCAL bot', () => {
+      const body = lastGetBots();
+      expect(body.variables.target).toBe('GKE_REMOTE');
+      expect(body.variables.offset).toBe(0);
+      expect(component.botStore.bots().every(b => b.target === 'GKE_REMOTE')).toBe(true);
+      expect(q('[data-testid="bot-card-bot-general"]')).toBeNull();
+      expect(q('[data-testid="bot-card-bot-gke-01"]')).not.toBeNull();
     });
 
-    it('validates whitespace-only name as invalid', () => {
-      component.botModel.set({
-        name: '    ',
-        description: '',
-        instructions: ''
-      });
-      expect(component.botForm.name().invalid()).toBe(true);
+    it('does not mutate defaultLocalBot when managing the list', () => {
+      expect(component.botStore.defaultLocalBot()?.id).toBe('bot-general');
     });
 
-    it('validates name with 100 characters plus leading/trailing whitespace as valid', () => {
-      // Trimmed length is exactly 100, so surrounding whitespace is allowed
-      component.botModel.set({
-        name: '   ' + 'a'.repeat(100) + '   ',
-        description: '',
-        instructions: ''
-      });
-      expect(component.botForm.name().valid()).toBe(true);
+    it('never displays a previous general-chat list while the managed query is pending or failed', async () => {
+      component.botStore.bots.set([component.botStore.defaultLocalBot()!]);
+      component.hasManagedResult.set(false);
+      let rejectRequest!: (error: Error) => void;
+      fetchMock.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRequest = reject; }));
+      const pending = component.fetchBots();
+      fixture.detectChanges();
+      expect(q('[data-testid="bots-loading-indicator"]')).not.toBeNull();
+      expect(q('[data-testid="bot-card-bot-general"]')).toBeNull();
+      rejectRequest(new Error('Managed list unavailable'));
+      await expect(pending).rejects.toThrow('Managed list unavailable');
+      fixture.detectChanges();
+      expect(q('[data-testid="bot-store-error"]')).not.toBeNull();
+      expect(q('[data-testid="bot-card-bot-general"]')).toBeNull();
     });
 
-    it('validates name exceeding trimmed length 100 as invalid', () => {
-      component.botModel.set({
-        name: '   ' + 'a'.repeat(101) + '   ',
-        description: '',
-        instructions: ''
-      });
-      expect(component.botForm.name().invalid()).toBe(true);
+    it('shows PDF p.57 wording: 機器人 / 新增 Bot / search placeholder, without GKE agent wording', () => {
+      expect(q('h1')?.textContent?.trim()).toBe('機器人');
+      expect(q('[data-testid="create-bot-modal-btn"]')?.textContent).toContain('新增 Bot');
+      expect(q('[data-testid="bot-search-input"]')?.getAttribute('placeholder')).toBe('搜尋機器人名稱或用途');
+      expect(text()).not.toContain('新增 GKE 代理');
+      expect(text()).not.toContain('開啟草稿');
     });
 
-    it('validates description exceeding 2000 characters as invalid', () => {
-      component.botModel.set({
-        name: 'Valid Name',
-        description: 'd'.repeat(2001),
-        instructions: ''
-      });
-      expect(component.botForm.description().invalid()).toBe(true);
-      expect(component.botForm().invalid()).toBe(true);
+    it('replaces the target select with 全部狀態/未連線 only (no fabricated READY or LOCAL option)', () => {
+      expect(q('[data-testid="target-filter-select"]')).toBeNull();
+      const options = Array.from(
+        (q('[data-testid="status-filter-select"]') as HTMLSelectElement).options
+      ).map(o => [o.value, o.textContent?.trim()]);
+      expect(options).toEqual([
+        ['ALL', '全部狀態'],
+        ['NOT_CONNECTED', '未連線']
+      ]);
+      expect(text()).not.toMatch(/READY|在線|部署完成/);
     });
 
-    it('validates instructions exceeding 10000 characters as invalid', () => {
-      component.botModel.set({
-        name: 'Valid Name',
-        description: '',
-        instructions: 'i'.repeat(10001)
-      });
-      expect(component.botForm.instructions().invalid()).toBe(true);
-      expect(component.botForm().invalid()).toBe(true);
+    it('cards focus on name, purpose and 開始對話/設定; instructions full text and technical details are absent', () => {
+      const card = q('[data-testid="bot-card-bot-gke-01"]') as HTMLElement;
+      expect(card.textContent).toContain('GKE Cloud Data Agent');
+      expect(card.textContent).toContain('負責處理 GKE 數據管線任務');
+      expect(card.textContent).toContain('開始對話');
+      expect(card.textContent).toContain('設定');
+      expect(card.textContent).toContain('本機模擬，GKE尚未串接');
+      expect(card.textContent).not.toContain(mockGkeSimulatedBot.instructions!);
+      expect(card.textContent).not.toMatch(/GKE_REMOTE|LOCAL|NOT_CONNECTED|連線狀態|建立於/);
+      expect(card.querySelector('pre')).toBeNull();
     });
 
-    it('validates valid input as valid form', () => {
-      component.botModel.set({
-        name: 'Valid GKE Agent',
-        description: 'Valid description',
-        instructions: 'Valid instructions'
-      });
-      expect(component.botForm().valid()).toBe(true);
+    it('does not present page size as total, nor invent recent usage or memory data', () => {
+      expect(text()).not.toMatch(/\d+\s*個機器人|最近使用|專屬記憶/);
     });
 
-    it('opens native dialog using showModal()', () => {
-      const dialogNative = document.createElement('dialog');
-      dialogNative.showModal = vi.fn();
-      dialogNative.close = vi.fn();
-      vi.spyOn(component.dialogRef()!, 'nativeElement', 'get').mockReturnValue(
-        dialogNative as any
-      );
-
-      component.openCreateDialog();
-      expect(component.isDialogOpen()).toBe(true);
-      expect(dialogNative.showModal).toHaveBeenCalled();
+    it('copy does not imply group/workspace features nor unconditional simulation; per-card hint carries the real mode', () => {
+      expect(q('.manager-subtitle')?.textContent?.trim()).toBe('管理額外建立的獨立 Bot；一般對話不需建立 Bot。');
+      expect(text()).not.toMatch(/群組|隸屬目前工作區|加入群組/);
+      const foot = q('[data-testid="manager-footnote"]')?.textContent?.trim();
+      expect(foot).toBe('正式 Agent 尚未連線，請依各 Bot 狀態開始對話');
+      // OFF（UNAVAILABLE）卡片不得宣稱可模擬執行；SIMULATION 卡片才顯示模擬
+      const off = q('[data-testid="bot-card-bot-gke-02"]')!.textContent!;
+      expect(off).not.toMatch(/模擬|可開始/);
+      expect(q('[data-testid="bot-card-bot-gke-01"]')!.textContent).toContain('本機模擬');
+      expect(foot).not.toMatch(/模擬/);
     });
 
-    it('closes native dialog without mutation on cancel event (Escape key) and restores focus', async () => {
-      const fakeTrigger = document.createElement('button');
-      fakeTrigger.focus = vi.fn();
-      const dialogNative = document.createElement('dialog');
-      dialogNative.showModal = vi.fn();
-      dialogNative.close = vi.fn();
-      vi.spyOn(component.dialogRef()!, 'nativeElement', 'get').mockReturnValue(
-        dialogNative as any
-      );
-
-      component.openCreateDialog(fakeTrigger);
-      expect(component.isDialogOpen()).toBe(true);
-
-      component.onDialogCancel(new Event('cancel'));
-      expect(component.isDialogOpen()).toBe(false);
-
-      await new Promise(resolve => setTimeout(resolve, 10));
-      expect(fakeTrigger.focus).toHaveBeenCalled();
+    it('shows truthful 未連線 hint for UNAVAILABLE bot, still without enum text', () => {
+      const card = q('[data-testid="bot-card-bot-gke-02"]') as HTMLElement;
+      expect(card.textContent).toContain('未連線');
+      expect(card.textContent).not.toContain('NOT_CONNECTED');
     });
 
-    it('retains user input values upon server error during submitBot', async () => {
-      fetchMock.mockImplementationOnce(() =>
-        Promise.resolve({
-          ok: true,
-          status: 200,
-          json: () =>
-            Promise.resolve({
-              errors: [{ message: 'Network timeout connecting to server' }]
-            })
-        })
-      );
-
-      component.botModel.set({
-        name: 'My Special Agent',
-        description: 'Special description',
-        instructions: 'Special instructions'
-      });
-
-      await component.submitBot();
-
-      expect(component.formError()).toBe('Network timeout connecting to server');
-      expect(component.botModel().name).toBe('My Special Agent');
-      expect(component.botModel().description).toBe('Special description');
-      expect(component.botModel().instructions).toBe('Special instructions');
+    it('emits startChat with the correct bot via 開始對話 (even when canChat is false)', () => {
+      const emitted: BotView[] = [];
+      component.startChat.subscribe(b => emitted.push(b));
+      (q('[data-testid="open-draft-btn-bot-gke-01"]') as HTMLButtonElement).click();
+      (q('[data-testid="open-draft-btn-bot-gke-02"]') as HTMLButtonElement).click();
+      expect(emitted.map(b => b.id)).toEqual(['bot-gke-01', 'bot-gke-02']);
     });
 
-    it('clears form, refetches bots, and closes dialog upon successful submitBot in create mode', async () => {
-      const dialogNative = document.createElement('dialog');
-      dialogNative.showModal = vi.fn();
-      dialogNative.close = vi.fn();
-      dialogNative.open = true;
-      vi.spyOn(component.dialogRef()!, 'nativeElement', 'get').mockReturnValue(
-        dialogNative as any
-      );
+    it('新增 Bot and 設定 delegate to the embedded BotEditorComponent with the trigger element', () => {
+      const editor = component.editor()!;
+      expect(editor).toBeDefined();
+      const createSpy = vi.spyOn(editor, 'openCreate').mockImplementation(() => {});
+      const editSpy = vi.spyOn(editor, 'openEdit').mockImplementation(() => {});
 
-      component.openCreateDialog();
-      component.botModel.set({
-        name: 'Successfully Created Agent',
-        description: 'Good description',
-        instructions: 'Good instructions'
-      });
+      const createBtn = q('[data-testid="create-bot-modal-btn"]') as HTMLButtonElement;
+      createBtn.click();
+      expect(createSpy).toHaveBeenCalledWith(createBtn);
 
-      await component.submitBot();
-
-      expect(component.formError()).toBeNull();
-      expect(component.botModel().name).toBe('');
-      expect(dialogNative.close).toHaveBeenCalled();
+      const editBtn = q('[data-testid="edit-bot-btn-bot-gke-01"]') as HTMLButtonElement;
+      editBtn.click();
+      expect(editSpy).toHaveBeenCalledWith(mockGkeSimulatedBot, editBtn);
     });
 
-    it('preserves raw whitespace and multiline formatting for description and instructions upon submit', async () => {
-      let capturedInput: any = null;
-      fetchMock.mockImplementation((url: string, opts?: any) => {
-        const body = JSON.parse(opts?.body || '{}');
-        if (body.query?.includes('mutation CreateBot')) {
-          capturedInput = body.variables?.input;
-          return Promise.resolve({
-            ok: true,
-            status: 200,
-            json: () =>
-              Promise.resolve({
-                data: {
-                  createBot: {
-                    ...mockGkeSimulatedBot,
-                    id: 'bot-raw-test',
-                    name: capturedInput.name,
-                    description: capturedInput.description,
-                    instructions: capturedInput.instructions
-                  }
-                }
-              })
-          });
-        }
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: () =>
-            Promise.resolve({
-              data: { defaultLocalBot: mockLocalBot, bots: [mockLocalBot] }
-            })
-        });
-      });
-
-      component.openCreateDialog();
-      const rawDesc = '  Leading spaces and \n newline in description  ';
-      const rawInst = '  System instructions:\n\t- Step 1\n\t- Step 2\n  ';
-      component.botModel.set({
-        name: '  Trimmed Bot Name  ',
-        description: rawDesc,
-        instructions: rawInst
-      });
-
-      await component.submitBot();
-
-      expect(capturedInput).not.toBeNull();
-      // Name is strictly trimmed
-      expect(capturedInput.name).toBe('Trimmed Bot Name');
-      // Description and instructions are preserved raw without trimming
-      expect(capturedInput.description).toBe(rawDesc);
-      expect(capturedInput.instructions).toBe(rawInst);
+    it('search resets offset to 0 and keeps the fixed GKE_REMOTE scope', () => {
+      component.currentOffset.set(40);
+      component.onSearchInput({ target: { value: ' Data ' } } as unknown as Event);
+      expect(component.currentOffset()).toBe(0);
+      const body = lastGetBots();
+      expect(body.variables.search).toBe('Data');
+      expect(body.variables.target).toBe('GKE_REMOTE');
+      expect(body.variables.offset).toBe(0);
     });
 
-    describe('Edit Bot Flow & Read-only Protection', () => {
-      it('opens edit dialog with prefilled data for GKE bots', () => {
-        const dialogNative = document.createElement('dialog');
-        dialogNative.showModal = vi.fn();
-        dialogNative.close = vi.fn();
-        vi.spyOn(component.dialogRef()!, 'nativeElement', 'get').mockReturnValue(
-          dialogNative as any
-        );
-
-        component.openEditDialog(mockGkeSimulatedBot);
-
-        expect(component.dialogMode()).toBe('edit');
-        expect(component.editingBotId()).toBe('bot-gke-01');
-        expect(component.botModel().name).toBe(mockGkeSimulatedBot.name);
-        expect(component.botModel().description).toBe(mockGkeSimulatedBot.description);
-        expect(component.botModel().instructions).toBe(mockGkeSimulatedBot.instructions);
-        expect(component.isDialogOpen()).toBe(true);
-        expect(dialogNative.showModal).toHaveBeenCalled();
-      });
-
-      it('strictly forbids opening edit dialog for LOCAL bots (read-only)', () => {
-        const dialogNative = document.createElement('dialog');
-        dialogNative.showModal = vi.fn();
-        vi.spyOn(component.dialogRef()!, 'nativeElement', 'get').mockReturnValue(
-          dialogNative as any
-        );
-
-        component.openEditDialog(mockLocalBot);
-
-        expect(component.isDialogOpen()).toBe(false);
-        expect(dialogNative.showModal).not.toHaveBeenCalled();
-      });
-
-      it('submits updateBot in edit mode and refetches authoritative list', async () => {
-        const dialogNative = document.createElement('dialog');
-        dialogNative.showModal = vi.fn();
-        dialogNative.close = vi.fn();
-        dialogNative.open = true;
-        vi.spyOn(component.dialogRef()!, 'nativeElement', 'get').mockReturnValue(
-          dialogNative as any
-        );
-
-        let updateCalledWith: any = null;
-        fetchMock.mockImplementation((url: string, opts?: any) => {
-          const body = JSON.parse(opts?.body || '{}');
-          if (body.query?.includes('mutation UpdateBot')) {
-            updateCalledWith = body.variables?.input;
-            return Promise.resolve({
-              ok: true,
-              status: 200,
-              json: () =>
-                Promise.resolve({
-                  data: {
-                    updateBot: {
-                      ...mockGkeSimulatedBot,
-                      name: updateCalledWith.name
-                    }
-                  }
-                })
-            });
-          }
-          return Promise.resolve({
-            ok: true,
-            status: 200,
-            json: () =>
-              Promise.resolve({
-                data: { defaultLocalBot: mockLocalBot, bots: [mockLocalBot] }
-              })
-          });
-        });
-
-        component.openEditDialog(mockGkeSimulatedBot);
-        component.botModel.set({
-          name: '  Updated GKE Name  ',
-          description: 'Updated description',
-          instructions: 'Updated instructions'
-        });
-
-        await component.submitBot();
-
-        expect(updateCalledWith).not.toBeNull();
-        expect(updateCalledWith.id).toBe('bot-gke-01');
-        expect(updateCalledWith.name).toBe('Updated GKE Name');
-        expect(updateCalledWith.description).toBe('Updated description');
-        expect(dialogNative.close).toHaveBeenCalled();
-      });
+    it('status change resets offset and never turns into a LOCAL or client-side page filter', async () => {
+      component.currentOffset.set(20);
+      component.onStatusChange({ target: { value: 'NOT_CONNECTED' } } as unknown as Event);
+      expect(component.selectedStatus()).toBe('NOT_CONNECTED');
+      expect(component.currentOffset()).toBe(0);
+      const body = lastGetBots();
+      expect(body.variables.target).toBe('GKE_REMOTE');
+      await settle();
+      // 後端回傳的整頁原樣顯示，前端不二次刪除
+      expect(component.botStore.bots().length).toBe(2);
     });
 
-    describe('Draft Action & Output Contract (startChat)', () => {
-      it('emits startChat output when onOpenDraft is clicked', () => {
-        let emittedBot: BotView | null = null;
-        component.startChat.subscribe((bot: BotView) => {
-          emittedBot = bot;
-        });
-
-        component.onOpenDraft(mockGkeSimulatedBot);
-        expect(emittedBot).toBe(mockGkeSimulatedBot);
-      });
-
-      it('allows opening draft even for bots with canChat: false (OFF mode)', () => {
-        let emittedBot: BotView | null = null;
-        component.startChat.subscribe((bot: BotView) => {
-          emittedBot = bot;
-        });
-
-        // mockGkeDisabledBot has canChat: false
-        expect(mockGkeDisabledBot.canChat).toBe(false);
-        component.onOpenDraft(mockGkeDisabledBot);
-        expect(emittedBot).toBe(mockGkeDisabledBot);
-      });
+    it('paginates with offset steps of 20 while keeping scope and search', () => {
+      component.searchQuery.set('GKE');
+      component.botStore.hasMore.set(true);
+      component.nextPage();
+      expect(component.currentOffset()).toBe(20);
+      expect(lastGetBots().variables).toMatchObject({ search: 'GKE', target: 'GKE_REMOTE', offset: 20 });
+      component.prevPage();
+      expect(component.currentOffset()).toBe(0);
     });
 
-    describe('Search, Target Filtering, Stable Pagination & Counter-Examples', () => {
-      it('triggers backend search and resets offset to 0 on search input', async () => {
-        component.currentOffset.set(40);
+    it('renders an empty state for an empty result', async () => {
+      component.onSearchInput({ target: { value: 'no-such-bot' } } as unknown as Event);
+      await settle();
+      expect(q('[data-testid="bots-empty-state"]')).not.toBeNull();
+    });
 
-        const fakeEvent = {
-          target: { value: 'Data' }
-        } as unknown as Event;
-
-        component.onSearchInput(fakeEvent);
-
-        expect(component.searchQuery()).toBe('Data');
-        expect(component.currentOffset()).toBe(0);
-
-        // Verify last fetch query carried search variable
-        const lastCall = fetchMock.mock.calls[fetchMock.mock.calls.length - 1];
-        const body = JSON.parse(lastCall[1].body);
-        expect(body.variables.search).toBe('Data');
-      });
-
-      it('triggers backend target filtering and resets offset to 0 on target change', async () => {
+    describe('saved from editor: refresh contract', () => {
+      it('goes back to offset 0 and refetches with active search; no mutation is sent by the manager', async () => {
+        component.searchQuery.set('Data');
         component.currentOffset.set(20);
+        const before = fetchMock.mock.calls.length;
 
-        const fakeEvent = {
-          target: { value: 'LOCAL' }
-        } as unknown as Event;
+        await component.onSaved(mockGkeSimulatedBot);
 
-        component.onTargetChange(fakeEvent);
-
-        expect(component.selectedTarget()).toBe('LOCAL');
-        expect(component.currentOffset()).toBe(0);
-
-        const lastCall = fetchMock.mock.calls[fetchMock.mock.calls.length - 1];
-        const body = JSON.parse(lastCall[1].body);
-        expect(body.variables.target).toBe('LOCAL');
-      });
-
-      it('handles pagination navigation via prevPage and nextPage', async () => {
-        component.currentOffset.set(0);
-        component.botStore.hasMore.set(true);
-
-        component.nextPage();
-        expect(component.currentOffset()).toBe(20);
-
-        component.prevPage();
+        const newCalls = fetchMock.mock.calls
+          .slice(before)
+          .map((c: any[]) => JSON.parse(c[1]?.body || '{}'));
+        expect(newCalls.length).toBe(1);
+        expect(newCalls[0].query).toContain('query GetBots');
+        expect(newCalls[0].variables).toMatchObject({ search: 'Data', target: 'GKE_REMOTE', offset: 0 });
         expect(component.currentOffset()).toBe(0);
       });
 
-      it('Counter-example 1: creating GKE bot while active filter is LOCAL does not display GKE bot in LOCAL list', async () => {
-        // Active filter is set to LOCAL
-        component.selectedTarget.set('LOCAL');
-
-        fetchMock.mockImplementation((url: string, opts?: any) => {
+      it('refresh failure only exposes list retry and never re-sends a mutation', async () => {
+        let mutationCount = 0;
+        fetchMock.mockImplementation((_url: string, opts?: any) => {
           const body = JSON.parse(opts?.body || '{}');
-          if (body.query?.includes('mutation CreateBot')) {
-            return Promise.resolve({
-              ok: true,
-              status: 200,
-              json: () =>
-                Promise.resolve({
-                  data: {
-                    createBot: {
-                      ...mockGkeSimulatedBot,
-                      id: 'bot-gke-new',
-                      name: 'Newly Created GKE Agent',
-                      target: 'GKE_REMOTE'
-                    }
-                  }
-                })
-            });
+          if (body.query?.includes('mutation')) {
+            mutationCount++;
           }
           if (body.query?.includes('query GetBots')) {
-            // Backend strictly enforces target filter
-            const target = body.variables?.target;
-            if (target === 'LOCAL') {
-              return Promise.resolve({
-                ok: true,
-                status: 200,
-                json: () =>
-                  Promise.resolve({
-                    data: {
-                      defaultLocalBot: mockLocalBot,
-                      bots: [mockLocalBot] // Only LOCAL bots returned
-                    }
-                  })
-              });
-            }
-          }
-          return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ data: {} }) });
-        });
-
-        component.openCreateDialog();
-        component.botModel.set({
-          name: 'Newly Created GKE Agent',
-          description: 'GKE description',
-          instructions: 'GKE instructions'
-        });
-
-        await component.submitBot();
-
-        // The list must be strictly reconciled by fetchBots with active filter (LOCAL)
-        expect(component.botStore.bots().length).toBe(1);
-        expect(component.botStore.bots()[0].target).toBe('LOCAL');
-        expect(component.botStore.bots().some(b => b.target === 'GKE_REMOTE')).toBe(false);
-      });
-
-      it('Counter-example 2: after edit mutation, older in-flight background query responses do not overwrite post-mutation list', async () => {
-        let resolveStaleSearch: any = null;
-        const staleSearchPromise = new Promise(resolve => {
-          resolveStaleSearch = resolve;
-        });
-
-        // Trigger an initial search that hangs in flight
-        fetchMock.mockImplementationOnce(() => staleSearchPromise);
-        component.onSearchInput({ target: { value: 'OldSearchTerm' } } as any);
-
-        // While that search is in-flight, user edits a bot and submits
-        fetchMock.mockImplementation((url: string, opts?: any) => {
-          const body = JSON.parse(opts?.body || '{}');
-          if (body.query?.includes('mutation UpdateBot')) {
-            return Promise.resolve({
-              ok: true,
-              status: 200,
-              json: () =>
-                Promise.resolve({
-                  data: {
-                    updateBot: {
-                      ...mockGkeSimulatedBot,
-                      name: 'Authoritative Edited Bot'
-                    }
-                  }
-                })
-            });
-          }
-          if (body.query?.includes('query GetBots')) {
-            return Promise.resolve({
-              ok: true,
-              status: 200,
-              json: () =>
-                Promise.resolve({
-                  data: {
-                    defaultLocalBot: mockLocalBot,
-                    bots: [{ ...mockGkeSimulatedBot, name: 'Authoritative Edited Bot' }]
-                  }
-                })
-            });
-          }
-          return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ data: {} }) });
-        });
-
-        component.openEditDialog(mockGkeSimulatedBot);
-        component.botModel.set({
-          name: 'Authoritative Edited Bot',
-          description: '',
-          instructions: ''
-        });
-        await component.submitBot();
-
-        expect(component.botStore.bots()[0].name).toBe('Authoritative Edited Bot');
-
-        // Now the old hanging search finally resolves with stale data
-        resolveStaleSearch({
-          ok: true,
-          status: 200,
-          json: () =>
-            Promise.resolve({
-              data: {
-                defaultLocalBot: mockLocalBot,
-                bots: [{ ...mockLocalBot, name: 'Stale Outdated Result' }]
-              }
-            })
-        });
-        await new Promise(resolve => setTimeout(resolve, 20));
-
-        // Stale result must be discarded; store remains on Authoritative Edited Bot!
-        expect(component.botStore.bots()[0].name).toBe('Authoritative Edited Bot');
-        expect(component.botStore.bots().some(b => b.name === 'Stale Outdated Result')).toBe(false);
-      });
-
-      it('separates mutation execution from list refetch: when create mutation succeeds but subsequent list refetch fails with 500, dialog is closed, form is cleared, error banner allows retry without resubmitting mutation', async () => {
-        let createCallCount = 0;
-        let getBotsCallCount = 0;
-
-        fetchMock.mockImplementation((url: string, opts?: any) => {
-          const body = JSON.parse(opts?.body || '{}');
-          if (body.query?.includes('mutation CreateBot')) {
-            createCallCount++;
-            return Promise.resolve({
-              ok: true,
-              status: 200,
-              json: () =>
-                Promise.resolve({
-                  data: {
-                    createBot: {
-                      ...mockGkeSimulatedBot,
-                      id: 'bot-gke-500-test',
-                      name: 'Resilient Bot'
-                    }
-                  }
-                })
-            });
-          }
-          if (body.query?.includes('query GetBots')) {
-            getBotsCallCount++;
-            // Post-mutation refetch fails with 500
             return Promise.resolve({
               ok: false,
               status: 500,
@@ -902,58 +571,80 @@ describe('Bot Management, Signal Forms & Search/Paging Integration', () => {
           return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ data: {} }) });
         });
 
-        component.openCreateDialog();
-        component.botModel.set({
-          name: 'Resilient Bot',
-          description: 'Valid description',
-          instructions: 'Valid instructions'
-        });
-
-        // Submit creation
-        await component.submitBot();
-
-        // 1. Mutation must have been called exactly once
-        expect(createCallCount).toBe(1);
-
-        // 2. Dialog is closed and form model is cleared so user cannot resubmit mutation
-        expect(component.isDialogOpen()).toBe(false);
-        expect(component.botModel().name).toBe('');
-        // Form-level error banner inside dialog is null (not falsely reporting save failure)
-        expect(component.formError()).toBeNull();
-
-        // 3. Global botStore.error is set, showing manager error banner with retry option
+        await component.onSaved(mockGkeSimulatedBot);
+        await settle();
         expect(component.botStore.error()).toContain('500');
+        expect(q('[data-testid="bot-store-error"]')).not.toBeNull();
 
-        // 4. When user clicks retry on list error banner, it calls fetchBots() and does NOT re-send mutation
-        // Configure refetch to succeed on retry
-        fetchMock.mockImplementation((url: string, opts?: any) => {
+        fetchMock.mockImplementation((_url: string, opts?: any) => {
           const body = JSON.parse(opts?.body || '{}');
-          if (body.query?.includes('mutation CreateBot')) {
-            createCallCount++;
-            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ data: {} }) });
+          if (body.query?.includes('mutation')) {
+            mutationCount++;
           }
-          if (body.query?.includes('query GetBots')) {
-            return Promise.resolve({
-              ok: true,
-              status: 200,
-              json: () =>
-                Promise.resolve({
-                  data: {
-                    defaultLocalBot: mockLocalBot,
-                    bots: [{ ...mockGkeSimulatedBot, id: 'bot-gke-500-test', name: 'Resilient Bot' }]
-                  }
-                })
-            });
-          }
-          return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ data: {} }) });
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ data: { defaultLocalBot: mockLocalBot, bots: [mockGkeSimulatedBot] } })
+          });
         });
+        (q('.retry-link-btn') as HTMLButtonElement).click();
+        await settle();
 
-        await component.fetchBots();
-
-        // Mutation count is STILL strictly 1: zero duplicate bot creation!
-        expect(createCallCount).toBe(1);
+        expect(mutationCount).toBe(0);
         expect(component.botStore.error()).toBeNull();
-        expect(component.botStore.bots()[0].name).toBe('Resilient Bot');
+        expect(component.botStore.bots()[0].id).toBe('bot-gke-01');
+      });
+    });
+
+    describe('stale response protection', () => {
+      it('an older slow search response never overwrites a newer result', async () => {
+        let resolveStale: any;
+        const stale = new Promise(resolve => (resolveStale = resolve));
+        fetchMock.mockImplementationOnce(() => stale);
+        component.onSearchInput({ target: { value: 'Old' } } as any);
+
+        fetchMock.mockImplementation(() =>
+          Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                data: { defaultLocalBot: mockLocalBot, bots: [{ ...mockGkeSimulatedBot, name: 'Fresh Result' }] }
+              })
+          })
+        );
+        component.onSearchInput({ target: { value: 'New' } } as any);
+        await settle();
+        expect(component.botStore.bots()[0].name).toBe('Fresh Result');
+
+        resolveStale({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve({ data: { defaultLocalBot: mockLocalBot, bots: [{ ...mockLocalBot, name: 'Stale Result' }] } })
+        });
+        await new Promise(r => setTimeout(r, 20));
+        expect(component.botStore.bots()[0].name).toBe('Fresh Result');
+      });
+
+      it('an older failed response does not set error over a newer success', async () => {
+        let rejectStale: any;
+        const stale = new Promise((_, reject) => (rejectStale = reject));
+        fetchMock.mockImplementationOnce(() => stale);
+        component.onSearchInput({ target: { value: 'Old' } } as any);
+        fetchMock.mockImplementation(() =>
+          Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ data: { defaultLocalBot: mockLocalBot, bots: [mockGkeSimulatedBot] } })
+          })
+        );
+        component.onSearchInput({ target: { value: 'New' } } as any);
+        await settle();
+        rejectStale(new Error('late failure'));
+        await new Promise(r => setTimeout(r, 20));
+        expect(component.botStore.error()).toBeNull();
+        expect(component.botStore.bots().length).toBe(1);
       });
     });
   });
