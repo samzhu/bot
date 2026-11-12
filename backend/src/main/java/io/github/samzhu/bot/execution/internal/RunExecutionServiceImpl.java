@@ -55,6 +55,8 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
     private final SessionService sessionService;
     private final RunRegistry runRegistry;
     private final ChatModel chatModel;
+    private final UsageInvocation usageInvocation;
+    private final reactor.core.scheduler.Scheduler providerDispatchScheduler;
     private final TaskScheduler taskScheduler;
     private final RunProperties runProperties;
     private final int windowTurns;
@@ -68,6 +70,8 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
             SessionService sessionService,
             RunRegistry runRegistry,
             ChatModel chatModel,
+            UsageInvocation usageInvocation,
+            @org.springframework.beans.factory.annotation.Qualifier("providerDispatchScheduler") reactor.core.scheduler.Scheduler providerDispatchScheduler,
             TaskScheduler botTaskScheduler,
             RunProperties runProperties,
             @Value("${bot.conversation.window-turns:10}") int windowTurns) {
@@ -79,6 +83,8 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         this.sessionService = sessionService;
         this.runRegistry = runRegistry;
         this.chatModel = chatModel;
+        this.usageInvocation = usageInvocation;
+        this.providerDispatchScheduler = providerDispatchScheduler;
         this.taskScheduler = botTaskScheduler;
         this.runProperties = runProperties;
         this.windowTurns = windowTurns;
@@ -235,6 +241,15 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         // Why startScheduledTasks after sendStarted: prevents deadline or heartbeat frames from interleaving before seq 1.
         handle.startScheduledTasks(taskScheduler, runProperties.getTimeout(), runProperties.getHeartbeatInterval());
 
+        final UsageInvocation.Attempt usageAttempt;
+        try {
+            // Persist the attempt before Session mutation or any provider invocation.
+            usageAttempt = usageInvocation.begin(runId, conv.workspaceId(), userId, handle);
+        } catch (RuntimeException ex) {
+            handle.fail("Usage ledger unavailable");
+            return new StartRunOutcome(StartRunOutcome.Type.STARTED, toView(newRun), emitter, null);
+        }
+
         // 6. Build prompt context using standard SessionService findOrCreate & bounded getActiveMessages (last 10 turns = 20 messages)
         List<org.springframework.ai.chat.messages.Message> aiMessages = new ArrayList<>();
         try {
@@ -259,6 +274,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
             aiMessages.add(new UserMessage(message));
         } catch (Exception ex) {
             log.error("Failed to assemble prompt instructions for run {}", runId, ex);
+            usageInvocation.notDispatchedSafely(usageAttempt.id(), "PROMPT_CONTEXT_UNAVAILABLE");
             handle.fail("Failed to build prompt context: " + ex.getMessage());
             return new StartRunOutcome(StartRunOutcome.Type.STARTED, toView(newRun), emitter, null);
         }
@@ -278,13 +294,16 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         // Re-enter the fair gate so a cancellation already waiting since publication wins
         // before the asynchronous subscription is scheduled. The model runs off-gate.
         String schedulingError = null;
+        boolean subscriptionStarted = false;
         var deferredFailure = new java.util.concurrent.atomic.AtomicReference<String>();
         lifecycleGate.lock();
         try {
             if (chatModel instanceof StreamingChatModel streamingModel) {
                 try {
-                    handle.startSubscription(() -> Flux.defer(() -> streamingModel.stream(new Prompt(aiMessages)))
-                            .subscribeOn(Schedulers.boundedElastic())
+                    subscriptionStarted = handle.startSubscription(() -> usageInvocation.stream(chatModel, new Prompt(aiMessages), usageAttempt, conversationId, conv.workspaceId(), userId, handle)
+                            .subscribeOn(providerDispatchScheduler)
+                            // Observe cancellation even when the worker has not subscribed to the source yet.
+                            .doOnCancel(() -> usageInvocation.finalizeCancellationAsync(usageAttempt, handle))
                             .subscribe(
                                     chatResponse -> {
                                         if (chatResponse != null && chatResponse.getResult() != null && chatResponse.getResult().getOutput() != null) {
@@ -310,12 +329,11 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                  * as an empty Mono until the deadline scheduler fires.
                  */
                 try {
-                    handle.startSubscription(() -> Mono.fromCallable(() -> {
-                                var response = chatModel.call(new Prompt(aiMessages));
-                                Objects.requireNonNull(response, "Model call returned null ChatResponse");
-                                return response;
-                            })
-                            .subscribeOn(Schedulers.boundedElastic())
+                    subscriptionStarted = handle.startSubscription(() -> usageInvocation.call(chatModel, new Prompt(aiMessages), usageAttempt,
+                                    conversationId, conv.workspaceId(), userId, handle)
+                            .subscribeOn(providerDispatchScheduler)
+                            // Observe cancellation even when the worker has not subscribed to the source yet.
+                            .doOnCancel(() -> usageInvocation.finalizeCancellationAsync(usageAttempt, handle))
                             .subscribe(
                                     response -> {
                                         if (response.getResult() != null && response.getResult().getOutput() != null) {
@@ -337,6 +355,9 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
 
         } finally {
             lifecycleGate.unlock();
+        }
+        if (!subscriptionStarted) {
+            usageInvocation.notDispatchedSafely(usageAttempt.id(), "RUN_TERMINATED_BEFORE_DISPATCH");
         }
         if (schedulingError != null) {
             handle.fail(schedulingError);

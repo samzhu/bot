@@ -1,6 +1,8 @@
 package io.github.samzhu.bot.execution.internal.model;
 
 import com.google.genai.Client;
+import com.google.genai.types.HttpOptions;
+import com.google.genai.types.HttpRetryOptions;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.google.genai.GoogleGenAiChatModel;
 import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
@@ -36,7 +38,13 @@ public class GoogleGenAiManualConfig {
         }
         return Client.builder()
                 .apiKey(apiKey.trim())
+                .httpOptions(providerHttpOptions())
                 .build();
+    }
+
+    public static HttpOptions providerHttpOptions() {
+        // The SDK's default retries the tested initial 503; other hidden retry paths remain unverified.
+        return HttpOptions.builder().retryOptions(HttpRetryOptions.builder().attempts(1).build()).build();
     }
 
     @Bean

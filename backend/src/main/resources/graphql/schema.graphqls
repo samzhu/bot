@@ -103,3 +103,32 @@ type Mutation {
   createBot(input: CreateBotInput!): Bot!
   updateBot(input: UpdateBotInput!): Bot!
 }
+
+enum AttemptCoverage { VERIFIED UNKNOWN }
+enum UsagePresence { PENDING PRESENT ABSENT UNKNOWN }
+enum CaptureCompleteness { COMPLETE INCOMPLETE UNKNOWN }
+enum RawUsageState { JSONB TEXT_FALLBACK UNAVAILABLE }
+enum ProjectionState { VALID MISSING UNKNOWN }
+enum NativeValuePresence { PRESENT NULL_VALUE MISSING UNKNOWN }
+type NativeUsageValue { value: String presence: NativeValuePresence! meaning: String! }
+type UsageCost { status: String! amount: String currency: String! }
+type UsagePageInfo { hasNextPage: Boolean! endCursor: String }
+type UsageAttemptConnection { nodes: [UsageAttempt!]! pageInfo: UsagePageInfo! }
+type UsageSnapshotConnection { nodes: [UsageSnapshot!]! pageInfo: UsagePageInfo! }
+type UsageAttempt {
+ id: ID! workspaceId: ID! runId: ID providerRequestId: String providerResponseId: String preparedAt: String! startedAt: String finishedAt: String
+ provider: String! endpoint: String! model: String! channel: String! executionOutcome: String!
+ usagePresence: UsagePresence! captureCompleteness: CaptureCompleteness! projectionError: String
+ projectionState: ProjectionState! projectionVersion: String! effectiveSnapshotId: ID simulation: Boolean! attemptCoverage: AttemptCoverage!
+ input: NativeUsageValue! output: NativeUsageValue! cacheRead: NativeUsageValue! cacheWrite: NativeUsageValue!
+ cost: UsageCost! snapshots(first: Int = 20, after: String): UsageSnapshotConnection!
+}
+type UsageSnapshot {
+ id: ID! eventId: String! ordinal: String! semantic: String! sourceLayer: String! schemaVersion: String!
+ adapterVersion: String! captureVersion: String! captureCompleteness: CaptureCompleteness! rawState: RawUsageState!
+ rawUsage: String captureReason: String capturedAt: String!
+}
+extend type Query {
+ myUsageAttempts(workspaceId: ID!, first: Int = 20, after: String): UsageAttemptConnection!
+ myUsageAttempt(workspaceId: ID!, id: ID!): UsageAttempt
+}

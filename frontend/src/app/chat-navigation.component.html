@@ -12,6 +12,7 @@
   @else if (!workspaceLoading() && !workspaces().length) { <p>目前沒有可存取的工作區。</p> }
 
   @if (initializing()) { <p role="status">載入中…</p> }
+  <button type="button" [disabled]="initializing() || !workspaceId()" (click)="openUsage()">個人用量</button>
   <div class="modes" aria-label="功能選擇">
     <button type="button" data-testid="nav-conversations" [attr.aria-pressed]="mode() === 'conversations'" (click)="selectMode('conversations')">對話列表</button>
     <button type="button" data-testid="nav-bots" [attr.aria-pressed]="mode() === 'bots'" (click)="selectMode('bots')">Bot</button>

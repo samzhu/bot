@@ -14,6 +14,18 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 @Configuration
 public class ExecutionConfiguration {
 
+    // The injectable scheduler makes a queued dispatch cancellable and deterministically testable.
+    @Bean(destroyMethod = "")
+    public reactor.core.scheduler.Scheduler providerDispatchScheduler() {
+        return reactor.core.scheduler.Schedulers.boundedElastic();
+    }
+
+    // Separate from provider streams so blocked SDK calls cannot starve cancellation accounting.
+    @Bean(destroyMethod = "dispose")
+    public reactor.core.scheduler.Scheduler usageFinalizationScheduler() {
+        return reactor.core.scheduler.Schedulers.newBoundedElastic(2, 1000, "usage-finalization");
+    }
+
     @Bean
     public ThreadPoolTaskScheduler botTaskScheduler() {
         ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();

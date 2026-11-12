@@ -48,6 +48,48 @@ public class RunHandle {
     private final StringBuilder fullReply = new StringBuilder();
 
     private boolean terminal = false;
+    private enum DispatchClaim { PENDING, PREPARING, AUTHORIZED, DISPATCHED, CANCELLED }
+    private final Object dispatchLock = new Object();
+    private final java.util.List<DispatchGate> dispatchGates = new java.util.ArrayList<>();
+    private boolean dispatchStopped;
+
+    public final class DispatchGate {
+        private DispatchClaim state = DispatchClaim.PENDING;
+        public boolean prepare() {
+            synchronized (dispatchLock) {
+                if (dispatchStopped || state != DispatchClaim.PENDING) return false;
+                state = DispatchClaim.PREPARING;
+                return true;
+            }
+        }
+        public java.time.Instant authorize(java.time.Clock clock) {
+            synchronized (dispatchLock) {
+                if (dispatchStopped || state != DispatchClaim.PREPARING) return null;
+                // The dispatch decision and its clock sample share one short in-memory boundary.
+                java.time.Instant time = clock.instant();
+                state = DispatchClaim.AUTHORIZED;
+                return time;
+            }
+        }
+        public boolean confirm() {
+            synchronized (dispatchLock) {
+                if (dispatchStopped || state != DispatchClaim.AUTHORIZED) return false;
+                state = DispatchClaim.DISPATCHED;
+                return true;
+            }
+        }
+        public boolean dispatched() {
+            synchronized (dispatchLock) { return state == DispatchClaim.DISPATCHED; }
+        }
+    }
+    public DispatchGate newDispatchGate() {
+        synchronized (dispatchLock) {
+            DispatchGate gate = new DispatchGate();
+            if (dispatchStopped) gate.state = DispatchClaim.CANCELLED;
+            dispatchGates.add(gate);
+            return gate;
+        }
+    }
     private enum TerminalClaim { ACTIVE, CANCEL_REQUESTED, FINALIZING }
     private final java.util.concurrent.atomic.AtomicReference<TerminalClaim> terminalClaim =
             new java.util.concurrent.atomic.AtomicReference<>(TerminalClaim.ACTIVE);
@@ -106,6 +148,7 @@ public class RunHandle {
         });
         this.emitter.onTimeout(() -> {
             synchronized (lock) {
+                stopUndispatched();
                 if (terminal || !terminalClaim.compareAndSet(TerminalClaim.ACTIVE, TerminalClaim.FINALIZING)) return;
                 /*
                  * RATIONALE: Servlet container timeout callback is the container's error notification/cleanup mechanism.
@@ -184,14 +227,30 @@ public class RunHandle {
     // The CAS orders cancellation against terminal callbacks without waiting for an
     // emitter write while the caller holds the shared lifecycle stripe.
     public void requestCancellation() {
+        stopUndispatched();
         terminalClaim.compareAndSet(TerminalClaim.ACTIVE, TerminalClaim.CANCEL_REQUESTED);
     }
 
+    public boolean cancellationRequested() {
+        return terminalClaim.get() == TerminalClaim.CANCEL_REQUESTED;
+    }
+
+    // Claim and cancellation hold this lock only for in-memory state; no I/O occurs here.
+    private void stopUndispatched() {
+        synchronized (dispatchLock) {
+            dispatchStopped = true;
+            for (DispatchGate gate : dispatchGates) {
+                if (gate.state == DispatchClaim.PENDING || gate.state == DispatchClaim.PREPARING || gate.state == DispatchClaim.AUTHORIZED) gate.state = DispatchClaim.CANCELLED;
+            }
+        }
+    }
+
     // The caller also holds the lifecycle stripe, ordering this check with cancellation.
-    public void startSubscription(java.util.function.Supplier<Disposable> subscribe) {
+    public boolean startSubscription(java.util.function.Supplier<Disposable> subscribe) {
         synchronized (lock) {
-            if (terminal || terminalClaim.get() != TerminalClaim.ACTIVE) return;
+            if (terminal || terminalClaim.get() != TerminalClaim.ACTIVE) return false;
             swapDisposable.update(subscribe.get());
+            return true;
         }
     }
 
@@ -272,6 +331,7 @@ public class RunHandle {
     }
 
     public void fail(String errorMessage) {
+        stopUndispatched();
         synchronized (lock) {
             if (terminal || !terminalClaim.compareAndSet(TerminalClaim.ACTIVE, TerminalClaim.FINALIZING)) return;
             clearScheduledTasks();
@@ -431,6 +491,7 @@ public class RunHandle {
     }
 
     private void handleWriteFailure(String reason) {
+        stopUndispatched();
         if (terminal || !terminalClaim.compareAndSet(TerminalClaim.ACTIVE, TerminalClaim.FINALIZING)) return;
         terminal = true;
         clearScheduledTasks();

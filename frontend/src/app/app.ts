@@ -1,3 +1,4 @@
+import { UsageComponent } from './usage.component';
 import { WorkspaceStore } from './workspace.store';
 import {
   Component,
@@ -49,7 +50,8 @@ export interface GraphQLMessageView {
     CommonModule,
     BotManagerComponent,
     ChatNavigationComponent,
-    ChatSurfaceComponent
+    ChatSurfaceComponent,
+    UsageComponent
   ],
   templateUrl: './app.html',
   styleUrl: './app.css'
@@ -147,7 +149,7 @@ export class App implements OnInit {
   readonly botStore = inject(BotStore);
 
   // View state: 'chat' for conversation view, 'bots' for Bot Manager view
-  readonly currentView = signal<'chat' | 'bots'>('chat');
+  readonly currentView = signal<'chat' | 'bots' | 'usage'>('chat');
 
   // Generation counter to guard against late async responses overwriting current selection
   private selectionGeneration = 0;
@@ -402,11 +404,13 @@ export class App implements OnInit {
 
   async selectWorkspace(id: string): Promise<void> {
     if (id === this.workspaces.selectedId() || !this.workspaces.workspaces().some(item => item.id === id)) return;
+    const wasUsage = this.currentView() === 'usage';
     this.selectionGeneration++;
     this.workspaces.select(id);
     this.conversationStore.setWorkspace(id);
     this.navigation()?.setWorkspace(id);
     await this.newConversation();
+    if (wasUsage) this.currentView.set('usage');
     try { await this.conversationStore.loadConversations(false); }
     catch { if (this.workspaces.selectedId() === id) this.streamError.set('工作區對話載入失敗，請重試。'); }
   }

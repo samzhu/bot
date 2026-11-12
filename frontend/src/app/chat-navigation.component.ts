@@ -29,6 +29,7 @@ export class ChatNavigationComponent implements OnInit {
   readonly botSelected = output<BotView>();
   readonly modeSelected = output<'conversations' | 'bots'>();
   readonly newChatRequested = output<void>();
+  readonly usageRequested = output<void>();
   readonly layoutModeChanged = output<ChatSidenavMode>();
 
   readonly conversations = inject(ConversationListStore);
@@ -112,6 +113,7 @@ export class ChatNavigationComponent implements OnInit {
     if (event.shiftKey && (active === controls[0] || !dialog?.contains(active))) { event.preventDefault(); controls[controls.length - 1].focus(); }
     else if (!event.shiftKey && (active === controls[controls.length - 1] || !dialog?.contains(active))) { event.preventDefault(); controls[0].focus(); }
   }
+  openUsage(): void { this.search.closeSearch(); this.usageRequested.emit(); if (this.layoutMode() === 'drawer') this.setNavigationOpen(false); }
   newChat(): void {
     this.search.closeSearch();
     this.newChatRequested.emit();

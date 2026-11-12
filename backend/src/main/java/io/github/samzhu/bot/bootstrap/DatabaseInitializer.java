@@ -37,6 +37,13 @@ public class DatabaseInitializer implements ApplicationRunner {
 
         applyMigrations("classpath:db/migration/*.sql", "schema_version");
 
+        // In-flight provider attempts cannot be assumed free or complete after a process restart.
+        jdbcTemplate.update("""
+            UPDATE provider_attempt SET execution_outcome='UNKNOWN', usage_presence='UNKNOWN',
+                projection_state='UNKNOWN', projection_error='PROCESS_RESTART', projection_version=projection_version+1
+            WHERE execution_outcome='IN_PROGRESS'
+        """);
+
         // Server restart recovery: transition lingering PENDING/RUNNING runs to FAILED
         int recovered = jdbcTemplate.update("""
             UPDATE chat_run

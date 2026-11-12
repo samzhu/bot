@@ -140,6 +140,26 @@ describe('App ThreadPlane public behavior', () => {
     expect(app.currentTitle()).toBe('deep-Y'); expect(app.chatAgent()).toBe(agent); expect(app.navigation()?.deepActive().map(item => item.id)).toEqual(['deep-Y']);
     expect(app.conversations().some(item => item.id === 'new-X')).toBe(true);
   });
+  it('opens personal usage and returns to the same unsent chat draft', async () => {
+    const {app,fixture,root} = await setup(); app.chatDraftChanged('unsent draft'); fixture.detectChanges();
+    const usage = Array.from(root.querySelectorAll('button')).find(button => button.textContent?.includes('個人用量'));
+    expect(usage).toBeTruthy(); usage!.click(); fixture.detectChanges();
+    expect(root.querySelector('app-usage')).toBeTruthy();
+    const back = Array.from(root.querySelectorAll('button')).find(button => button.textContent?.includes('返回對話'));
+    back!.click(); fixture.detectChanges(); expect(app.chatSession().draft()).toBe('unsent draft');
+  });
+  it('keeps a background run alive while visiting personal usage', async () => {
+    const {app,fixture,root} = await setup(); const running = deferred<{status:'COMPLETED'}>();
+    vi.spyOn(app.chatTransport,'createConversation').mockResolvedValue('usage-run');
+    vi.spyOn(app.chatTransport,'run').mockReturnValue(running.promise);
+    app.openBotDraft(botA); app.chatDraftChanged('question'); app.submitChat('question');
+    await vi.waitFor(() => expect(app.currentConversationId()).toBe('usage-run'));
+    fixture.detectChanges(); Array.from(root.querySelectorAll('button')).find(b => b.textContent?.includes('個人用量'))!.click(); fixture.detectChanges();
+    expect(app.chatSessions.session('conversation:usage-run').active()).toBe(true);
+    running.resolve({status:'COMPLETED'}); await vi.waitFor(() => expect(app.chatSessions.session('conversation:usage-run').active()).toBe(false));
+    fixture.detectChanges(); Array.from(root.querySelectorAll('button')).find(b => b.textContent?.includes('返回對話'))!.click(); fixture.detectChanges();
+    expect(app.currentConversationId()).toBe('usage-run'); expect(app.chatSession().result()?.status).toBe('COMPLETED');
+  });
   it('renders native window and composer with the general chat title', async () => {
     const {root} = await setup();
     expect(root.querySelector('chat-window')).toBeTruthy();

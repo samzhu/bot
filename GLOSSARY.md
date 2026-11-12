@@ -14,6 +14,8 @@ Ubiquitous language defining the core domain concepts for the chat system.
 * **Message**: 對話歷程中由特定角色（USER、ASSISTANT、SYSTEM）提供的單一文字或內容發言。
 * **Run**: 一次從使用者請求發起到達成終態（完成、失敗或取消）的完整生成執行生命週期。
   * _Avoid_: Generation（單次模型文字候選）。
+* **ProviderAttempt**: 一筆模型供應商呼叫的嘗試紀錄，可在派送前終止；一個 Run 可包含多筆。
+* **UsageSnapshot**: 一次嘗試中的不可變原生用量或缺失證據紀錄，可有多個快照。
 * **Session**: 提供給模型延續對話上下文狀態、短期記憶與相關事件的脈絡工作區。
   * _Avoid_: Conversation（使用者完整歷史歷程）。
 * **SessionEvent**: 模型推論脈絡（Session）中所記錄的一件原子事件。
