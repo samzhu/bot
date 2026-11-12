@@ -8,6 +8,7 @@ const tag = `B28-${Date.now().toString(36)}`;
 const pageTag = process.env.BOT_PAGINATION_TAG || tag;
 const t = id => `[data-testid="${id}"]`;
 let mutations = 0, failRead = false, reads = 0, injected = 0, botId;
+let holdMutation = false, failMutation = false, releaseMutation;
 const fields = 'id name description instructions target executionMode connectionStatus canChat';
 const set = (selector, value) => page.$eval(selector, (e, v) => { e.value = v; e.dispatchEvent(new Event('input', { bubbles: true })); }, value);
 const shot = name => page.screenshot({ path: join(artifactsDir, name), fullPage: true });
@@ -22,10 +23,14 @@ try {
     return true;
   });
   if (!safe) throw new Error('SAFE_MOCK verification failed; no Bot mutations attempted');
-  guard.addRequestHandler(req => {
+  guard.addRequestHandler(async req => {
     if (!req.url().includes('/graphql') || req.method() !== 'POST') return;
     let query = ''; try { query = JSON.parse(req.postData() || '{}').query || ''; } catch { return; }
-    if (/mutation\s+(Create|Update)Bot/.test(query)) mutations++;
+    if (/mutation\s+(Create|Update)Bot/.test(query)) {
+      mutations++;
+      if (failMutation) { failMutation = false; return req.respond({status:200,contentType:'application/json',body:JSON.stringify({errors:[{message:'Injected save failure'}]})}); }
+      if (holdMutation) { await new Promise(resolve => { releaseMutation = resolve; }); holdMutation = false; return req.continue(); }
+    }
     if (failRead && /bots\s*\(/.test(query) && ++reads === 2) {
       failRead = false; injected++; return req.respond({ status: 500, contentType: 'application/json', body: '{}' });
     }
@@ -95,7 +100,83 @@ try {
     await shot('mobile-dialog.png'); await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[data-testid="create-bot-dialog"][open]'));
     await page.waitForFunction(() => document.activeElement?.getAttribute('data-testid') === 'create-bot-modal-btn'); await shot('mobile-manager.png');
   });
+  for (const [label, width, height] of [['desktop', 1280, 800], ['mobile', 375, 812]]) {
+    await check(`${label} dialog 鍵盤焦點循環`, async () => {
+      await page.setViewport({width, height});
+      await page.click(t('create-bot-modal-btn')); await page.waitForSelector(`${t('create-bot-dialog')}[open]`);
+      try {
+        await page.waitForFunction(() => document.activeElement?.getAttribute('data-testid') === 'bot-name-input');
+        // Native modal dialogs make background controls inert; Chromium may pass
+        // through browser chrome (reported as BODY) between in-dialog stops.
+        const background = t('create-bot-modal-btn');
+        await page.$eval(background, e => { e.dataset.inertClicks = '0'; e.addEventListener('click', () => e.dataset.inertClicks = String(Number(e.dataset.inertClicks) + 1), {once:true}); e.focus(); });
+        assert.notEqual(await page.evaluate(() => document.activeElement?.getAttribute('data-testid')), 'create-bot-modal-btn');
+        const box = await (await page.$(background)).boundingBox(); assert(box);
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        assert.equal(await page.$eval(background, e => e.dataset.inertClicks), '0');
+        assert.equal(await page.$eval(t('create-bot-dialog'), e => e.open), true);
+        await page.focus(t('bot-name-input'));
+        const pressDirection = async direction => { if (direction === 'Shift+Tab') await page.keyboard.down('Shift'); try { await page.keyboard.press('Tab'); } finally { if (direction === 'Shift+Tab') await page.keyboard.up('Shift'); } };
+        for (const direction of ['Tab', 'Shift+Tab']) {
+          let bodyPending = false;
+          for (let i = 0; i < 12; i++) {
+            await pressDirection(direction);
+            const state = await page.evaluate(() => ({inside: document.querySelector('dialog[open]')?.contains(document.activeElement), tag: document.activeElement?.tagName}));
+            assert(state.inside || state.tag === 'BODY', `${direction} reached background ${state.tag}`);
+            if (bodyPending) assert(state.inside, `${direction} did not return to dialog after BODY`);
+            bodyPending = state.tag === 'BODY';
+          }
+          if (bodyPending) { await pressDirection(direction); assert(await page.evaluate(() => document.querySelector('dialog[open]')?.contains(document.activeElement)), `${direction} did not return to dialog`); }
+        }
+
+      } finally {
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(() => !document.querySelector('[data-testid="create-bot-dialog"][open]'));
+      }
+    });
+    await check(`${label} 表單邊界、鍵盤、取消與延遲保存`, async () => {
+      await page.setViewport({width, height});
+      if (width === 375) {
+        // The previous mobile check has already opened the manager.
+        await page.waitForSelector(t('create-bot-modal-btn'), {visible:true});
+      }
+      const create = t('create-bot-modal-btn');
+      await page.click(create); await page.waitForSelector(`${t('create-bot-dialog')}[open]`);
+      await page.waitForFunction(() => document.activeElement?.getAttribute('data-testid') === 'bot-name-input');
+      const name=t('bot-name-input'), desc=t('bot-desc-input'), instructions=t('bot-instructions-input'), submit=t('submit-bot-btn');
+      await set(name, '   '); await page.waitForFunction(sel => document.querySelector(sel).disabled, {}, submit);
+      await set(name, 'a'.repeat(101)); await page.waitForFunction(sel => document.querySelector(sel).disabled, {}, submit);
+      await set(name, `  ${'a'.repeat(100)}  `); await page.waitForFunction(sel => !document.querySelector(sel).disabled, {}, submit);
+      await set(desc, 'd'.repeat(2000)); await set(instructions, 'i'.repeat(10000)); await page.waitForFunction(sel => !document.querySelector(sel).disabled, {}, submit);
+      await set(desc, 'd'.repeat(2001)); await page.waitForFunction(sel => document.querySelector(sel).disabled, {}, submit);
+      await set(desc, 'd'); await set(instructions, 'i'.repeat(10001)); await page.waitForFunction(sel => document.querySelector(sel).disabled, {}, submit);
+      await set(instructions, 'i'); await page.waitForFunction(sel => !document.querySelector(sel).disabled, {}, submit);
+      const beforeCancel = mutations; await page.click(t('cancel-dialog-btn'));
+      await page.waitForFunction(() => !document.querySelector('[data-testid="create-bot-dialog"][open]'));
+      await page.waitForFunction(() => document.activeElement?.getAttribute('data-testid') === 'create-bot-modal-btn'); assert.equal(mutations,beforeCancel);
+      await page.click(create); await page.waitForSelector(`${t('create-bot-dialog')}[open]`);
+      await set(name, `${tag}-${label}-held`); holdMutation=true; const before=mutations;
+      await page.click(submit); await page.waitForFunction(sel => document.querySelector(sel).disabled, {}, submit);
+      assert.equal(await page.$eval(t('cancel-dialog-btn'), e=>e.disabled),true);
+      assert.equal(await page.$eval(t('dialog-close-x-btn'), e=>e.disabled),true);
+      await page.keyboard.press('Escape'); assert.equal(await page.$eval(t('create-bot-dialog'), e=>e.open),true);
+      await page.$eval('dialog form', e=>e.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+      assert.equal(mutations,before+1); assert(releaseMutation); releaseMutation(); releaseMutation=undefined;
+      await page.waitForFunction(() => !document.querySelector('[data-testid="create-bot-dialog"][open]'));
+      await page.waitForFunction(() => document.activeElement?.getAttribute('data-testid') === 'create-bot-modal-btn'); assert.equal(mutations,before+1);
+      await page.click(create); await page.waitForSelector(`${t('create-bot-dialog')}[open]`);
+      await set(name, `${tag}-${label}-failure`); await set(desc, ' preserve raw '); failMutation=true;
+      const beforeFailure=mutations; await page.click(submit); await page.waitForSelector(t('form-error-banner'),{visible:true});
+      assert.match(await page.$eval(t('form-error-banner'),e=>e.textContent),/Injected save failure/);
+      assert.equal(await page.$eval(desc,e=>e.value),' preserve raw '); assert.equal(mutations,beforeFailure+1);
+      await shot(`${label}-save-failure.png`); await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !document.querySelector('[data-testid="create-bot-dialog"][open]'));
+      await page.waitForFunction(() => document.activeElement?.getAttribute('data-testid') === 'create-bot-modal-btn');
+    });
+    if (releaseMutation) { releaseMutation(); releaseMutation=undefined; holdMutation=false; }
+  }
 } finally {
+  if (releaseMutation) releaseMutation();
   console.log(`Bot fixture tag: ${tag}; artifacts: ${artifactsDir}`);
   await finish();
 }

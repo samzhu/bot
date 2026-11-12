@@ -36,15 +36,16 @@ guard.addRequestHandler(async request => {
     await request.respond({ status: 503, contentType: 'application/json', body: '{"errors":[{"message":"injected create failure"}]}' });
   }
 });
-const verify = async (name, fn) => { if (!process.env.CHAT_ONLY || name.includes(process.env.CHAT_ONLY)) await check(name, fn); };
+const verify = async (name, fn) => { if (!process.env.CHAT_ONLY && name.startsWith('mobile ') && Number(process.env.CHAT_WIDTH || 1280) !== 375) return; if (!process.env.CHAT_ONLY || name.includes(process.env.CHAT_ONLY)) await check(name, fn); };
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const editor = 'chat-input textarea';
-const newChat = async () => { await page.click('[aria-label="New chat"]'); await page.waitForSelector(editor); };
+const ensureNavigation = async () => { const closed = await page.evaluate(() => !!document.querySelector('.drawer-focus[inert]')); if (closed) { await page.click('button[aria-label="開啟導覽"]'); await page.waitForFunction(() => !document.querySelector('.drawer-focus[inert]')); await page.waitForFunction(() => { const b = document.querySelector('[aria-label="New chat"]'); if (!b) return false; const r = b.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth && r.width > 0; }); } };
+const newChat = async () => { await ensureNavigation(); await page.click('[aria-label="New chat"]'); await page.waitForSelector(editor); };
 const write = async value => { await page.$eval(editor, (element, text) => { element.value = text; element.dispatchEvent(new Event('input', { bubbles: true })); }, value); };
 const send = async value => { await write(value); await page.waitForFunction(() => { const button = document.querySelector('chat-input button[aria-label="Send message"]'); return button && !button.disabled; }); await page.click('chat-input button[aria-label="Send message"]'); };
 const search = async title => {
-  await page.click('button[aria-label="Search conversations"]'); await page.waitForSelector('[role="combobox"]');
+  await ensureNavigation(); await page.click('button[aria-label="Search conversations"]'); await page.waitForSelector('[role="combobox"]');
   await page.$eval('[role="combobox"]', (element, value) => { element.value = value; element.dispatchEvent(new Event('input', { bubbles: true })); }, title);
   await page.waitForFunction(value => [...document.querySelectorAll('[role="option"]')].some(element => element.textContent.includes(value)), { timeout: 8000 }, title);
   await page.evaluate(value => [...document.querySelectorAll('[role="option"]')].find(element => element.textContent.includes(value)).click(), title);
@@ -76,7 +77,9 @@ try {
     window.__systemClipboard = navigator.clipboard;
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async text => { if (window.__fault.clipboardReject) throw new Error('injected clipboard rejection'); window.__fault.clipboardValue = text; } } });
   });
-  await page.setViewport({ width: 1280, height: 800 });
+  const width = Number(process.env.CHAT_WIDTH || 1280);
+  if (!Number.isInteger(width) || width < 320 || width > 3840) throw new Error('CHAT_WIDTH must be an integer between 320 and 3840');
+  await page.setViewport({ width, height: width <= 767 ? 812 : 800 });
   await page.goto(browserUrl(), { waitUntil: 'networkidle2' });
   await verify('native components and deferred creation', async () => {
     for (const selector of ['chat-window', 'chat-input', 'chat-message-list']) assert(await page.$(selector), `missing ${selector}`);
@@ -112,7 +115,7 @@ try {
   await verify('OFF bot Enter preserves input (injected GraphQL fixture)', async () => {
     injectUnavailableBot = true;
     try {
-      await page.reload({ waitUntil: 'networkidle2' }); await page.click('[data-testid="nav-bots"]');
+      await page.reload({ waitUntil: 'networkidle2' }); await ensureNavigation(); await page.click('[data-testid="nav-bots"]');
       await page.waitForSelector('[data-testid="bot-item-canonical-off-fixture"]');
       await page.click('[data-testid="bot-item-canonical-off-fixture"]'); await page.waitForSelector(editor);
       await write('  OFF raw\n '); const before = createCount;
@@ -199,6 +202,38 @@ try {
       assert(rendered.filter(text => text.includes('canonical-accepted-interruption') && !text.includes('deterministic mock')).length === 1 && rendered.filter(text => text.includes('deterministic mock streaming response for: canonical-accepted-interruption')).length === 1, 'reconciled messages duplicated');
       await writeFile(`${artifactsDir}/accepted-interruption.json`, JSON.stringify({ injection: 'downstream stream interrupted after RUN_STARTED and first delta; original reader drained', run, firstCheck: first, finalStatus: result.run.status, userIds: user.map(row => row.id), assistantIds: assistant.map(row => row.id), checkIds: checks.slice(checkStart), renderedUserCount: 1, renderedAssistantCount: 1 }, null, 2));
     } finally { await page.evaluate(() => { window.__fault.cutAfterDelta = false; }); }
+  });
+  await verify('mobile streaming typing scroll copy and keyboard', async () => {
+    assert([375, 1280].includes(page.viewport().width), 'requires CHAT_WIDTH=375 or 1280');
+    await newChat(); await send('[DELAY] mobile-scroll-seed ' + 'word '.repeat(600));
+    await page.waitForSelector('[aria-label="Assistant is typing"]', { visible: true, timeout: 5000 });
+    await page.waitForFunction(() => document.querySelector('chat-message[role=assistant]')?.innerText.includes('mobile-scroll-seed'), { timeout: 8000 });
+    await page.waitForFunction(() => !!document.querySelector('chat-input button[aria-label="Send message"]'), { timeout: 8000 });
+    await page.waitForFunction(() => { const e = document.querySelector('[role="region"][aria-label="Conversation"]'); return e && e.scrollHeight > e.clientHeight && e.scrollHeight - e.scrollTop - e.clientHeight < 48; }, { timeout: 5000 });
+    const region = '[role="region"][aria-label="Conversation"]';
+    const rect = await page.$eval(region, e => { const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
+    await page.mouse.move(rect.x, rect.y); await page.mouse.wheel({ deltaY: -10000 });
+    await page.waitForFunction(selector => document.querySelector(selector)?.scrollTop < 48, {}, region);
+    const before = await page.$eval(region, e => e.scrollTop);
+    await send('[DELAY] mobile-manual-scroll');
+    await page.waitForSelector('[aria-label="Assistant is typing"]', { visible: true, timeout: 5000 });
+    await page.waitForFunction(() => document.querySelector('chat-message[role=assistant]:last-of-type')?.innerText.includes('mobile-manual-scroll'), { timeout: 8000 });
+    await page.waitForFunction(() => !!document.querySelector('chat-input button[aria-label="Send message"]'), { timeout: 8000 });
+    const after = await page.$eval(region, e => e.scrollTop);
+    assert(Math.abs(after - before) < 20, `user scroll was moved: ${before} to ${after}`);
+    await page.$eval(region, e => { e.scrollTop = e.scrollHeight; e.dispatchEvent(new Event('scroll')); });
+    await write('keyboard draft');
+    await page.$eval(editor, e => e.focus());
+    await page.waitForFunction(() => { const b = document.querySelector('chat-input button[aria-label="Send message"]'); return b && !b.disabled; });
+    await page.keyboard.press('Tab');
+    assert(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')) === 'Send message', 'Tab did not reach send');
+    await page.evaluate(() => { window.__fault.clipboardReject = false; window.__fault.clipboardValue = ''; });
+    const copies = await page.$$('button[aria-label="複製回覆"]'); await copies.at(-1).click();
+    await page.waitForFunction(() => document.querySelector('main')?.innerText.includes('已複製回覆'));
+    assert((await page.evaluate(() => window.__fault.clipboardValue)).includes('mobile-manual-scroll'), 'mobile copy spy mismatch');
+    await page.evaluate(() => { window.__fault.clipboardReject = true; }); await copies.at(-1).click();
+    await page.waitForFunction(() => document.querySelector('main')?.innerText.includes('無法複製回覆'));
+    await page.screenshot({ path: `${artifactsDir}/chat-mobile.png` });
   });
   for (const status of ['FAILED', 'CANCELLED']) await verify(`history ${status}`, async () => {
     await search(status); await page.waitForFunction(value => document.querySelector('[data-testid="chat-header-title"]')?.textContent.includes(value), {}, status);

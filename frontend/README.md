@@ -22,6 +22,14 @@ The current suites require a running frontend and a verified fake-model backend:
     node e2e/threadplane-navigation.mjs
     node e2e/threadplane-bot.mjs
 
+To run the chat suite at mobile width:
+
+    CHAT_WIDTH=375 node e2e/threadplane-chat.mjs
+
+Chat defaults to 1280px. The mobile-specific check runs at 375px; the scroll
+check supports 375px and 1280px. CHAT_WIDTH accepts integer widths from 320 to
+3840, but other widths do not satisfy that scroll check.
+
 BROWSER_URL defaults to http://127.0.0.1:4300, BACKEND_URL to
 http://127.0.0.1:8181. For ./dev.sh --mock, use ports 4200 and 8080.
 CHROME_PATH overrides the default macOS Chrome executable.
