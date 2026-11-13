@@ -278,4 +278,23 @@ describe('ChatNavigationComponent', () => {
     expect(fixture.nativeElement.querySelector('.drawer-focus').hasAttribute('inert')).toBe(true);
     expect(fixture.nativeElement.querySelector('.search-alert button')).toBeTruthy();
   });
+
+  it('keeps app-owned workspace controls in the SDK primary slot with styling hooks and pressed-state tabs', async () => {
+    const fixture = TestBed.createComponent(ChatNavigationComponent);
+    fixture.componentRef.setInput('workspaces', [{ id: 'w1', name: 'Personal' }]);
+    fixture.componentRef.setInput('workspaceId', 'w1');
+    fixture.detectChanges(); await settle(fixture);
+    const root = fixture.nativeElement as HTMLElement;
+    const panel = root.querySelector('[sidenavPrimary].primary-panel') as HTMLElement;
+    expect(panel).not.toBeNull();
+    expect(panel.querySelector('label[for="workspace-select"]')).not.toBeNull();
+    expect(panel.querySelector('select#workspace-select')).not.toBeNull();
+    expect(panel.querySelector('button.action')?.textContent).toContain('個人用量');
+    const conversations = root.querySelector('[data-testid="nav-conversations"]') as HTMLButtonElement;
+    const bots = root.querySelector('[data-testid="nav-bots"]') as HTMLButtonElement;
+    expect(conversations.getAttribute('aria-pressed')).toBe('true');
+    expect(bots.getAttribute('aria-pressed')).toBe('false');
+    // SDK components stay unwrapped: chat-sidenav is still rendered by the package, not replaced.
+    expect(root.querySelector('chat-sidenav')).not.toBeNull();
+  });
 });
