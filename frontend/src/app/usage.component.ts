@@ -2,9 +2,10 @@ import { Component, Input, OnChanges, OnDestroy, output, signal } from '@angular
 import { NativeUsageValue, UsageSnapshot, UsageStore } from './usage.store';
 import { CostExplanationComponent } from './cost-explanation.component';
 import { UsageReportsComponent } from './usage-reports.component';
+import { CostRevisionComponent } from './cost-revision.component';
 
 @Component({
-  selector: 'app-usage', standalone: true, imports: [CostExplanationComponent, UsageReportsComponent],
+  selector: 'app-usage', standalone: true, imports: [CostExplanationComponent, UsageReportsComponent, CostRevisionComponent],
   template: `
     <section class="usage" role="region" tabindex="0" aria-label="個人用量內容，可垂直捲動">
       <button type="button" (click)="back.emit()">返回對話</button>
@@ -12,9 +13,12 @@ import { UsageReportsComponent } from './usage-reports.component';
       <nav aria-label="用量頁面">
         <button type="button" [attr.aria-pressed]="activeTab()==='attempts'" (click)="activeTab.set('attempts')">逐次用量</button>
         <button type="button" [attr.aria-pressed]="activeTab()==='reports'" (click)="activeTab.set('reports')">報表</button>
+        @if(manager){<button type="button" [attr.aria-pressed]="activeTab()==='revisions'" (click)="activeTab.set('revisions')">費用修訂管理</button>}
       </nav>
       @if (activeTab()==='reports') {
         <app-usage-reports [workspaceId]="workspaceId" [manager]="manager" />
+      } @else if(activeTab()==='revisions' && manager) {
+        <app-cost-revision [workspaceId]="workspaceId" [manager]="manager" />
       } @else {
       @if (store.loading()) { <p role="status">載入用量中…</p> }
       @if (store.error()) { <p role="alert">{{store.error()}} <button type="button" (click)="store.retry()">重試</button></p> }
@@ -68,7 +72,7 @@ import { UsageReportsComponent } from './usage-reports.component';
 export class UsageComponent implements OnChanges, OnDestroy {
   @Input() workspaceId: string | null = null;
   @Input() manager = false;
-  readonly activeTab=signal<'attempts'|'reports'>('attempts');
+  readonly activeTab=signal<'attempts'|'reports'|'revisions'>('attempts');
   readonly back = output<void>(); readonly store = new UsageStore();
   ngOnChanges(): void { void this.store.setWorkspace(this.workspaceId); }
   ngOnDestroy(): void { void this.store.setWorkspace(null); }

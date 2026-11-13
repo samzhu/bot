@@ -174,3 +174,37 @@ extend type Query {
                       memberId: ID, unassignedOnly: Boolean = false): UsageReport!
  workspaceUsageAttempt(workspaceId: ID!, id: ID!): UsageAttempt
 }
+
+input ManualCostRevisionInput {
+ workspaceId: ID! attemptId: ID! expectedRevision: ID expectedSourceProjectionVersion: String!
+ idempotencyKey: String! amount: String! sourceType: String! evidenceReference: String! reason: String!
+}
+input ReconcileCostInput {
+ workspaceId: ID! attemptId: ID! expectedRevision: ID expectedSourceProjectionVersion: String!
+ idempotencyKey: String! catalogRevisionId: ID! evidenceReference: String! reason: String!
+}
+type CostRevision {
+ id: ID! attemptId: ID! kind: String! status: UsageCostStatus! knownSubtotal: String completeAmount: String
+ sourceProjectionVersion: String! sourceType: String! evidenceReference: String reason: String! actorId: String! recordedAt: String!
+ sourceSnapshotId: ID priceSnapshotId: ID priceRevision: String catalogRevisionId: ID calculatorVersion: String! reasons: [String!]! currency: String!
+}
+type CostRevisionResult { outcome: String! revision: CostRevision! effectiveCost: UsageCost! }
+type CostRevisionHistoryNode {
+ id: ID! attemptId: ID! kind: String! status: UsageCostStatus! knownSubtotal: String completeAmount: String
+ sourceProjectionVersion: String! sourceSnapshotId: ID priceSnapshotId: ID priceRevision: String catalogRevisionId: ID
+ calculatorVersion: String! sourceType: String evidenceReference: String reason: String actorId: String recordedAt: String! reasons: [String!]! current: Boolean! currency: String!
+ priceSelectionState: String priceRatesJson: String priceSourceReference: String priceEffectiveFrom: String priceEffectiveUntil: String candidate: Boolean!
+}
+type CostRevisionHistoryConnection { nodes: [CostRevisionHistoryNode!]! pageInfo: UsagePageInfo! currentRevisionId: ID }
+type PublishedPricingCatalogEntry { id: ID! provider: String! endpoint: String! model: String! channel: String! priceRevision: String! effectiveFrom: String! effectiveUntil: String! ratesJson: String! }
+type PublishedPricingCatalog { id: ID! generation: String! sourceReference: String! sourceRevision: String! createdAt: String! entries: [PublishedPricingCatalogEntry!]! }
+type PublishedPricingCatalogConnection { nodes: [PublishedPricingCatalog!]! pageInfo: UsagePageInfo! }
+extend type Query {
+ costRevisions(workspaceId: ID!, attemptId: ID!, first: Int = 20, after: String): CostRevisionHistoryConnection!
+ publishedPricingCatalogs(workspaceId: ID!, first: Int = 20, after: String): PublishedPricingCatalogConnection!
+ costReviewAttempts(workspaceId: ID!, simulation: Boolean = false, first: Int = 20, after: String): UsageAttemptConnection!
+}
+extend type Mutation {
+ manualCostRevision(input: ManualCostRevisionInput!): CostRevisionResult!
+ reconcileCost(input: ReconcileCostInput!): CostRevisionResult!
+}

@@ -35,6 +35,8 @@ public class PricingPublisher {
     public boolean recompute(String id) {
         var input = ledger.readPricingInput(id);
         if (input == null) return false;
+        var currentBefore=jdbc.query("select estimate_id from usage_cost_current where attempt_id=?",(rs,n)->rs.getString(1),id);
+        String observedCurrent=currentBefore.isEmpty()?null:currentBefore.getFirst();
         PriceChoice choice = priceChoice(input);
         boolean undispatched = "NOT_DISPATCHED".equals(input.executionOutcome()) && input.startedAt() == null;
         var snapshot = input.effectiveSnapshot();
@@ -104,7 +106,11 @@ public class PricingPublisher {
             String effective="VALID".equals(row[1]) ? (String)row[2] : null;
             if ((Long)row[0] != input.projectionVersion() || !java.util.Objects.equals(effective,input.effectiveSnapshotId())
                     || !java.util.Objects.equals(row[3], input.executionOutcome())) throw new Conflict();
-            var existing=jdbc.query("select id,selection_state,price_revision,rates::text,catalog_revision_id,catalog_entry_id,source_reference,extract(epoch from effective_from)::text,extract(epoch from effective_until)::text from usage_price_snapshot where attempt_id=?",(rs,n)->new String[]{rs.getString(1),rs.getString(2),rs.getString(3),rs.getString(4),rs.getString(5),rs.getString(6),rs.getString(7),rs.getString(8),rs.getString(9)},id);
+            var currentNow=jdbc.query("select estimate_id from usage_cost_current where attempt_id=?",(rs,n)->rs.getString(1),id);
+            if (!java.util.Objects.equals(observedCurrent,currentNow.isEmpty()?null:currentNow.getFirst())) throw new Conflict();
+            var manual=jdbc.query("select 1 from usage_cost_current c join usage_cost_revision_audit a on a.estimate_id=c.estimate_id and a.attempt_id=c.attempt_id where c.attempt_id=?",(rs,n)->rs.getInt(1),id);
+            boolean protectedCurrent=!manual.isEmpty();
+            var existing=jdbc.query("select id,selection_state,price_revision,rates::text,catalog_revision_id,catalog_entry_id,source_reference,extract(epoch from effective_from)::text,extract(epoch from effective_until)::text from usage_price_snapshot where attempt_id=? and origin='AUTO_DISPATCH'",(rs,n)->new String[]{rs.getString(1),rs.getString(2),rs.getString(3),rs.getString(4),rs.getString(5),rs.getString(6),rs.getString(7),rs.getString(8),rs.getString(9)},id);
             String priceId;
             if (existing.isEmpty()) {
                 priceId=UUID.randomUUID().toString();
@@ -130,16 +136,23 @@ public class PricingPublisher {
             if (!already.isEmpty()) {
                 if (!already.getFirst()[1].equals(hash)) throw new Conflict();
                 String existingId=already.getFirst()[0];
-                jdbc.update("insert into usage_cost_current(attempt_id,estimate_id) values (?,?) on conflict (attempt_id) do update set estimate_id=excluded.estimate_id where usage_cost_current.estimate_id<>excluded.estimate_id",id,existingId);
+                if (protectedCurrent) checkpoint(id,input.projectionVersion());
+                else jdbc.update("insert into usage_cost_current(attempt_id,estimate_id) values (?,?) on conflict (attempt_id) do update set estimate_id=excluded.estimate_id where usage_cost_current.estimate_id<>excluded.estimate_id",id,existingId);
                 return false;
             }
             String estimateId=UUID.randomUUID().toString();
-            jdbc.update("insert into usage_cost_estimate(id,attempt_id,source_version,source_snapshot_id,price_snapshot_id,calculator_version,status,known_subtotal,complete_amount,details,payload_hash) values (?,?,?,?,?,?,?,?,?,?::jsonb,?)",
-                estimateId,id,input.projectionVersion(),input.effectiveSnapshotId(),priceId,PricingCalculator.VERSION,status,subtotal,complete,details,hash);
-            jdbc.update("insert into usage_cost_current(attempt_id,estimate_id) values (?,?) on conflict (attempt_id) do update set estimate_id=excluded.estimate_id",id,estimateId);
+            jdbc.update("insert into usage_cost_estimate(id,attempt_id,source_version,source_snapshot_id,price_snapshot_id,calculator_version,status,known_subtotal,complete_amount,details,payload_hash,publication_kind) values (?,?,?,?,?,?,?,?,?,?::jsonb,?,?)",
+                estimateId,id,input.projectionVersion(),input.effectiveSnapshotId(),priceId,PricingCalculator.VERSION,status,subtotal,complete,details,hash,protectedCurrent?"AUTO_CANDIDATE":"AUTO_CURRENT");
+            // Preserve an audited current, but durably retain this source-version candidate
+            // before marking the source processed so restart cannot lose the calculation.
+            if (protectedCurrent) checkpoint(id,input.projectionVersion());
+            else jdbc.update("insert into usage_cost_current(attempt_id,estimate_id) values (?,?) on conflict (attempt_id) do update set estimate_id=excluded.estimate_id",id,estimateId);
             return true;
         });
         return Boolean.TRUE.equals(result);
+    }
+    private void checkpoint(String id,long version) {
+        jdbc.update("insert into usage_cost_manual_source_checkpoint(attempt_id,last_processed_projection_version) values (?,?) on conflict (attempt_id) do update set last_processed_projection_version=excluded.last_processed_projection_version",id,version);
     }
     // Persisted hashes must be independent of JVM-specific map iteration order.
     static String canonicalDetails(List<String> reasons, List<? extends Map<String, Object>> lines) {
@@ -159,7 +172,8 @@ public class PricingPublisher {
         } catch (Exception e) { throw new IllegalArgumentException("Cannot hash pricing evidence",e); }
     }
     private PriceChoice priceChoice(UsageLedger.PricingInputView input) {
-        var pinned=jdbc.query("select id,selection_state,price_revision,rates::text,catalog_revision_id,catalog_entry_id,source_reference,extract(epoch from effective_from)::text,extract(epoch from effective_until)::text from usage_price_snapshot where attempt_id=?",(rs,n)->new String[]{rs.getString(1),rs.getString(2),rs.getString(3),rs.getString(4),rs.getString(5),rs.getString(6),rs.getString(7),rs.getString(8),rs.getString(9)},input.attemptId());
+        // Late usage must use the dispatch selection; a newer catalog requires an audited revision.
+        var pinned=jdbc.query("select id,selection_state,price_revision,rates::text,catalog_revision_id,catalog_entry_id,source_reference,extract(epoch from effective_from)::text,extract(epoch from effective_until)::text from usage_price_snapshot where attempt_id=? and origin='AUTO_DISPATCH'",(rs,n)->new String[]{rs.getString(1),rs.getString(2),rs.getString(3),rs.getString(4),rs.getString(5),rs.getString(6),rs.getString(7),rs.getString(8),rs.getString(9)},input.attemptId());
         if (!pinned.isEmpty()) return fromStored(pinned.getFirst());
         var markers=jdbc.query("select catalog_marker,catalog_revision_id from provider_attempt where id=?",(rs,n)->new String[]{rs.getString(1),rs.getString(2)},input.attemptId());
         if (markers.isEmpty() || "LEGACY_UNPRICED".equals(markers.getFirst()[0])) return new PriceChoice("LEGACY_UNPRICED",null,null,null,null,null,null,null);

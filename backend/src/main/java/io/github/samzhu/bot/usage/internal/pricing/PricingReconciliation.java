@@ -23,8 +23,11 @@ public class PricingReconciliation {
                 select a.id,a.prepared_at from provider_attempt a
                 left join usage_cost_current c on c.attempt_id=a.id
                 left join usage_cost_estimate e on e.id=c.estimate_id
+                left join usage_cost_revision_audit r on r.estimate_id=c.estimate_id and r.attempt_id=c.attempt_id
+                left join usage_cost_manual_source_checkpoint m on m.attempt_id=a.id
                 where a.execution_outcome <> 'IN_PROGRESS'
                   and (e.id is null or e.source_version <> a.projection_version)
+                  and (r.id is null or m.last_processed_projection_version is distinct from a.projection_version)
                 """;
             var mapper=(org.springframework.jdbc.core.RowMapper<Candidate>)(rs,n)->new Candidate(rs.getString(1),rs.getTimestamp(2));
             var page=afterTime==null ? jdbc.query(base+" order by a.prepared_at,a.id limit 100",mapper)
