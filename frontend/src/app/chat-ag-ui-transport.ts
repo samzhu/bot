@@ -2,7 +2,7 @@ import { HttpAgent } from '@ag-ui/client';
 import { toAgent, AgUiAgent } from '@threadplane/ag-ui';
 import { computed, signal, WritableSignal } from '@angular/core';
 import { Message, completeDelivery, staticDelivery } from '@threadplane/chat';
-import { ChatSessionTransport, RunResult } from './chat-session-registry';
+import { BudgetDenialReason, ChatSessionTransport, RunResult } from './chat-session-registry';
 
 class IdentifiedHttpAgent extends HttpAgent {
   nextRunId = '';
@@ -150,15 +150,16 @@ export class ChatAgUiTransport implements ChatSessionTransport {
       if (event.type === 'RUN_FINISHED') terminal = { status: (event['outcome'] as { type?: string } | undefined)?.type === 'cancelled' ? 'CANCELLED' : 'COMPLETED' };
       if (event.type === 'RUN_ERROR') terminal = { status: 'FAILED' };
     });
-    const rejected = (): RunResult => {
+    const rejected = (reason?: BudgetDenialReason): RunResult => {
       const id = entry.userByRun.get(runId);
       if (id) {
         entry.suppressed.update(ids => new Set([...ids, id]));
         entry.source.setMessages(entry.source.messages.filter(message => message.id !== id));
       }
-      return { status: 'REJECTED' };
+      return reason ? { status: 'REJECTED', reason } : { status: 'REJECTED' };
     };
     const responseResult = (): RunResult | null => {
+      if (entry.httpStatus === 503 && (entry.conflictCode === 'MONTH_CAP' || entry.conflictCode === 'MONTH_UNKNOWN')) return rejected(entry.conflictCode);
       if ((entry.httpStatus === 404 && entry.conflictCode === 'CONVERSATION_ACCESS_DENIED') ||
           (entry.httpStatus === 409 && entry.conflictCode === 'RUN_CONFLICT') ||
           (entry.httpStatus === 400 && entry.conflictCode === 'INVALID_AG_UI_INPUT') ||

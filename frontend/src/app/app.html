@@ -23,7 +23,7 @@
       }
       @if (hasMoreMessages()) { <button type="button" (click)="loadEarlierMessages()" [disabled]="isLoadingEarlier()">載入較早訊息</button> }
       <app-chat-surface [agent]="chatAgent()" [draft]="chatSession().draft()" [inputBlocked]="!chatCanSend()"
-        [runUnknown]="chatSession().result()?.status === 'UNKNOWN'" [runCancelled]="chatSession().result()?.status === 'CANCELLED'" [runFailed]="chatSession().result()?.status === 'FAILED' || chatSession().result()?.status === 'REJECTED'" (draftChanged)="chatDraftChanged($event)"
+        [runUnknown]="chatSession().result()?.status === 'UNKNOWN'" [runCancelled]="chatSession().result()?.status === 'CANCELLED'" [runFailed]="chatSession().result()?.status === 'FAILED' || chatSession().result()?.status === 'REJECTED'" [runDenialReason]="chatSession().result()?.reason" (draftChanged)="chatDraftChanged($event)"
         (submitRequested)="submitChat($event)" (stopRequested)="stopChat()" (checkStatusRequested)="checkChatStatus()">
         <header chatHeader class="header"><h1 data-testid="chat-header-title">{{currentTitle()}}</h1>
           @if (specifiedBot(); as bot) { <div data-testid="header-bot-meta"><span data-testid="header-bot-name">{{bot.name}}</span>

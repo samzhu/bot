@@ -95,7 +95,16 @@ public class AgUiController {
                     "runId", result.existingRun().id(),
                     "status", result.existingRun().status()));
             case CONFLICT -> jsonError(409, "RUN_CONFLICT");
-            case SERVICE_UNAVAILABLE -> jsonError(503, "GKE_AGENT_NOT_CONNECTED");
+            case SERVICE_UNAVAILABLE -> jsonError(503, safeUnavailableCode(result.conflictMessage()));
+        };
+    }
+
+    private static String safeUnavailableCode(String reason) {
+        if (reason == null) return "SERVICE_UNAVAILABLE";
+        return switch (reason) {
+            case "MONTH_CAP", "MONTH_UNKNOWN", "GKE_AGENT_NOT_CONNECTED", "RECOVERY_REQUIRED",
+                    "OVERLOADED", "ADMISSION_UNAVAILABLE" -> reason;
+            default -> "SERVICE_UNAVAILABLE";
         };
     }
 

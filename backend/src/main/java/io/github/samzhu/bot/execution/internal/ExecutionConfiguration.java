@@ -1,8 +1,13 @@
 package io.github.samzhu.bot.execution.internal;
 
+import io.github.samzhu.bot.usage.WorkspaceAdmission;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
+
+import java.time.Duration;
 
 /**
  * Spring configuration for execution scheduling.
@@ -13,6 +18,14 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
  */
 @Configuration
 public class ExecutionConfiguration {
+
+    @Bean
+    @ConditionalOnProperty(name = "bot.execution.startup-coordinator.enabled", havingValue = "true", matchIfMissing = true)
+    public TerminalRunStartupCoordinator terminalRunStartupCoordinator(
+            TerminalRunCompletionScanner scanner, WorkspaceAdmission admission,
+            @Value("${bot.execution.startup-coordinator.budget:30s}") Duration startupBudget) {
+        return new TerminalRunStartupCoordinator(scanner, admission, startupBudget);
+    }
 
     // The injectable scheduler makes a queued dispatch cancellable and deterministically testable.
     @Bean(destroyMethod = "")

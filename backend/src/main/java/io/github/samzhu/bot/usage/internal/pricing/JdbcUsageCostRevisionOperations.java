@@ -31,27 +31,44 @@ public class JdbcUsageCostRevisionOperations implements UsageCostRevisionOperati
     private final UsageLedger ledger;
     private final TransactionTemplate transactions;
     private final UsageCostOperations costs;
+    private final io.github.samzhu.bot.usage.internal.admission.WorkspaceLane lane;
+    private final io.github.samzhu.bot.usage.internal.admission.BudgetProjection projection;
     private final ObjectMapper json = new ObjectMapper();
 
     public JdbcUsageCostRevisionOperations(JdbcTemplate jdbc, WorkspaceOperations workspaces,
-                                           CurrentUserProvider users, Clock usageClock, UsageLedger ledger, TransactionTemplate transactions, UsageCostOperations costs) {
+                                           CurrentUserProvider users, Clock usageClock, UsageLedger ledger, TransactionTemplate transactions, UsageCostOperations costs,
+                                           io.github.samzhu.bot.usage.internal.admission.WorkspaceLane lane,
+                                           io.github.samzhu.bot.usage.internal.admission.BudgetProjection projection) {
         this.jdbc = jdbc; this.workspaces = workspaces; this.users = users; this.clock = usageClock;
         this.ledger=ledger; this.transactions=transactions;
-        this.costs=costs;
+        this.costs=costs; this.lane=lane; this.projection=projection;
     }
     public static class Failure extends RuntimeException {
         public Failure(String code) { super(code); }
     }
 
     @Override
-    @Transactional
     public Result manual(ManualCommand c) {
-        String actor = authorize(c.workspaceId());
+        String actor=authorize(c.workspaceId());
+        try {
+            return lane.submitCritical(c.workspaceId(), () -> transactions.execute(tx -> {
+                io.github.samzhu.bot.usage.internal.admission.UsageWriterLock.registrationForAttempt(jdbc,c.attemptId());
+                Result result=manualInTransaction(c,actor);
+                refreshBudget(c.workspaceId(),c.attemptId());
+                return result;
+            })).toCompletableFuture().join();
+        } catch (java.util.concurrent.CompletionException ex) {
+            if (ex.getCause() instanceof RuntimeException cause) throw cause;
+            throw ex;
+        }
+    }
+    private Result manualInTransaction(ManualCommand c,String actor) {
+        authorize(c.workspaceId(),actor);
         var attempts = jdbc.query("select projection_version,execution_outcome,projection_state,projection_snapshot_id from provider_attempt where id=? and workspace_id=? for update",
                 (rs,n) -> new Attempt(rs.getLong(1), rs.getString(2), rs.getString(3), rs.getString(4)), c.attemptId(), c.workspaceId());
         if (attempts.isEmpty()) throw new Failure("USAGE_ATTEMPT_ACCESS_DENIED");
         // Authorization may have changed while waiting for the attempt lock.
-        authorize(c.workspaceId());
+        authorize(c.workspaceId(),actor);
         var attempt = attempts.getFirst();
         requireEligibleOutcome(attempt.outcome());
         String amount = amount(c.amount());
@@ -105,7 +122,7 @@ public class JdbcUsageCostRevisionOperations implements UsageCostRevisionOperati
             payload.put("expectedRevision",c.expectedRevision()); payload.put("expectedSourceProjectionVersion",Long.toString(sourceVersion));
             payload.put("idempotencyKey",commandKey); payload.put("catalogRevisionId",catalogId); payload.put("sourceType","SERVER_RAW_CATALOG"); payload.put("evidenceReference",proof); payload.put("reason",explanation); payload.put("actorId",actor);
             String canonical=json(payload);
-            return new PreparedReconciliation(sourceVersion,commandKey,catalogId,proof,explanation,canonical,checkReconcile(c,sourceVersion,commandKey,canonical));
+            return new PreparedReconciliation(sourceVersion,commandKey,catalogId,proof,explanation,canonical,checkReconcile(c,sourceVersion,commandKey,canonical,actor));
         });
         long version=prepared.version(); String key=prepared.key(),catalog=prepared.catalog(),evidence=prepared.evidence(),reason=prepared.reason(),payloadJson=prepared.payload();
         Result prior=prepared.prior();
@@ -124,8 +141,8 @@ public class JdbcUsageCostRevisionOperations implements UsageCostRevisionOperati
         var calculated=ReconciliationCalculator.calculate(input,choice==null?null:choice.revision(),rates);
         if(choices.size()>1) calculated=ReconciliationCalculator.withPriceOverlap(calculated);
         var result=calculated;
-        return transactions.execute(tx -> {
-            Result replay=checkReconcile(c,version,key,payloadJson);
+        java.util.function.Supplier<Result> publish=() -> transactions.execute(tx -> {
+            Result replay=checkReconcile(c,version,key,payloadJson,actor);
             if(replay!=null) return replay;
             var currentInput=ledger.readPricingInput(c.attemptId());
             if(currentInput==null || currentInput.projectionVersion()!=version || !Objects.equals(currentInput.effectiveSnapshotId(),input.effectiveSnapshotId())) throw new Failure("CONFLICT");
@@ -139,11 +156,22 @@ public class JdbcUsageCostRevisionOperations implements UsageCostRevisionOperati
             jdbc.update("insert into usage_cost_current(attempt_id,estimate_id) values (?,?) on conflict (attempt_id) do update set estimate_id=excluded.estimate_id",c.attemptId(),estimateId);
             return result("APPLIED",estimateId,c.attemptId());
         });
+        try {
+            return lane.submitCritical(c.workspaceId(), () -> transactions.execute(tx -> {
+                io.github.samzhu.bot.usage.internal.admission.UsageWriterLock.registrationForAttempt(jdbc,c.attemptId());
+                Result saved=publish.get();
+                refreshBudget(c.workspaceId(),c.attemptId());
+                return saved;
+            })).toCompletableFuture().join();
+        } catch (java.util.concurrent.CompletionException ex) {
+            if (ex.getCause() instanceof RuntimeException cause) throw cause;
+            throw ex;
+        }
     }
-    private Result checkReconcile(ReconcileCommand c,long version,String key,String payloadJson) {
+    private Result checkReconcile(ReconcileCommand c,long version,String key,String payloadJson,String actor) {
         var rows=jdbc.query("select projection_version,execution_outcome from provider_attempt where id=? and workspace_id=? for update",(rs,n)->new Object[]{rs.getLong(1),rs.getString(2)},c.attemptId(),c.workspaceId());
         if(rows.isEmpty()) throw new Failure("USAGE_ATTEMPT_ACCESS_DENIED");
-        authorize(c.workspaceId());
+        authorize(c.workspaceId(),actor);
         requireEligibleOutcome((String)rows.getFirst()[1]);
         var replay=jdbc.query("select command_payload=?::jsonb,estimate_id from usage_cost_revision_audit where attempt_id=? and idempotency_key=?",(rs,n)->new Replay(rs.getBoolean(1),rs.getString(2)),payloadJson,c.attemptId(),key);
         if(!replay.isEmpty()) { if(!replay.getFirst().same()) throw new Failure("CONFLICT"); return result("REPLAYED",replay.getFirst().estimateId(),c.attemptId()); }
@@ -167,11 +195,22 @@ public class JdbcUsageCostRevisionOperations implements UsageCostRevisionOperati
     }
 
     private String authorize(String workspaceId) {
-        String actor=users.getCurrentUserId();
+        return authorize(workspaceId,users.getCurrentUserId());
+    }
+    private String authorize(String workspaceId,String actor) {
         try { workspaces.requireMember(workspaceId,actor); }
         catch (WorkspaceAccessDeniedException ex) { throw new Failure("WORKSPACE_ACCESS_DENIED"); }
         if (!workspaces.isManager(workspaceId,actor)) throw new Failure("WORKSPACE_MANAGER_REQUIRED");
         return actor;
+    }
+    private void refreshBudget(String workspaceId,String attemptId) {
+        var rows=jdbc.query("select simulation,started_at from provider_attempt where id=? and workspace_id=?",
+                (rs,n)->new Object[]{rs.getBoolean(1),rs.getTimestamp(2)},attemptId,workspaceId);
+        if (rows.isEmpty() || rows.getFirst()[1]==null) return;
+        var row=rows.getFirst(); var zone=java.time.ZoneId.of("Asia/Taipei");
+        var period=java.time.YearMonth.from(((java.sql.Timestamp)row[1]).toInstant().atZone(zone));
+        projection.recompute(workspaceId,(boolean)row[0] ? io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.SIMULATION : io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.REAL,
+                period.atDay(1).atStartOfDay(zone).toInstant(),period.plusMonths(1).atDay(1).atStartOfDay(zone).toInstant());
     }
     private Revision revision(String id) {
         return jdbc.queryForObject("select e.id,e.attempt_id,a.kind,e.status,e.known_subtotal,e.complete_amount,e.source_version,a.source_type,a.evidence_reference,a.reason,a.actor_id,a.recorded_at,e.source_snapshot_id,e.price_snapshot_id,p.price_revision,p.catalog_revision_id,e.calculator_version,e.details::text from usage_cost_estimate e join usage_cost_revision_audit a on a.estimate_id=e.id left join usage_price_snapshot p on p.id=e.price_snapshot_id where e.id=?",

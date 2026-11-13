@@ -2,6 +2,7 @@ package io.github.samzhu.bot;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.samzhu.bot.usage.UsageLedger;
+import io.github.samzhu.bot.usage.WorkspaceAdmission;
 import io.github.samzhu.bot.conversation.ConversationOperations;
 import io.github.samzhu.bot.execution.internal.DispatchCommitObserver;
 import io.github.samzhu.bot.execution.internal.capture.UsageCaptureAdapter;
@@ -9,7 +10,6 @@ import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.DefaultUsage;
 import org.springframework.ai.session.SessionService;
 import org.springframework.ai.session.CreateSessionRequest;
-import io.github.samzhu.bot.bootstrap.DatabaseInitializer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -70,8 +70,8 @@ class UsageInvocationDurabilityIntegrationTests {
     @LocalServerPort int port;
     @Autowired JdbcTemplate jdbc;
     @Autowired DataSource dataSource;
-    @Autowired DatabaseInitializer databaseInitializer;
     @MockitoSpyBean UsageLedger ledger;
+    @MockitoSpyBean WorkspaceAdmission admission;
     @MockitoSpyBean ConversationOperations conversations;
     @MockitoSpyBean SessionService sessions;
     @MockitoSpyBean UsageCaptureAdapter captureAdapter;
@@ -137,6 +137,8 @@ class UsageInvocationDurabilityIntegrationTests {
         volatile boolean emitNativeUsage;
         volatile CountDownLatch streamEntered;
         volatile CountDownLatch streamRelease;
+        volatile CountDownLatch subscribed;
+        volatile CountDownLatch disposed;
 
         @Override public ChatResponse call(Prompt prompt) {
             calls.incrementAndGet();
@@ -145,6 +147,11 @@ class UsageInvocationDurabilityIntegrationTests {
 
         @Override public Flux<ChatResponse> stream(Prompt prompt) {
             streams.incrementAndGet();
+            if (subscribed != null && disposed != null) {
+                var onSubscribe=subscribed; var onDispose=disposed;
+                return Flux.<ChatResponse>never().doOnSubscribe(ignored -> { subscriptions.incrementAndGet(); onSubscribe.countDown(); })
+                        .doOnCancel(onDispose::countDown);
+            }
             CountDownLatch entered = streamEntered;
             CountDownLatch release = streamRelease;
             if (entered != null && release != null) {
@@ -235,52 +242,43 @@ class UsageInvocationDurabilityIntegrationTests {
         assertEquals(1, count("SELECT count(*) FROM ai_session WHERE id=?", conversation));
     }
 
-    @Test
-    void failedAttemptFinishCannotSucceedAndRestartMarksAttemptUnknown() throws Exception {
-        FAKE.calls.set(0);
-        FAKE.streams.set(0);
-        FAKE.subscriptions.set(0);
-        jdbc.update("INSERT INTO bot(id,name,system_prompt,created_at) VALUES ('bot-general','General','test',CURRENT_TIMESTAMP) ON CONFLICT (id) DO NOTHING");
-        var create = post("/graphql", Map.of("query", "mutation { createConversation(botId: \"bot-general\", title: \"finish durability\") { id } }"));
-        assertEquals(200, create.statusCode());
-        var createJson = json.readTree(create.body());
-        assertFalse(createJson.has("errors"), create.body());
-        String conversation = createJson.path("data").path("createConversation").path("id").asText();
-        assertFalse(conversation.isBlank());
-        FAKE.jdbc = jdbc;
-        FAKE.conversation = conversation;
-        FAKE.attemptsVisibleAtDispatch.set(-1);
-
-        // Fail the terminal ledger write after the durable attempt and model dispatch exist.
-        doThrow(new IllegalStateException("synthetic finish persistence failure"))
-                .when(ledger).finish(anyString(), eq("SUCCEEDED"));
-        try {
-            var response = post("/api/conversations/" + conversation + "/runs", Map.of(
-                    "clientRequestId", "finish-fail-" + UUID.randomUUID(), "message", "test input"));
-            assertTrue(response.statusCode() >= 500 || (response.statusCode() == 200
-                    && response.body().contains("run.failed") && !response.body().contains("run.completed")),
-                    "A failed finish write must not report a successful run: HTTP " + response.statusCode() + " " + response.body());
-            verify(ledger, times(1)).finish(anyString(), eq("SUCCEEDED"));
-            assertEquals(0, FAKE.calls.get());
-            assertEquals(1, FAKE.streams.get());
-            assertEquals(1, FAKE.subscriptions.get());
-            assertEquals(1, FAKE.attemptsVisibleAtDispatch.get());
-            assertEquals(0, count("SELECT count(*) FROM chat_run WHERE conversation_id=? AND status='COMPLETED'", conversation));
-            assertEquals(1, count("SELECT count(*) FROM provider_attempt a JOIN chat_run r ON r.id=a.run_id WHERE r.conversation_id=? AND a.execution_outcome='IN_PROGRESS'", conversation));
-        } finally {
-            reset(ledger);
-        }
-
-        String attemptId = jdbc.queryForObject("SELECT a.id FROM provider_attempt a JOIN chat_run r ON r.id=a.run_id WHERE r.conversation_id=?", String.class, conversation);
-        long versionBefore = jdbc.queryForObject("SELECT projection_version FROM provider_attempt WHERE id=?", Long.class, attemptId);
-        // This initializer uses only the isolated Testcontainers datasource for this test context.
-        databaseInitializer.run(null);
-        long versionAfter = jdbc.queryForObject("SELECT projection_version FROM provider_attempt WHERE id=?", Long.class, attemptId);
-        assertEquals(versionBefore + 1, versionAfter, "Restart recovery must invalidate the old projection version");
-        assertEquals(0, count("SELECT count(*) FROM provider_attempt a JOIN chat_run r ON r.id=a.run_id WHERE r.conversation_id=? AND a.execution_outcome='IN_PROGRESS'", conversation));
-        assertEquals(1, count("SELECT count(*) FROM provider_attempt a JOIN chat_run r ON r.id=a.run_id WHERE r.conversation_id=? AND a.execution_outcome='UNKNOWN' AND a.usage_presence='UNKNOWN' AND a.projection_state='UNKNOWN' AND a.projection_error='PROCESS_RESTART'", conversation));
+    private void rejectTerminalWrites(String conversation) {
+        jdbc.execute("create or replace function test_reject_durable_terminal() returns trigger language plpgsql as $$ begin if new.execution_outcome <> 'IN_PROGRESS' and exists(select 1 from chat_run where id=new.run_id and conversation_id='" + conversation + "') then raise exception 'injected terminal write failure'; end if; return new; end $$");
+        jdbc.execute("create trigger test_reject_durable_terminal before update on provider_attempt for each row execute function test_reject_durable_terminal()");
     }
 
+    private void allowTerminalWrites() {
+        jdbc.execute("drop trigger if exists test_reject_durable_terminal on provider_attempt");
+        jdbc.execute("drop function if exists test_reject_durable_terminal()");
+    }
+
+    private WorkspaceAdmission.Registration registration(String run) {
+        var row=jdbc.queryForMap("select token,workspace_id,actor_id,conversation_id,partition from workspace_admission_registration where run_id=?",run);
+        return new WorkspaceAdmission.Registration((String)row.get("token"),(String)row.get("workspace_id"),run,
+                (String)row.get("actor_id"),(String)row.get("conversation_id"),WorkspaceAdmission.Partition.valueOf((String)row.get("partition")));
+    }
+
+    @Test
+    void failedAttemptFinishCannotSucceedAndDurableIntentRecovers() throws Exception {
+        String conversation=createRaceConversation();
+        String requestId="finish-fail-"+UUID.randomUUID();
+        rejectTerminalWrites(conversation);
+        try {
+            var response=post("/api/conversations/"+conversation+"/runs",Map.of("clientRequestId",requestId,"message","test input"));
+            assertTrue(response.statusCode()>=500 || (response.statusCode()==200 && response.body().contains("run.failed") && !response.body().contains("run.completed")),response.body());
+            assertEquals(0,FAKE.calls.get()); assertEquals(1,FAKE.streams.get()); assertEquals(1,FAKE.subscriptions.get());
+            String run=runId(conversation,requestId);
+            assertNotEquals("COMPLETED",jdbc.queryForObject("select status from chat_run where id=?",String.class,run));
+            String attempt=jdbc.queryForObject("select id from provider_attempt where run_id=?",String.class,run);
+            assertEquals("IN_PROGRESS",jdbc.queryForObject("select execution_outcome from provider_attempt where id=?",String.class,attempt));
+            assertEquals("PENDING",jdbc.queryForObject("select state from workspace_admission_finalization where attempt_id=?",String.class,attempt));
+            assertNotEquals("TERMINAL",jdbc.queryForObject("select status from workspace_admission_registration where run_id=?",String.class,run));
+            allowTerminalWrites();
+            assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.recoverFinalization(registration(run),attempt).toCompletableFuture().get(10,TimeUnit.SECONDS));
+            assertEquals("SUCCEEDED",jdbc.queryForObject("select execution_outcome from provider_attempt where id=?",String.class,attempt));
+            assertEquals("SETTLED",jdbc.queryForObject("select state from workspace_admission_finalization where attempt_id=?",String.class,attempt));
+        } finally { allowTerminalWrites(); }
+    }
 
     @Test
     void membershipRevokedAfterDurableBeginPreventsProviderDispatch() throws Exception {
@@ -385,18 +383,52 @@ class UsageInvocationDurabilityIntegrationTests {
     private CountDownLatch watchNotDispatched() {
         CountDownLatch recorded = new CountDownLatch(1);
         doAnswer(invocation -> {
-            Object result = invocation.callRealMethod();
-            recorded.countDown();
-            return result;
-        }).when(ledger).notDispatched(anyString(), anyString());
+            WorkspaceAdmission.FinalizeAttempt command = invocation.getArgument(0);
+            @SuppressWarnings("unchecked")
+            var result = (java.util.concurrent.CompletionStage<WorkspaceAdmission.FinalizationResult>) invocation.callRealMethod();
+            return result.thenApply(outcome -> {
+                if (command.kind() == WorkspaceAdmission.TerminalKind.NOT_DISPATCHED
+                        && outcome == WorkspaceAdmission.FinalizationResult.SETTLED) recorded.countDown();
+                return outcome;
+            });
+        }).when(admission).finalizeAttempt(any());
         return recorded;
     }
 
     private void assertCancelledWithoutDispatch(String id, CountDownLatch recorded) throws InterruptedException {
-        assertTrue(recorded.await(5, TimeUnit.SECONDS), "NOT_DISPATCHED ledger write did not finish");
+        boolean settled = recorded.await(5, TimeUnit.SECONDS);
+        assertTrue(settled, () -> "NOT_DISPATCHED ledger write did not finish; " + cancellationDiagnostics(id));
         assertEquals(0, FAKE.calls.get()); assertEquals(0, FAKE.streams.get()); assertEquals(0, FAKE.subscriptions.get());
         assertEquals("CANCELLED", jdbc.queryForObject("SELECT status FROM chat_run WHERE id=?", String.class, id));
         assertEquals("NOT_DISPATCHED", jdbc.queryForObject("SELECT execution_outcome FROM provider_attempt WHERE run_id=?", String.class, id));
+    }
+
+    private String cancellationDiagnostics(String runId) {
+        try {
+            var rows = jdbc.queryForList("""
+                select r.status as run_status, ar.status as registration_status,
+                       a.execution_outcome as attempt_outcome, (a.started_at is not null) as has_started_at,
+                       d.state as dispatch_state, c.status as claim_status,
+                       f.terminal_kind as finalization_kind, f.state as finalization_state
+                  from chat_run r
+                  left join workspace_admission_registration ar on ar.run_id=r.id
+                  left join provider_attempt a on a.run_id=r.id
+                  left join workspace_admission_dispatch d on d.attempt_id=a.id
+                  left join workspace_admission_claim c on c.attempt_id=a.id
+                  left join workspace_admission_finalization f on f.attempt_id=a.id
+                 where r.id=?
+                """, runId);
+            var calls = org.mockito.Mockito.mockingDetails(admission).getInvocations().stream()
+                    .map(call -> call.getMethod().getName())
+                    .filter(name -> name.equals("dispatch") || name.equals("recoverClaim")
+                            || name.equals("finalizeAttempt") || name.equals("cancelRun"))
+                    .collect(java.util.stream.Collectors.groupingBy(java.util.function.Function.identity(),
+                            java.util.stream.Collectors.counting()));
+            return "database=" + rows + "; admissionCalls=" + calls;
+        } catch (RuntimeException ex) {
+            // Do not expose SQL text, payloads or credentials in test failure output.
+            return "diagnostics unavailable (" + ex.getClass().getSimpleName() + ")";
+        }
     }
 
     @Test
@@ -459,32 +491,42 @@ class UsageInvocationDurabilityIntegrationTests {
     void providerDispatchBeforeCancellationIsNotReportedAsNotDispatched() throws Exception {
         String conversation = createRaceConversation();
         String requestId = "dispatch-before-cancel-" + UUID.randomUUID();
-        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        CountDownLatch entered = new CountDownLatch(1), disposed = new CountDownLatch(1);
         CountDownLatch finalized = new CountDownLatch(1);
         doAnswer(invocation -> {
-            Object result = invocation.callRealMethod();
-            finalized.countDown();
+            WorkspaceAdmission.FinalizeAttempt command=invocation.getArgument(0);
+            @SuppressWarnings("unchecked") var result=(java.util.concurrent.CompletionStage<WorkspaceAdmission.FinalizationResult>)invocation.callRealMethod();
+            if(command.kind()==WorkspaceAdmission.TerminalKind.CANCELLED)
+                result.thenAccept(value -> { if(value==WorkspaceAdmission.FinalizationResult.SETTLED) finalized.countDown(); });
             return result;
-        }).when(ledger).finish(anyString(), eq("CANCELLED"));
-        FAKE.streamEntered = entered; FAKE.streamRelease = release;
+        }).when(admission).finalizeAttempt(any());
+        FAKE.subscribed = entered; FAKE.disposed = disposed;
         var pending = startAsync(conversation, requestId);
         try {
             assertTrue(entered.await(10, TimeUnit.SECONDS));
             String id = runId(conversation, requestId);
             cancelRun(id);
-            release.countDown();
             pending.get(15, TimeUnit.SECONDS);
+            assertTrue(disposed.await(5,TimeUnit.SECONDS),"provider subscription must be disposed");
             assertEquals(1, FAKE.streams.get());
+            assertEquals(1, FAKE.subscriptions.get());
             assertEquals("CANCELLED", jdbc.queryForObject("SELECT status FROM chat_run WHERE id=?", String.class, id));
             assertTrue(finalized.await(5, TimeUnit.SECONDS), "CANCELLED attempt finalization did not finish");
             var attempt = jdbc.queryForMap("SELECT execution_outcome, usage_presence FROM provider_attempt WHERE run_id=?", id);
             assertEquals("CANCELLED", attempt.get("execution_outcome"));
             assertEquals("UNKNOWN", attempt.get("usage_presence"));
             assertNotEquals("NOT_DISPATCHED", attempt.get("execution_outcome"));
+            assertEquals(1,count("select count(*) from workspace_admission_claim where attempt_id=(select id from provider_attempt where run_id=?)",id));
+            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(8); String registrationStatus=null;
+            while(System.nanoTime()<deadline) {
+                registrationStatus=jdbc.queryForObject("select status from workspace_admission_registration where run_id=?",String.class,id);
+                if("TERMINAL".equals(registrationStatus)) break;
+                Thread.yield();
+            }
+            assertEquals("TERMINAL",registrationStatus,"durable cancellation must eventually release its registration");
         } finally {
-            release.countDown();
-            FAKE.streamEntered = null; FAKE.streamRelease = null;
-            reset(ledger);
+            FAKE.subscribed = null; FAKE.disposed = null;
+            reset(admission);
         }
     }
 
@@ -516,6 +558,77 @@ class UsageInvocationDurabilityIntegrationTests {
             scheduler.queued = null;
             releaseWorker.countDown();
             reset(ledger);
+        }
+    }
+
+    @Test
+    void promptContextFailureDoesNotExposeExceptionInPublicRun() throws Exception {
+        String conversation=createRaceConversation();
+        String requestId="prompt-sentinel-"+UUID.randomUUID();
+        String sentinel="synthetic-prompt-context-private-marker";
+        doThrow(new IllegalStateException(sentinel)).when(sessions).findOrCreate(any(CreateSessionRequest.class));
+        try {
+            var response=post("/api/conversations/"+conversation+"/runs",Map.of("clientRequestId",requestId,"message","test input"));
+            assertEquals(200,response.statusCode());
+            assertTrue(response.body().contains("run.failed"),response.body());
+            String id=runId(conversation,requestId);
+            var result=post("/graphql",Map.of("query","query { run(id: \""+id+"\") { id status errorMessage } }"));
+            assertEquals(200,result.statusCode());
+            assertEquals("FAILED",json.readTree(result.body()).path("data").path("run").path("status").asText(),result.body());
+            assertEquals("NOT_DISPATCHED",jdbc.queryForObject("select execution_outcome from provider_attempt where run_id=?",String.class,id));
+            assertEquals("PROMPT_CONTEXT_UNAVAILABLE",jdbc.queryForObject("select execution_reason from provider_attempt where run_id=?",String.class,id));
+            assertEquals(0,FAKE.calls.get()); assertEquals(0,FAKE.streams.get()); assertEquals(0,FAKE.subscriptions.get());
+            assertEquals(0,count("select count(*) from ai_session where id=?",conversation));
+            assertFalse(response.body().contains(sentinel),"SSE must not expose prompt context exceptions");
+            assertFalse(result.body().contains(sentinel),"GraphQL must not expose prompt context exceptions");
+            assertFalse(jdbc.queryForObject("select error_message from chat_run where id=?",String.class,id).contains(sentinel));
+        } finally { reset(sessions); }
+    }
+
+    @Test
+    void promptFailureWaitsForDurableAttemptSettlementBeforeRunTerminal() throws Exception {
+        String conversation=createRaceConversation();
+        String requestId="prompt-settlement-lock-"+UUID.randomUUID();
+        var sessionEntered=new CountDownLatch(1); var releaseSession=new CountDownLatch(1);
+        doAnswer(call -> {
+            sessionEntered.countDown();
+            if(!releaseSession.await(10,TimeUnit.SECONDS)) throw new IllegalStateException("session latch timed out");
+            throw new IllegalStateException("synthetic prompt failure");
+        }).when(sessions).findOrCreate(any(CreateSessionRequest.class));
+        jdbc.execute("create function test_hold_prompt_settlement() returns trigger language plpgsql as $$ begin if new.execution_outcome <> 'IN_PROGRESS' and exists(select 1 from chat_run where id=new.run_id and conversation_id='"+conversation+"') then perform pg_advisory_xact_lock(370037001); end if; return new; end $$");
+        jdbc.execute("create trigger test_hold_prompt_settlement before update on provider_attempt for each row execute function test_hold_prompt_settlement()");
+        var pending=startAsync(conversation,requestId);
+        try (var connection=dataSource.getConnection()) {
+            assertTrue(sessionEntered.await(10,TimeUnit.SECONDS));
+            String run=runId(conversation,requestId);
+            connection.setAutoCommit(false);
+            int blocker;
+            try(var statement=connection.createStatement(); var rows=statement.executeQuery("select pg_backend_pid()")) { assertTrue(rows.next()); blocker=rows.getInt(1); }
+            try(var statement=connection.createStatement()) { statement.execute("select pg_advisory_xact_lock(370037001)"); }
+            releaseSession.countDown();
+            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5); boolean waiting=false;
+            while(System.nanoTime()<deadline) {
+                waiting=Boolean.TRUE.equals(jdbc.queryForObject("select exists(select 1 from pg_stat_activity where ?=any(pg_blocking_pids(pid)))",Boolean.class,blocker));
+                if(waiting) break;
+                Thread.yield();
+            }
+            assertTrue(waiting,"settlement did not reach the advisory-lock trigger");
+            assertEquals("PENDING",jdbc.queryForObject("select f.state from workspace_admission_finalization f join provider_attempt a on a.id=f.attempt_id where a.run_id=?",String.class,run),"finalization intent must already be committed");
+            assertEquals("IN_PROGRESS",jdbc.queryForObject("select execution_outcome from provider_attempt where run_id=?",String.class,run));
+            assertNotEquals("TERMINAL",jdbc.queryForObject("select status from workspace_admission_registration where run_id=?",String.class,run));
+            assertThrows(java.util.concurrent.TimeoutException.class,() -> pending.get(2,TimeUnit.SECONDS),"HTTP stream must not complete before attempt settlement");
+            assertEquals("RUNNING",jdbc.queryForObject("select status from chat_run where id=?",String.class,run),"Run must not publish terminal before durable attempt settlement");
+            connection.rollback();
+            var response=pending.get(15,TimeUnit.SECONDS);
+            assertTrue(response.body().contains("run.failed"),response.body());
+            assertEquals("NOT_DISPATCHED",jdbc.queryForObject("select execution_outcome from provider_attempt where run_id=?",String.class,run));
+            assertEquals("PROMPT_CONTEXT_UNAVAILABLE",jdbc.queryForObject("select execution_reason from provider_attempt where run_id=?",String.class,run));
+            assertEquals(0,FAKE.calls.get()); assertEquals(0,FAKE.streams.get()); assertEquals(0,FAKE.subscriptions.get());
+        } finally {
+            releaseSession.countDown();
+            jdbc.execute("drop trigger if exists test_hold_prompt_settlement on provider_attempt");
+            jdbc.execute("drop function if exists test_hold_prompt_settlement()");
+            reset(sessions);
         }
     }
 
@@ -577,23 +690,21 @@ class UsageInvocationDurabilityIntegrationTests {
     }
 
     @Test
-    void cancellationDuringDispatchTimestampWriteLeavesNoDispatchTimestamp() throws Exception {
+    void cancellationBeforeAdmissionClaimLeavesNoDispatchTimestamp() throws Exception {
         String conversation = createRaceConversation();
         String requestId = "cancel-mark-dispatch-" + UUID.randomUUID();
         CountDownLatch marked = new CountDownLatch(1), release = new CountDownLatch(1);
         CountDownLatch recorded = watchNotDispatched();
         doAnswer(invocation -> {
-            Object updated = invocation.callRealMethod();
-            assertEquals(Boolean.TRUE, updated);
             marked.countDown();
-            if (!release.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("dispatch mark latch timed out");
-            return updated;
-        }).when(ledger).markDispatched(anyString(), any());
+            if (!release.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("admission dispatch latch timed out");
+            return invocation.callRealMethod();
+        }).when(admission).dispatch(any());
         var pending = startAsync(conversation, requestId);
         try {
             assertTrue(marked.await(10, TimeUnit.SECONDS));
             String id = runId(conversation, requestId);
-            // The spy is still inside the transaction: another connection cannot see the uncommitted update.
+            // The public dispatch has not yet entered the lane, so cancellation can win the claim.
             assertNull(jdbc.queryForMap("SELECT started_at FROM provider_attempt WHERE run_id=?", id).get("started_at"));
             cancelRun(id);
             release.countDown();
@@ -603,6 +714,7 @@ class UsageInvocationDurabilityIntegrationTests {
         } finally {
             release.countDown();
             reset(ledger);
+            reset(admission);
         }
     }
 
@@ -611,8 +723,12 @@ class UsageInvocationDurabilityIntegrationTests {
         String conversation = createRaceConversation();
         String requestId = "failed-mark-dispatch-" + UUID.randomUUID();
         CountDownLatch recorded = watchNotDispatched();
-        doThrow(new IllegalStateException("synthetic dispatch timestamp failure"))
-                .when(ledger).markDispatched(anyString(), any());
+        jdbc.execute("""
+            CREATE FUNCTION dispatch_timestamp_failure_fixture() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN IF NEW.started_at IS NOT NULL AND OLD.started_at IS NULL THEN
+              RAISE EXCEPTION 'synthetic dispatch timestamp failure'; END IF; RETURN NEW; END $$
+            """);
+        jdbc.execute("CREATE TRIGGER dispatch_timestamp_failure_fixture BEFORE UPDATE ON provider_attempt FOR EACH ROW EXECUTE FUNCTION dispatch_timestamp_failure_fixture()");
         try {
             var response = post("/api/conversations/" + conversation + "/runs", Map.of(
                     "clientRequestId", requestId, "message", "test input"));
@@ -626,7 +742,10 @@ class UsageInvocationDurabilityIntegrationTests {
             assertEquals("NOT_DISPATCHED", attempt.get("execution_outcome"));
             assertNull(attempt.get("started_at"));
         } finally {
+            jdbc.execute("DROP TRIGGER IF EXISTS dispatch_timestamp_failure_fixture ON provider_attempt");
+            jdbc.execute("DROP FUNCTION IF EXISTS dispatch_timestamp_failure_fixture()");
             reset(ledger);
+            reset(admission);
         }
     }
 
@@ -678,7 +797,7 @@ class UsageInvocationDurabilityIntegrationTests {
         doAnswer(invocation -> {
             markEntered.countDown();
             return invocation.callRealMethod();
-        }).when(ledger).markDispatched(anyString(), any());
+        }).when(admission).dispatch(any());
         var pending = startAsync(conversation, requestId);
         try (Connection lockConnection = dataSource.getConnection()) {
             lockConnection.setAutoCommit(false);
@@ -721,6 +840,7 @@ class UsageInvocationDurabilityIntegrationTests {
                 releaseBegin.countDown();
                 lockConnection.rollback();
                 reset(ledger);
+                reset(admission);
             }
         }
     }
@@ -738,7 +858,7 @@ class UsageInvocationDurabilityIntegrationTests {
                 case "capture" -> doThrow(new IllegalStateException(sentinel)).doCallRealMethod().when(captureAdapter).capture(any(), anyString(), anyLong());
                 default -> throw new IllegalArgumentException(source);
             }
-            if (finalizationAlsoFails) doThrow(new IllegalStateException(sentinel)).when(ledger).finish(anyString(), anyString());
+            if (finalizationAlsoFails) rejectTerminalWrites(conversation);
             var response = post("/api/conversations/" + conversation + "/runs", Map.of("clientRequestId", requestId, "message", "fixture input"));
             assertTrue(response.statusCode() >= 500 || (response.statusCode() == 200
                     && response.body().contains("run.failed") && !response.body().contains("run.completed")), response.body());
@@ -751,11 +871,13 @@ class UsageInvocationDurabilityIntegrationTests {
             var state = jdbc.queryForMap("SELECT execution_outcome,execution_reason,usage_presence,projection_state,projection_error,projection_version FROM provider_attempt WHERE id=?", attempt);
             if (finalizationAlsoFails) {
                 assertEquals("IN_PROGRESS", state.get("execution_outcome"));
-                reset(ledger);
-                databaseInitializer.run(null);
+                assertEquals("PENDING",jdbc.queryForObject("select state from workspace_admission_finalization where attempt_id=?",String.class,attempt));
+                assertNotEquals("TERMINAL",jdbc.queryForObject("select status from workspace_admission_registration where run_id=?",String.class,run));
+                allowTerminalWrites();
+                assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.recoverFinalization(registration(run),attempt).toCompletableFuture().get(10,TimeUnit.SECONDS));
                 var recovered = jdbc.queryForMap("SELECT execution_outcome,projection_error FROM provider_attempt WHERE id=?", attempt);
                 assertEquals("UNKNOWN", recovered.get("execution_outcome"));
-                assertEquals("PROCESS_RESTART", recovered.get("projection_error"));
+                assertEquals("CAPTURE_FAILED", recovered.get("projection_error"));
             } else {
                 assertEquals("UNKNOWN", state.get("execution_outcome"));
                 assertEquals("CAPTURE_FAILED", state.get("execution_reason"));
@@ -768,6 +890,7 @@ class UsageInvocationDurabilityIntegrationTests {
             }
         } finally {
             FAKE.emitNativeUsage = false;
+            if (finalizationAlsoFails) allowTerminalWrites();
             reset(ledger, captureAdapter);
         }
     }
@@ -817,10 +940,11 @@ class UsageInvocationDurabilityIntegrationTests {
         String conversation = createRaceConversation();
         String requestId = "mark-after-decision-failure-" + UUID.randomUUID();
         CountDownLatch recorded = watchNotDispatched();
-        doAnswer(invocation -> {
-            assertEquals(Boolean.TRUE, invocation.callRealMethod());
-            throw new IllegalStateException("synthetic transaction failure after decision");
-        }).when(ledger).markDispatched(anyString(), any());
+        jdbc.execute("""
+            CREATE FUNCTION dispatch_claim_failure_fixture() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE EXCEPTION 'synthetic transaction failure after started_at update'; END $$
+            """);
+        jdbc.execute("CREATE TRIGGER dispatch_claim_failure_fixture BEFORE INSERT ON workspace_admission_claim FOR EACH ROW EXECUTE FUNCTION dispatch_claim_failure_fixture()");
         try {
             var response = post("/api/conversations/" + conversation + "/runs", Map.of("clientRequestId", requestId, "message", "test input"));
             assertTrue(response.statusCode() >= 500 || (response.statusCode() == 200 && response.body().contains("run.failed") && !response.body().contains("run.completed")), response.body());
@@ -830,7 +954,12 @@ class UsageInvocationDurabilityIntegrationTests {
             var attempt = jdbc.queryForMap("SELECT execution_outcome,started_at FROM provider_attempt WHERE run_id=?", run);
             assertEquals("NOT_DISPATCHED", attempt.get("execution_outcome"));
             assertNull(attempt.get("started_at"));
-        } finally { reset(ledger); }
+        } finally {
+            jdbc.execute("DROP TRIGGER IF EXISTS dispatch_claim_failure_fixture ON workspace_admission_claim");
+            jdbc.execute("DROP FUNCTION IF EXISTS dispatch_claim_failure_fixture()");
+            reset(ledger);
+            reset(admission);
+        }
     }
 
 }

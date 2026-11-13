@@ -39,6 +39,8 @@ public class ControlledChatModel implements ChatModel, StreamingChatModel {
     }
 
     private final List<Prompt> recordedPrompts = new CopyOnWriteArrayList<>();
+    private final java.util.concurrent.atomic.AtomicInteger automaticSubscriptions = new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicInteger automaticDisposals = new java.util.concurrent.atomic.AtomicInteger();
 
     private volatile Mode mode = Mode.AUTOMATIC;
     private volatile Sinks.Many<ChatResponse> sink = Sinks.many().multicast().onBackpressureBuffer();
@@ -55,6 +57,8 @@ public class ControlledChatModel implements ChatModel, StreamingChatModel {
 
     public synchronized void reset() {
         recordedPrompts.clear();
+        automaticSubscriptions.set(0);
+        automaticDisposals.set(0);
         mode = Mode.AUTOMATIC;
         sink = Sinks.many().multicast().onBackpressureBuffer();
         subscribedLatch = new CountDownLatch(1);
@@ -83,6 +87,9 @@ public class ControlledChatModel implements ChatModel, StreamingChatModel {
     public List<Prompt> getRecordedPrompts() {
         return Collections.unmodifiableList(recordedPrompts);
     }
+
+    public int automaticSubscriptions() { return automaticSubscriptions.get(); }
+    public int automaticDisposals() { return automaticDisposals.get(); }
 
     public Prompt getLastPrompt() {
         if (recordedPrompts.isEmpty()) {
@@ -190,6 +197,8 @@ public class ControlledChatModel implements ChatModel, StreamingChatModel {
         };
 
         return Flux.fromArray(chunks)
+                .doOnSubscribe(ignored -> automaticSubscriptions.incrementAndGet())
+                .doFinally(ignored -> automaticDisposals.incrementAndGet())
                 .delayElements(Duration.ofMillis(30))
                 .map(chunk -> new ChatResponse(List.of(new Generation(new AssistantMessage(chunk)))));
     }

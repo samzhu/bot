@@ -31,6 +31,10 @@ public class RunRegistry {
         return activeHandles.remove(runId);
     }
 
+    public boolean remove(String runId, RunHandle expected) {
+        return activeHandles.remove(runId, expected);
+    }
+
     public boolean hasActiveRunForConversation(String conversationId) {
         if (conversationId == null) return false;
         return activeHandles.values().stream().anyMatch(h -> conversationId.equals(h.getConversationId()));

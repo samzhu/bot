@@ -42,9 +42,14 @@ class UsageLedgerIntegrationTests {
     @Autowired io.github.samzhu.bot.identity.CurrentUserProvider currentUser;
     @Autowired io.github.samzhu.bot.usage.internal.pricing.CatalogActivation catalogActivation;
     @Autowired io.github.samzhu.bot.execution.internal.UsageInvocation invocation;
+    @Autowired io.github.samzhu.bot.usage.WorkspaceAdmission admission;
     @Autowired io.github.samzhu.bot.execution.internal.RunRegistry runRegistry;
     @org.springframework.test.context.bean.override.mockito.MockitoSpyBean io.github.samzhu.bot.usage.UsageLedger ledger;
     @Autowired org.springframework.transaction.support.TransactionTemplate transaction;
+    @Autowired io.github.samzhu.bot.usage.internal.admission.WorkspaceLane workspaceLane;
+    @Autowired io.github.samzhu.bot.usage.internal.admission.BudgetProjection budgetProjection;
+    @Autowired org.springframework.transaction.PlatformTransactionManager transactionManager;
+    @Autowired io.github.samzhu.bot.usage.RunAdmissionStateReader runAdmissionStateReader;
 
     @TestBean(name = "mockChatModel", methodName = "fakeModel", enforceOverride = true)
     ChatModel model;
@@ -744,7 +749,8 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
         var fixed =
                 java.time.Clock.fixed(
                         java.time.Instant.parse("2026-01-31T16:00:00Z"), java.time.ZoneOffset.UTC);
-        var controlled = new io.github.samzhu.bot.usage.internal.JdbcUsageLedger(jdbc, fixed, catalogActivation);
+        var controlled = new io.github.samzhu.bot.usage.internal.JdbcUsageLedger(
+                jdbc, fixed, catalogActivation, workspaceLane, budgetProjection, transactionManager, runAdmissionStateReader);
         String id =
                 controlled.begin(
                         new io.github.samzhu.bot.usage.UsageLedger.Dispatch(
@@ -996,7 +1002,14 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
                                         ChatResponseMetadata.builder().usage(usage).build()));
                     }
                 };
-        var first = invocation.begin(run, workspace, "dev-user", handle);
+        var metadata = invocation.dispatchMetadata(run, workspace, "dev-user");
+            var partition = metadata.simulation() ? io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.SIMULATION : io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.REAL;
+            var registered = admission.register(new io.github.samzhu.bot.usage.WorkspaceAdmission.Register(workspace, run, "dev-user", conversation, partition)).toCompletableFuture().join();
+            assertInstanceOf(io.github.samzhu.bot.usage.WorkspaceAdmission.RegisterResult.Registered.class, registered);
+            var registration = ((io.github.samzhu.bot.usage.WorkspaceAdmission.RegisterResult.Registered)registered).registration();
+            assertInstanceOf(io.github.samzhu.bot.usage.WorkspaceAdmission.PublicationResult.Ready.class, admission.publish(registration).toCompletableFuture().join());
+            handle.setAdmissionRegistration(registration);
+            var first = invocation.begin(metadata, registration);
         assertEquals(
                 1,
                 invocation.stream(
@@ -1010,7 +1023,7 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
                         .collectList()
                         .block()
                         .size());
-        var second = invocation.begin(run, workspace, "dev-user", handle);
+        var second = invocation.begin(metadata, registration);
         assertEquals(
                 1,
                 invocation.stream(
@@ -1101,7 +1114,14 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
                                             List.of(new Generation(new AssistantMessage("ok")))));
                         }
                     };
-            var first = invocation.begin(run, workspace, "dev-user", handle);
+            var metadata = invocation.dispatchMetadata(run, workspace, "dev-user");
+            var partition = metadata.simulation() ? io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.SIMULATION : io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.REAL;
+            var registered = admission.register(new io.github.samzhu.bot.usage.WorkspaceAdmission.Register(workspace, run, "dev-user", conversation, partition)).toCompletableFuture().join();
+            assertInstanceOf(io.github.samzhu.bot.usage.WorkspaceAdmission.RegisterResult.Registered.class, registered);
+            var registration = ((io.github.samzhu.bot.usage.WorkspaceAdmission.RegisterResult.Registered)registered).registration();
+            assertInstanceOf(io.github.samzhu.bot.usage.WorkspaceAdmission.PublicationResult.Ready.class, admission.publish(registration).toCompletableFuture().join());
+            handle.setAdmissionRegistration(registration);
+            var first = invocation.begin(metadata, registration);
             invocation.stream(
                             fake,
                             new Prompt("one"),
@@ -1112,7 +1132,7 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
                             handle)
                     .collectList()
                     .block();
-            var second = invocation.begin(run, workspace, "dev-user", handle);
+            var second = invocation.begin(metadata, registration);
             try {
                 if (revoke)
                     jdbc.update(
@@ -1276,7 +1296,13 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
             var request=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/api/ag-ui")).header("Content-Type","application/json").header("Accept","text/event-stream").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body))).build();
             var response=http.send(request,HttpResponse.BodyHandlers.ofString());
             assertEquals("UNKNOWN",jdbc.queryForObject("select execution_outcome from provider_attempt where run_id=?",String.class,run));
+            assertEquals("UNKNOWN",jdbc.queryForObject("select f.terminal_kind from workspace_admission_finalization f join provider_attempt a on a.id=f.attempt_id where a.run_id=?",String.class,run));
+            assertEquals("SETTLED",jdbc.queryForObject("select f.state from workspace_admission_finalization f join provider_attempt a on a.id=f.attempt_id where a.run_id=?",String.class,run));
             assertFalse(response.body().contains("private-error-sentinel"));
+            var next=Map.of("threadId",conversation,"runId",UUID.randomUUID().toString(),"messages",List.of(Map.of("id","u2","role","user","content","next")));
+            var retry=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/api/ag-ui")).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(next))).build();
+            var nextResponse=http.send(retry,HttpResponse.BodyHandlers.ofString());
+            assertEquals(200,nextResponse.statusCode(),nextResponse.body());
         } finally { org.mockito.Mockito.reset(ledger); }
     }
     @Test

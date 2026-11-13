@@ -87,6 +87,7 @@ type Conversation {
 }
 
 type Query {
+  workspaceMonthlyBudget(workspaceId: ID!, simulation: Boolean!): WorkspaceMonthlyBudget!
   workspaces: [Workspace!]!
   personalWorkspace: Workspace!
   bots(search: String, target: BotTarget, limit: Int = 20, offset: Int = 0): [Bot!]!
@@ -97,11 +98,44 @@ type Query {
   run(id: ID!): Run
 }
 
+enum MonthlyBudgetState { DISABLED OPEN BLOCKED_CAP BLOCKED_UNKNOWN BLOCKED_RECOVERY }
+enum MonthlyBudgetReason { DISABLED NONE CAP_REACHED TERMINAL_COST_UNKNOWN RECOVERY_REQUIRED }
+type WorkspaceMonthlyBudget {
+  workspaceId: ID!
+  simulation: Boolean!
+  period: String!
+  periodStart: String!
+  periodEnd: String!
+  enabled: Boolean!
+  capUsd: String
+  knownSubtotalUsd: String
+  terminalUnknownCount: String!
+  state: MonthlyBudgetState!
+  reason: MonthlyBudgetReason!
+  configVersion: String!
+  generation: String!
+}
+
 type Mutation {
+  configureWorkspaceMonthlyBudget(input: ConfigureWorkspaceMonthlyBudgetInput!): ConfigureWorkspaceMonthlyBudgetResult!
   createConversation(botId: ID!, title: String, workspaceId: ID): Conversation!
   setConversationPinned(id: ID!, pinned: Boolean!): Conversation!
   createBot(input: CreateBotInput!): Bot!
   updateBot(input: UpdateBotInput!): Bot!
+}
+
+enum MonthlyBudgetConfigureOutcome { APPLIED REPLAYED }
+input ConfigureWorkspaceMonthlyBudgetInput {
+  workspaceId: ID!
+  simulation: Boolean!
+  enabled: Boolean!
+  capUsd: String
+  expectedConfigVersion: String!
+  idempotencyKey: String!
+}
+type ConfigureWorkspaceMonthlyBudgetResult {
+  outcome: MonthlyBudgetConfigureOutcome!
+  budget: WorkspaceMonthlyBudget!
 }
 
 enum AttemptCoverage { VERIFIED UNKNOWN }

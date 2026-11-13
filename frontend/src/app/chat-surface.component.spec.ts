@@ -5,6 +5,15 @@ import { ChatSurfaceComponent } from './chat-surface.component';
 import { signal } from '@angular/core';
 
 describe('ChatSurfaceComponent', () => {
+  it.each([['MONTH_CAP','預算'],['MONTH_UNKNOWN','費用']])('shows a safe budget denial for %s', async (reason, expected) => {
+    const fixture = TestBed.createComponent(ChatSurfaceComponent);
+    fixture.componentRef.setInput('agent', mockAgent());
+    fixture.componentRef.setInput('runFailed', true);
+    fixture.componentRef.setInput('runDenialReason', reason);
+    fixture.detectChanges(); await fixture.whenStable(); fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain(expected);
+    expect(fixture.nativeElement.textContent).not.toContain('untrusted server text');
+  });
   it('shows cancellation even when no assistant message was produced', async () => {
     const fixture = TestBed.createComponent(ChatSurfaceComponent);
     fixture.componentRef.setInput('agent', mockAgent());

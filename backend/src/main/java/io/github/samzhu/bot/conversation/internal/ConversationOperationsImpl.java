@@ -6,6 +6,8 @@ import io.github.samzhu.bot.bot.BotView;
 import io.github.samzhu.bot.bot.GkeAgentNotConnectedException;
 import io.github.samzhu.bot.conversation.ConversationAccessDeniedException;
 import io.github.samzhu.bot.conversation.ConversationOperations;
+import io.github.samzhu.bot.conversation.ConversationRecoveryReader;
+import io.github.samzhu.bot.conversation.ConversationRecoveryIdentity;
 import io.github.samzhu.bot.conversation.ConversationSearchValidationException;
 import io.github.samzhu.bot.conversation.ConversationView;
 import io.github.samzhu.bot.conversation.MessageView;
@@ -20,7 +22,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 @Service
-public class ConversationOperationsImpl implements ConversationOperations {
+public class ConversationOperationsImpl implements ConversationOperations, ConversationRecoveryReader {
 
     private final ConversationRepository conversationRepository;
     private final MessageRepository messageRepository;
@@ -70,6 +72,12 @@ public class ConversationOperationsImpl implements ConversationOperations {
         return conversationRepository.findById(id)
                 .filter(conv -> userId != null && userId.equals(conv.userId()) && workspace.isMember(conv.workspaceId(), userId))
                 .map(this::toView);
+    }
+
+    @Override
+    public Optional<ConversationRecoveryIdentity> readIdentity(String conversationId) {
+        return conversationRepository.findById(conversationId)
+                .map(conv -> new ConversationRecoveryIdentity(conv.id(),conv.workspaceId(),conv.userId()));
     }
 
     @Override

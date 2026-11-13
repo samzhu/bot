@@ -23,9 +23,13 @@ public class PricingPublisher {
     private final UsageLedger ledger;
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
+    private final io.github.samzhu.bot.usage.internal.admission.WorkspaceLane lane;
+    private final io.github.samzhu.bot.usage.internal.admission.BudgetProjection projection;
     private final ObjectMapper json = new ObjectMapper();
-    public PricingPublisher(UsageLedger ledger, JdbcTemplate jdbc, TransactionTemplate transactions) {
-        this.ledger = ledger; this.jdbc = jdbc; this.transactions = transactions;
+    public PricingPublisher(UsageLedger ledger, JdbcTemplate jdbc, TransactionTemplate transactions,
+            io.github.samzhu.bot.usage.internal.admission.WorkspaceLane lane,
+            io.github.samzhu.bot.usage.internal.admission.BudgetProjection projection) {
+        this.ledger = ledger; this.jdbc = jdbc; this.transactions = transactions; this.lane=lane; this.projection=projection;
     }
     public static class Conflict extends RuntimeException {
         public Conflict() { super("Pricing source conflict"); }
@@ -98,7 +102,7 @@ public class PricingPublisher {
             details = canonicalDetails(reasons, detailLines);
         }
         catch (Exception e) { throw new IllegalStateException(e); }
-        Boolean result = transactions.execute(tx -> {
+        java.util.function.Supplier<Boolean> publish = () -> transactions.execute(tx -> {
             var rows = jdbc.query("select projection_version,projection_state,projection_snapshot_id,execution_outcome from provider_attempt where id=? for update",
                 (rs,n)-> new Object[]{rs.getLong(1),rs.getString(2),rs.getString(3),rs.getString(4)},id);
             if (rows.isEmpty()) return false;
@@ -149,7 +153,25 @@ public class PricingPublisher {
             else jdbc.update("insert into usage_cost_current(attempt_id,estimate_id) values (?,?) on conflict (attempt_id) do update set estimate_id=excluded.estimate_id",id,estimateId);
             return true;
         });
-        return Boolean.TRUE.equals(result);
+        try {
+            Boolean result=lane.submitCritical(input.workspaceId(), () -> transactions.execute(tx -> {
+                io.github.samzhu.bot.usage.internal.admission.UsageWriterLock.registrationForAttempt(jdbc,id);
+                Boolean published=publish.get();
+                if (input.startedAt()!=null) {
+                    var zone=java.time.ZoneId.of("Asia/Taipei");
+                    var period=java.time.YearMonth.from(input.startedAt().atZone(zone));
+                    projection.recompute(input.workspaceId(),input.simulation()
+                                    ? io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.SIMULATION
+                                    : io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.REAL,
+                            period.atDay(1).atStartOfDay(zone).toInstant(),period.plusMonths(1).atDay(1).atStartOfDay(zone).toInstant());
+                }
+                return published;
+            })).toCompletableFuture().join();
+            return Boolean.TRUE.equals(result);
+        } catch (java.util.concurrent.CompletionException ex) {
+            if (ex.getCause() instanceof RuntimeException cause) throw cause;
+            throw ex;
+        }
     }
     private void checkpoint(String id,long version) {
         jdbc.update("insert into usage_cost_manual_source_checkpoint(attempt_id,last_processed_projection_version) values (?,?) on conflict (attempt_id) do update set last_processed_projection_version=excluded.last_processed_projection_version",id,version);

@@ -20,6 +20,9 @@ public interface ChatRunRepository extends CrudRepository<ChatRun, String> {
     @Query("SELECT * FROM chat_run WHERE conversation_id = :conversationId ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset")
     List<ChatRun> findByConversationIdWithPaging(String conversationId, int limit, int offset);
 
+    @Query("SELECT * FROM chat_run WHERE id = :runId FOR UPDATE")
+    Optional<ChatRun> findForAdmission(String runId);
+
     @Modifying
     @Query("""
         UPDATE chat_run
@@ -27,4 +30,11 @@ public interface ChatRunRepository extends CrudRepository<ChatRun, String> {
         WHERE id = :id AND status IN ('PENDING', 'RUNNING')
     """)
     int updateTerminalStatus(String id, String newStatus, String errorMessage, Instant updatedAt);
+
+    @Modifying
+    @Query("""
+        UPDATE chat_run SET status = 'FAILED', error_message = :errorMessage, updated_at = :updatedAt
+        WHERE id = :id AND conversation_id = :conversationId AND status IN ('PENDING', 'RUNNING')
+    """)
+    int failDurableRecovery(String id, String conversationId, String errorMessage, Instant updatedAt);
 }

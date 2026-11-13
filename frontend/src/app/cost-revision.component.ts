@@ -151,6 +151,7 @@ const amountPattern='(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,12})?';
 export class CostRevisionComponent implements OnChanges,OnDestroy {
   @Input() workspaceId:string|null=null;
   @Input() manager=false;
+  @Input() initialSimulation=false;
   @Input() transport:CostRevisionTransport=GRAPHQL_COST_REVISION_TRANSPORT;
   readonly store=new CostRevisionStore(GRAPHQL_COST_REVISION_TRANSPORT);
   @ViewChild('mutationErrorSummary') private mutationErrorSummary?:ElementRef<HTMLElement>;
@@ -161,7 +162,7 @@ export class CostRevisionComponent implements OnChanges,OnDestroy {
   private reconcileTouched=new Set<string>();
   lookupInput(event:Event):void{this.lookupValue.set((event.target as HTMLInputElement).value);this.store.lookupError.set(null);}
   async submitLookup(event:Event,form:HTMLFormElement):Promise<void>{event.preventDefault();const id=this.lookupValue().trim();if(!id){this.store.lookupError.set('請輸入 attempt ID。');form.querySelector<HTMLInputElement>('#attempt-lookup-id')?.focus();return;}const invalid=form.querySelector<HTMLElement>(':invalid');if(invalid){invalid.focus();form.reportValidity();return;}await this.store.lookupById(id);if(this.store.lookupError())queueMicrotask(()=>this.lookupErrorSummary?.nativeElement.focus());}
-  ngOnChanges(changes:SimpleChanges):void{if(changes['transport'])this.store.setTransport(this.transport);if(changes['workspaceId']||changes['manager']||changes['transport'])void this.store.setScope(this.workspaceId,this.manager);}
+  ngOnChanges(changes:SimpleChanges):void{if(changes['initialSimulation'])void this.store.setSimulation(this.initialSimulation);if(changes['transport'])this.store.setTransport(this.transport);if(changes['workspaceId']||changes['manager']||changes['transport'])void this.store.setScope(this.workspaceId,this.manager);}
   ngOnDestroy():void{this.store.dispose();}
   manualInput(field:'amount'|'evidenceReference'|'reason',event:Event):void{const input=event.target as HTMLInputElement|HTMLTextAreaElement;input.setCustomValidity('');this.fieldAnnouncement.set('');this.store.updateManual(field,input.value);}
   blurManual(field:string,event:Event):void{this.manualTouched.add(field);const input=event.target as HTMLInputElement|HTMLTextAreaElement;input.setCustomValidity('');const message=this.manualError(field);this.fieldAnnouncement.set(message?`錯誤：${message}`:'');}

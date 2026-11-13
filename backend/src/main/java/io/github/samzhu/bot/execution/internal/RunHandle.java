@@ -47,7 +47,60 @@ public class RunHandle {
     private final Disposable.Swap swapDisposable = Disposables.swap();
     private final StringBuilder fullReply = new StringBuilder();
 
+    private volatile io.github.samzhu.bot.usage.WorkspaceAdmission.Registration admissionRegistration;
+    private volatile boolean admissionCancelledBeforeClaim;
+    private final java.util.concurrent.atomic.AtomicReference<io.github.samzhu.bot.usage.WorkspaceAdmission.ClaimFence> admissionClaim = new java.util.concurrent.atomic.AtomicReference<>();
+    public void setAdmissionRegistration(io.github.samzhu.bot.usage.WorkspaceAdmission.Registration registration) {
+        this.admissionRegistration = registration;
+    }
+    public io.github.samzhu.bot.usage.WorkspaceAdmission.Registration admissionRegistration() {
+        return admissionRegistration;
+    }
+    public void markAdmissionCancelledBeforeClaim() { admissionCancelledBeforeClaim = true; }
+    public boolean admissionCancelledBeforeClaim() { return admissionCancelledBeforeClaim; }
+    public void setAdmissionClaim(io.github.samzhu.bot.usage.WorkspaceAdmission.ClaimFence claim) {
+        synchronized (dispatchLock) { admissionClaim.set(claim); }
+    }
+    public io.github.samzhu.bot.usage.WorkspaceAdmission.ClaimFence admissionClaim() {
+        return admissionClaim.get();
+    }
+    public boolean requestCancellationForClaim(io.github.samzhu.bot.usage.WorkspaceAdmission.ClaimFence claim) {
+        synchronized (dispatchLock) {
+            if (!java.util.Objects.equals(admissionClaim.get(), claim)) return false;
+            requestCancellation();
+            return true;
+        }
+    }
+
     private boolean terminal = false;
+    private boolean promptFailureAwaitingSettlement;
+    private boolean budgetCancellationPending;
+
+    /** Protect a verified durable budget cancellation from generic failure and timeout paths. */
+    public boolean protectBudgetCancellation(io.github.samzhu.bot.usage.BudgetCancellationSink.Effect effect) {
+        synchronized (lock) {
+            var registration=admissionRegistration;
+            if (registration==null || effect==null || effect.effectId()==null || effect.effectId().isBlank()
+                    || effect.intentReceipt()==null || effect.intentReceipt().isBlank()
+                    || !(effect.target() instanceof io.github.samzhu.bot.usage.BudgetCancellationSink.Target.Pending pending)) return false;
+            var fence=pending.fence();
+            if (fence==null || fence.pendingId()==null || fence.pendingId().isBlank() || fence.epoch()<0
+                    || fence.periodStart()==null || fence.periodEnd()==null || !fence.periodStart().isBefore(fence.periodEnd())
+                    || !java.util.Objects.equals(registration.token(),effect.token())
+                    || !java.util.Objects.equals(registration.workspaceId(),effect.workspaceId())
+                    || registration.partition()!=effect.partition() || !java.util.Objects.equals(registration.runId(),effect.runId())
+                    || !java.util.Objects.equals(fence.token(),effect.token())
+                    || !java.util.Objects.equals(fence.workspaceId(),effect.workspaceId()) || fence.partition()!=effect.partition()) return false;
+            budgetCancellationPending=true;
+            return true;
+        }
+    }
+
+    public void markPromptFailureAwaitingSettlement() {
+        synchronized (lock) { promptFailureAwaitingSettlement = true; }
+    }
+    private final java.util.concurrent.CompletableFuture<Void> durableTerminal = new java.util.concurrent.CompletableFuture<>();
+    public java.util.concurrent.CompletionStage<Void> durableTerminal() { return durableTerminal.minimalCompletionStage(); }
     private enum DispatchClaim { PENDING, PREPARING, AUTHORIZED, DISPATCHED, CANCELLED }
     private final Object dispatchLock = new Object();
     private final java.util.List<DispatchGate> dispatchGates = new java.util.ArrayList<>();
@@ -112,6 +165,10 @@ public class RunHandle {
     public interface TerminalCallback {
         TerminalResult commitTerminal(String runId, String conversationId, RunStatus targetStatus, String errorMessage, String assistantContent, boolean interrupted, String userPrompt);
         RunStatus queryCurrentStatus(String runId);
+        default TerminalResult commitBudgetCancellation(String runId, String conversationId, String partial,
+                io.github.samzhu.bot.usage.BudgetCancellationSink.Effect effect) {
+            throw new UnsupportedOperationException("Budget cancellation is unavailable");
+        }
     }
 
     public RunHandle(
@@ -148,6 +205,7 @@ public class RunHandle {
         });
         this.emitter.onTimeout(() -> {
             synchronized (lock) {
+                if (promptFailureAwaitingSettlement || budgetCancellationPending) return;
                 stopUndispatched();
                 if (terminal || !terminalClaim.compareAndSet(TerminalClaim.ACTIVE, TerminalClaim.FINALIZING)) return;
                 /*
@@ -160,7 +218,8 @@ public class RunHandle {
                 swapDisposable.dispose();
                 registry.remove(runId);
                 String partial = fullReply.toString();
-                callback.commitTerminal(runId, conversationId, RunStatus.FAILED, "Execution timeout", partial, true, null);
+                TerminalResult result = callback.commitTerminal(runId, conversationId, RunStatus.FAILED, "Execution timeout", partial, true, null);
+                if (result != null && result.finalStatus() != null) durableTerminal.complete(null);
             }
         });
     }
@@ -333,6 +392,7 @@ public class RunHandle {
     public void fail(String errorMessage) {
         stopUndispatched();
         synchronized (lock) {
+            if (budgetCancellationPending) return;
             if (terminal || !terminalClaim.compareAndSet(TerminalClaim.ACTIVE, TerminalClaim.FINALIZING)) return;
             clearScheduledTasks();
             String partial = fullReply.toString();
@@ -343,6 +403,50 @@ public class RunHandle {
             registry.remove(runId);
 
             dispatchTerminalEvent(result);
+        }
+    }
+
+    /** Durable recovery claims locally, performs bounded DB work without the monitor, then publishes the result. */
+    public boolean failSettledRecovery(java.util.function.Supplier<TerminalResult> commit) {
+        synchronized (lock) {
+            if (terminal) return true;
+            if (!terminalClaim.compareAndSet(TerminalClaim.ACTIVE,TerminalClaim.FINALIZING)) return false;
+        }
+        TerminalResult result;
+        try { result=commit.get(); }
+        catch (RuntimeException unknown) { result=null; }
+        synchronized (lock) {
+            if (terminal) return true;
+            if (result==null || result.finalStatus()==null) {
+                terminalClaim.compareAndSet(TerminalClaim.FINALIZING,TerminalClaim.ACTIVE);
+                return false;
+            }
+            clearScheduledTasks();
+            terminal=true;
+            swapDisposable.dispose();
+            registry.remove(runId);
+            dispatchTerminalEvent(result);
+            return true;
+        }
+    }
+
+    /** A verified terminal Run only needs local cleanup; it must not issue another terminal write. */
+    public void reconcileObservedTerminal(RunStatus status) {
+        if (status!=RunStatus.COMPLETED && status!=RunStatus.FAILED && status!=RunStatus.CANCELLED)
+            throw new IllegalArgumentException("Run is not terminal");
+        synchronized (lock) {
+            if (terminal) {
+                registry.remove(runId,this);
+                durableTerminal.complete(null);
+                return;
+            }
+            terminal=true;
+            clearScheduledTasks();
+            registry.remove(runId,this);
+            swapDisposable.dispose();
+            durableTerminal.complete(null);
+            // The committing path may already have sent its event. Closing avoids a duplicate.
+            try { emitter.complete(); } catch (RuntimeException ignored) { }
         }
     }
 
@@ -365,6 +469,21 @@ public class RunHandle {
         }
     }
 
+    public TerminalResult cancelForBudget(io.github.samzhu.bot.usage.BudgetCancellationSink.Effect effect) {
+        synchronized (lock) {
+            if (terminal) return new TerminalResult(false, callback.queryCurrentStatus(runId), null);
+            requestCancellation();
+            clearScheduledTasks();
+            TerminalResult result = callback.commitBudgetCancellation(runId, conversationId, fullReply.toString(), effect);
+            if (result == null) throw new IllegalStateException("Budget cancellation outcome unknown");
+            terminal = true;
+            swapDisposable.dispose();
+            registry.remove(runId);
+            dispatchTerminalEvent(result);
+            return result;
+        }
+    }
+
     // If terminal writes and the fallback lookup fail, the DB status is unknown.
     // A still-RUNNING row blocks new runs until explicit cancellation after recovery
     // or startup orphan reconciliation; a transport error must not claim DB failure.
@@ -383,6 +502,7 @@ public class RunHandle {
     }
 
     private void dispatchTerminalEvent(TerminalResult result) {
+        if (result.finalStatus() != null) durableTerminal.complete(null);
         if (!result.casSuccess()) {
             /*
              * RATIONALE: CAS loser does not forge duplicate terminal SSE events (the winning committer owns terminal emission).
@@ -485,12 +605,15 @@ public class RunHandle {
     public void appTimeout() {
         synchronized (lock) {
             if (terminal) return;
+            // The durable prompt-failure intent owns the outcome; timeout must not overtake settlement.
+            if (promptFailureAwaitingSettlement || budgetCancellationPending) return;
             log.warn("Application deadline exceeded for run {}", runId);
             fail("Execution timeout");
         }
     }
 
     private void handleWriteFailure(String reason) {
+        if (budgetCancellationPending) return;
         stopUndispatched();
         if (terminal || !terminalClaim.compareAndSet(TerminalClaim.ACTIVE, TerminalClaim.FINALIZING)) return;
         terminal = true;
@@ -499,7 +622,8 @@ public class RunHandle {
         log.info("Client write failed or disconnected for run {}: {}", runId, reason);
         String partial = fullReply.toString();
         try {
-            callback.commitTerminal(runId, conversationId, RunStatus.CANCELLED, reason, partial, true, null);
+            TerminalResult result = callback.commitTerminal(runId, conversationId, RunStatus.CANCELLED, reason, partial, true, null);
+            if (result != null && result.finalStatus() != null) durableTerminal.complete(null);
         } finally {
             swapDisposable.dispose();
         }

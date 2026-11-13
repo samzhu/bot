@@ -1,4 +1,5 @@
 import { ChangeDetectorRef, Component, ElementRef, computed, effect, inject, input, output, signal, untracked, viewChild } from '@angular/core';
+import { BudgetDenialReason } from './chat-session-registry';
 import { Agent, AgentError, ChatErrorComponent, ChatInputComponent, ChatMessageComponent, ChatMessageListComponent, ChatStreamingMdComponent, ChatTypingIndicatorComponent, ChatWindowComponent, MessageTemplateDirective, markdownDocument, messageContent } from '@threadplane/chat';
 
 /** Uses public primitives so the application owns submission and authoritative cancellation. */
@@ -44,6 +45,7 @@ export class ChatSurfaceComponent {
   readonly inputBlocked = input(false);
   readonly runUnknown = input(false);
   readonly runFailed = input(false);
+  readonly runDenialReason = input<BudgetDenialReason | undefined>(undefined);
   readonly runCancelled = input(false);
   readonly submitOnEnter = input(true);
   readonly draftChanged = output<string>();
@@ -60,7 +62,7 @@ export class ChatSurfaceComponent {
     ...this.agent(),
     error: computed(() => this.runUnknown()
       ? new AgentError({ kind: 'interrupted', message: '連線中斷，執行結果尚未確認。', retryable: false, recovery: 'check', detail: '可查詢原執行狀態。' })
-      : this.runFailed() ? new AgentError({ kind: 'server', message: '執行失敗，草稿已保留。', retryable: false }) : undefined),
+      : this.runFailed() ? new AgentError({ kind: 'server', message: this.runDenialReason() === 'MONTH_CAP' ? '工作區月預算已達上限，無法開始新工作；草稿已保留。' : this.runDenialReason() === 'MONTH_UNKNOWN' ? '工作區費用待確認，無法開始新工作；草稿已保留。' : '執行失敗，草稿已保留。', retryable: false }) : undefined),
     checkStatus: async () => { this.checkStatusRequested.emit(); }
   }));
   readonly composerAgent = computed<Agent>(() => ({

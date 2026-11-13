@@ -3,11 +3,13 @@ package io.github.samzhu.bot.execution.internal;
 import io.github.samzhu.bot.bot.BotOperations;
 import io.github.samzhu.bot.bot.BotView;
 import io.github.samzhu.bot.conversation.ConversationOperations;
+import io.github.samzhu.bot.conversation.ConversationRecoveryReader;
 import io.github.samzhu.bot.conversation.ConversationView;
 import io.github.samzhu.bot.conversation.MessageView;
 import io.github.samzhu.bot.execution.ExecutionOperations;
 import io.github.samzhu.bot.execution.RunStatus;
 import io.github.samzhu.bot.execution.RunView;
+import io.github.samzhu.bot.usage.WorkspaceAdmission;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -24,6 +26,7 @@ import org.springframework.ai.session.SessionService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.jdbc.core.JdbcAggregateTemplate;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -49,13 +52,17 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
 
     private final ChatRunRepository runRepository;
     private final ConversationOperations conversationOperations;
+    private final ConversationRecoveryReader conversationRecoveryReader;
     private final BotOperations botOperations;
     private final JdbcAggregateTemplate jdbcAggregateTemplate;
+    private final JdbcTemplate jdbc;
     private final TransactionTemplate transactionTemplate;
     private final SessionService sessionService;
     private final RunRegistry runRegistry;
     private final ChatModel chatModel;
     private final UsageInvocation usageInvocation;
+    private final WorkspaceAdmission admission;
+    private final BudgetCancellationReceipts budgetReceipts;
     private final reactor.core.scheduler.Scheduler providerDispatchScheduler;
     private final TaskScheduler taskScheduler;
     private final RunProperties runProperties;
@@ -64,26 +71,34 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
     public RunExecutionServiceImpl(
             ChatRunRepository runRepository,
             ConversationOperations conversationOperations,
+            ConversationRecoveryReader conversationRecoveryReader,
             BotOperations botOperations,
             JdbcAggregateTemplate jdbcAggregateTemplate,
+            JdbcTemplate jdbc,
             TransactionTemplate transactionTemplate,
             SessionService sessionService,
             RunRegistry runRegistry,
             ChatModel chatModel,
             UsageInvocation usageInvocation,
+            WorkspaceAdmission admission,
+            BudgetCancellationReceipts budgetReceipts,
             @org.springframework.beans.factory.annotation.Qualifier("providerDispatchScheduler") reactor.core.scheduler.Scheduler providerDispatchScheduler,
             TaskScheduler botTaskScheduler,
             RunProperties runProperties,
             @Value("${bot.conversation.window-turns:10}") int windowTurns) {
         this.runRepository = runRepository;
         this.conversationOperations = conversationOperations;
+        this.conversationRecoveryReader = conversationRecoveryReader;
         this.botOperations = botOperations;
         this.jdbcAggregateTemplate = jdbcAggregateTemplate;
+        this.jdbc = jdbc;
         this.transactionTemplate = transactionTemplate;
         this.sessionService = sessionService;
         this.runRegistry = runRegistry;
         this.chatModel = chatModel;
         this.usageInvocation = usageInvocation;
+        this.admission = admission;
+        this.budgetReceipts = budgetReceipts;
         this.providerDispatchScheduler = providerDispatchScheduler;
         this.taskScheduler = botTaskScheduler;
         this.runProperties = runProperties;
@@ -160,6 +175,24 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         // We let the database unique indexes (uq_active_run_per_conv and uq_client_request_per_conv) adjudicate.
         String runId = agUi ? clientRequestId : UUID.randomUUID().toString();
         String assistantId = UUID.randomUUID().toString();
+        var dispatchMetadata = usageInvocation.dispatchMetadata(runId, conv.workspaceId(), userId);
+        var partition = dispatchMetadata.simulation() ? WorkspaceAdmission.Partition.SIMULATION : WorkspaceAdmission.Partition.REAL;
+        final WorkspaceAdmission.RegisterResult registrationResult;
+        try {
+            registrationResult = admission.register(new WorkspaceAdmission.Register(conv.workspaceId(), runId, userId, conversationId, partition)).toCompletableFuture().join();
+        } catch (RuntimeException ex) {
+            return new StartRunOutcome(StartRunOutcome.Type.SERVICE_UNAVAILABLE, null, null, "ADMISSION_UNAVAILABLE");
+        }
+        if (registrationResult instanceof WorkspaceAdmission.RegisterResult.Collision) {
+            return new StartRunOutcome(StartRunOutcome.Type.CONFLICT, null, null, "RUN_CONFLICT");
+        }
+        if (!(registrationResult instanceof WorkspaceAdmission.RegisterResult.Registered registered)) {
+            var denied = (WorkspaceAdmission.RegisterResult.Denied) registrationResult;
+            return new StartRunOutcome(denied.reason() == WorkspaceAdmission.Reason.UNAUTHORIZED
+                    ? StartRunOutcome.Type.ACCESS_DENIED : StartRunOutcome.Type.SERVICE_UNAVAILABLE,
+                    null, null, denied.reason().name());
+        }
+        var registration = registered.registration();
         Instant now = Instant.now();
         ChatRun newRun = new ChatRun(runId, conversationId, clientRequestId, message, RunStatus.RUNNING.name(), actualExecutionMode, null, now, now);
 
@@ -178,6 +211,8 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
             } catch (Exception ex) {
                 // Check if this is specifically a unique constraint collision on chat_run active or client_request
                 if (isRunUniqueConstraintCollision(ex) || (agUi && isRunIdCollision(ex))) {
+                    // This transaction is known to have failed; the pending registration can be abandoned.
+                    admission.abandon(registration);
                     // Why re-query same clientRequestId first: another concurrent thread with the SAME clientRequestId
                     // may have won the insert race. If so, return EXISTING (200 duplicate) or CONFLICT (409 conflicting payload), NOT a generic active 409!
                     Optional<ChatRun> raced = runRepository.findByConversationIdAndClientRequestId(conversationId, clientRequestId);
@@ -226,15 +261,51 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                                     .map(r -> RunStatus.valueOf(r.status()))
                                     .orElse(RunStatus.FAILED);
                         }
+                        @Override
+                        public RunHandle.TerminalResult commitBudgetCancellation(String rId, String convId, String partial,
+                                io.github.samzhu.bot.usage.BudgetCancellationSink.Effect effect) {
+                            return commitTerminalInternal(rId, convId, RunStatus.CANCELLED, "Monthly budget reached",
+                                    partial, true, null, agUi ? assistantId : null, effect);
+                        }
                     }
             );
 
+            handle.setAdmissionRegistration(registration);
             runRegistry.register(runId, handle);
 
             // 5. Send run.started event (seq = 1) BEFORE starting scheduled tasks
             handle.sendStarted();
         } finally {
             lifecycleGate.unlock();
+        }
+
+        // Publication is a lane operation and must never be awaited while holding the lifecycle stripe.
+        final WorkspaceAdmission.PublicationResult publication;
+        try {
+            publication = admission.publish(registration).toCompletableFuture().join();
+        } catch (RuntimeException ex) {
+            handle.fail("Admission publication requires recovery");
+            return new StartRunOutcome(StartRunOutcome.Type.STARTED, toView(newRun), emitter, null);
+        }
+        if (!(publication instanceof WorkspaceAdmission.PublicationResult.Ready)) {
+            handle.requestCancellation();
+            handle.cancel(userId);
+            return new StartRunOutcome(StartRunOutcome.Type.STARTED, toView(newRun), emitter, null);
+        }
+        try {
+            var state = admission.cancellationState(registration).toCompletableFuture().join();
+            if (state == null || state.state() == WorkspaceAdmission.CancellationState.UNKNOWN) {
+                handle.fail("Admission state requires recovery");
+                return new StartRunOutcome(StartRunOutcome.Type.STARTED, toView(newRun), emitter, null);
+            }
+            if (state.state() != WorkspaceAdmission.CancellationState.NONE) {
+                handle.requestCancellation();
+                handle.cancel(userId);
+                return new StartRunOutcome(StartRunOutcome.Type.STARTED, toView(newRun), emitter, null);
+            }
+        } catch (RuntimeException ex) {
+            handle.fail("Admission state requires recovery");
+            return new StartRunOutcome(StartRunOutcome.Type.STARTED, toView(newRun), emitter, null);
         }
 
         // 6. Start scheduled tasks (application deadline & heartbeat) ONLY AFTER run.started has been sent
@@ -244,7 +315,8 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         final UsageInvocation.Attempt usageAttempt;
         try {
             // Persist the attempt before Session mutation or any provider invocation.
-            usageAttempt = usageInvocation.begin(runId, conv.workspaceId(), userId, handle);
+            usageAttempt = usageInvocation.begin(dispatchMetadata, registration);
+            usageInvocation.bindCompletion(usageAttempt, handle);
         } catch (RuntimeException ex) {
             handle.fail("Usage ledger unavailable");
             return new StartRunOutcome(StartRunOutcome.Type.STARTED, toView(newRun), emitter, null);
@@ -273,9 +345,11 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
             }
             aiMessages.add(new UserMessage(message));
         } catch (Exception ex) {
-            log.error("Failed to assemble prompt instructions for run {}", runId, ex);
-            usageInvocation.notDispatchedSafely(usageAttempt.id(), "PROMPT_CONTEXT_UNAVAILABLE");
-            handle.fail("Failed to build prompt context: " + ex.getMessage());
+            log.error("Failed to assemble prompt instructions for run {}", runId);
+            handle.markPromptFailureAwaitingSettlement();
+            usageInvocation.finalizeAttempt(usageAttempt, WorkspaceAdmission.TerminalKind.NOT_DISPATCHED,
+                    WorkspaceAdmission.TerminalReason.PROMPT_CONTEXT_UNAVAILABLE);
+            usageInvocation.afterSettled(usageAttempt, () -> handle.fail("Failed to build prompt context"));
             return new StartRunOutcome(StartRunOutcome.Type.STARTED, toView(newRun), emitter, null);
         }
 
@@ -357,7 +431,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
             lifecycleGate.unlock();
         }
         if (!subscriptionStarted) {
-            usageInvocation.notDispatchedSafely(usageAttempt.id(), "RUN_TERMINATED_BEFORE_DISPATCH");
+            usageInvocation.finalizeAttempt(usageAttempt, WorkspaceAdmission.TerminalKind.NOT_DISPATCHED);
         }
         if (schedulingError != null) {
             handle.fail(schedulingError);
@@ -366,6 +440,81 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
             handle.fail(deferredFailure.get());
         }
         return new StartRunOutcome(StartRunOutcome.Type.STARTED, toView(newRun), emitter, null);
+    }
+
+    /** Reconciles a usage-verified settled prompt failure without holding a stripe across I/O. */
+    boolean completeSettledPromptFailure(WorkspaceAdmission.PromptFailureFact fact) {
+        return fact!=null && completeDurableRecovery(fact.registration(),"Failed to build prompt context");
+    }
+
+    /** A ready disposition already proves the entire Run has no claim and all attempts are settled. */
+    boolean completeSupersededNotDispatched(WorkspaceAdmission.SupersededNotDispatched fact) {
+        if (fact==null || fact.registration()==null || fact.oldEffect()==null) return false;
+        var registration=fact.registration(); var effect=fact.oldEffect();
+        if (!(effect.target() instanceof io.github.samzhu.bot.usage.BudgetCancellationSink.Target.Pending pending)
+                || pending.fence()==null || effect.effectId()==null || effect.effectId().isBlank()
+                || effect.intentReceipt()==null || effect.intentReceipt().isBlank()) return false;
+        var fence=pending.fence();
+        if (fence.pendingId()==null || fence.pendingId().isBlank() || fence.epoch()<0
+                || fence.periodStart()==null || fence.periodEnd()==null || !fence.periodStart().isBefore(fence.periodEnd())
+                || !Objects.equals(registration.token(),effect.token()) || !Objects.equals(registration.workspaceId(),effect.workspaceId())
+                || registration.partition()!=effect.partition() || !Objects.equals(registration.runId(),effect.runId())
+                || !Objects.equals(fence.token(),effect.token()) || !Objects.equals(fence.workspaceId(),effect.workspaceId())
+                || fence.partition()!=effect.partition()) return false;
+        return completeDurableRecovery(registration,"BUDGET_CANCELLATION_SUPERSEDED");
+    }
+
+    private boolean completeDurableRecovery(WorkspaceAdmission.Registration registration,String reason) {
+        try {
+            var initial=transactionTemplate.execute(status -> recoveryRun(registration,false));
+            if (initial==null) return false;
+            RunHandle handle;
+            var gate=runRegistry.lifecycleGate(registration.runId());
+            gate.lock();
+            try {
+                handle=runRegistry.get(registration.runId());
+                if (handle!=null && !registration.equals(handle.admissionRegistration())) return false;
+            } finally { gate.unlock(); }
+            if (isTerminal(initial)) {
+                if (handle!=null) handle.reconcileObservedTerminal(RunStatus.valueOf(initial.status()));
+                return true;
+            }
+            if (handle!=null) {
+                if (!handle.failSettledRecovery(() -> commitDurableRecovery(registration,reason))) return false;
+                // Local terminal state can follow an indeterminate DB write; only the row advances recovery.
+                var verified=transactionTemplate.execute(status -> recoveryRun(registration,false));
+                return verified!=null && isTerminal(verified);
+            }
+            return commitDurableRecovery(registration,reason)!=null;
+        } catch (RuntimeException unknown) {
+            return false;
+        }
+    }
+
+    private RunHandle.TerminalResult commitDurableRecovery(WorkspaceAdmission.Registration registration,String reason) {
+        return transactionTemplate.execute(status -> {
+            var current=recoveryRun(registration,true);
+            if (current==null) return null;
+            if (isTerminal(current)) return new RunHandle.TerminalResult(false,RunStatus.valueOf(current.status()),null);
+            int changed=runRepository.failDurableRecovery(registration.runId(),registration.conversationId(),reason,Instant.now());
+            return changed==1 ? new RunHandle.TerminalResult(true,RunStatus.FAILED,null,reason) : null;
+        });
+    }
+
+    private ChatRun recoveryRun(WorkspaceAdmission.Registration registration,boolean lockRun) {
+        // SET LOCAL limits only this recovery transaction, leaving ordinary request timeouts unchanged.
+        jdbc.execute("set local lock_timeout = '2s'");
+        jdbc.execute("set local statement_timeout = '5s'");
+        var run=lockRun ? runRepository.findForAdmission(registration.runId()) : runRepository.findById(registration.runId());
+        if (run.isEmpty() || !registration.conversationId().equals(run.get().conversationId())) return null;
+        var identity=conversationRecoveryReader.readIdentity(registration.conversationId());
+        if (identity.isEmpty() || !registration.conversationId().equals(identity.get().conversationId())
+                || !registration.workspaceId().equals(identity.get().workspaceId())) return null;
+        return run.get();
+    }
+
+    private static boolean isTerminal(ChatRun run) {
+        return "COMPLETED".equals(run.status()) || "FAILED".equals(run.status()) || "CANCELLED".equals(run.status());
     }
 
     // subscribeOn can synchronously report scheduler rejection; avoid DB/SSE while holding a stripe.
@@ -392,6 +541,15 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
             String assistantContent,
             boolean interrupted,
             String userPrompt, String assistantId) {
+
+        return commitTerminalInternal(runId, conversationId, targetStatus, errorMessage, assistantContent,
+                interrupted, userPrompt, assistantId, null);
+    }
+
+    private RunHandle.TerminalResult commitTerminalInternal(
+            String runId, String conversationId, RunStatus targetStatus, String errorMessage,
+            String assistantContent, boolean interrupted, String userPrompt, String assistantId,
+            io.github.samzhu.bot.usage.BudgetCancellationSink.Effect budgetEffect) {
 
         try {
             // Why short transaction: CAS terminal update, assistant message persistence,
@@ -441,9 +599,11 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                     }
                 }
 
+                if (budgetEffect != null) budgetReceipts.insert(budgetEffect);
                 return new RunHandle.TerminalResult(true, targetStatus, messageId, errorMessage);
             });
         } catch (Exception ex) {
+            if (budgetEffect != null) throw new IllegalStateException("Budget cancellation outcome unknown", ex);
             log.error("Transaction rolled back for run {} during terminal commit: {}", runId, ex.getMessage(), ex);
             // In a new independent short transaction, mark as FAILED with interrupted assistant partial (no Session pair)
             return fallbackToFailed(runId, conversationId, assistantContent, "Terminal commit failure: " + ex.getMessage(), assistantId);
@@ -554,6 +714,18 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         }
         // A handle serializes its own terminal transition. Release the stripe first so
         // emitting its terminal frame cannot hold up unrelated runs sharing the stripe.
+        WorkspaceAdmission.Registration registration = handle.admissionRegistration();
+        if (registration != null) {
+            try {
+                var cancellation = admission.cancelRun(registration).toCompletableFuture().join();
+                if (cancellation == null || cancellation.status() == WorkspaceAdmission.CancelStatus.UNKNOWN)
+                    throw new IllegalStateException("Cancellation requires recovery");
+                if (cancellation.status() == WorkspaceAdmission.CancelStatus.BEFORE_CLAIM)
+                    handle.markAdmissionCancelledBeforeClaim();
+            } catch (RuntimeException ex) {
+                throw new IllegalStateException("Cancellation requires recovery");
+            }
+        }
         RunStatus status = handle.cancel(userId);
         return new CancelRunOutcome(runId, status, status == RunStatus.CANCELLED, false);
     }

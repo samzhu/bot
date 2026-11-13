@@ -4,7 +4,6 @@ import io.github.samzhu.bot.usage.UsageLedger;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -14,16 +13,55 @@ import java.util.UUID;
 public class JdbcUsageLedger implements UsageLedger {
     private final JdbcTemplate jdbc;
     private final java.time.Clock clock;
+    private final io.github.samzhu.bot.usage.internal.admission.WorkspaceLane lane;
+    private final io.github.samzhu.bot.usage.internal.admission.BudgetProjection budgetProjection;
+    private final org.springframework.transaction.support.TransactionTemplate transactions;
     private final io.github.samzhu.bot.usage.internal.pricing.CatalogActivation catalog;
+    private final io.github.samzhu.bot.usage.RunAdmissionStateReader runStateReader;
 
-    public JdbcUsageLedger(JdbcTemplate jdbc, java.time.Clock clock, io.github.samzhu.bot.usage.internal.pricing.CatalogActivation catalog) {
+    @org.springframework.beans.factory.annotation.Autowired
+    public JdbcUsageLedger(JdbcTemplate jdbc, java.time.Clock clock, io.github.samzhu.bot.usage.internal.pricing.CatalogActivation catalog,
+            io.github.samzhu.bot.usage.internal.admission.WorkspaceLane lane,
+            io.github.samzhu.bot.usage.internal.admission.BudgetProjection budgetProjection,
+            org.springframework.transaction.PlatformTransactionManager manager,
+            io.github.samzhu.bot.usage.RunAdmissionStateReader runStateReader) {
         this.jdbc = jdbc;
         this.clock = clock;
         this.catalog = catalog;
+        this.lane = lane;
+        this.budgetProjection = budgetProjection;
+        this.transactions = new org.springframework.transaction.support.TransactionTemplate(manager);
+        this.runStateReader = runStateReader;
     }
 
     @Override
     public String begin(Dispatch d) {
+        try {
+            return lane.submit(d.workspaceId(), () -> transactions.execute(status -> beginInTransaction(d))).toCompletableFuture().join();
+        } catch (java.util.concurrent.CompletionException ex) {
+            if (ex.getCause() instanceof RuntimeException cause) throw cause;
+            throw ex;
+        }
+    }
+
+    private String beginInTransaction(Dispatch d) {
+        if (d.runId()!=null) {
+            var registrations=jdbc.query("select workspace_id,actor_id,conversation_id,partition,status from workspace_admission_registration where run_id=? for update",
+                    (rs,n)->new String[]{rs.getString(1),rs.getString(2),rs.getString(3),rs.getString(4),rs.getString(5)},d.runId());
+            if (registrations.size()!=1 || runStateReader==null) throw new IllegalStateException("Admission registration unavailable");
+            var registration=registrations.getFirst();
+            if (!d.workspaceId().equals(registration[0]) || !d.actorId().equals(registration[1])
+                    || !(d.simulation()?"SIMULATION":"REAL").equals(registration[3]) || !"PUBLISHED".equals(registration[4]))
+                throw new IllegalStateException("Admission registration is not active");
+            // The registration lock serializes begin with a durable whole-Run supersession.
+            if (Boolean.TRUE.equals(jdbc.queryForObject("""
+                    select exists(select 1 from workspace_admission_superseded s
+                        join workspace_admission_registration r on r.token=s.registration_token where r.run_id=?)
+                    """,Boolean.class,d.runId()))) throw new IllegalStateException("Admission registration is superseded");
+            var run=runStateReader.readForUpdate(d.runId());
+            if (run==null || run.status()!=io.github.samzhu.bot.usage.RunAdmissionStateReader.Status.ACTIVE
+                    || !registration[2].equals(run.conversationId())) throw new IllegalStateException("Run is not active");
+        }
         String id = UUID.randomUUID().toString();
         jdbc.update(
                 """
@@ -47,8 +85,15 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'IN_PROGRESS','PENDING','UNKNOWN','MISSING')
     }
 
     @Override
-    @Transactional
     public boolean markDispatched(String attemptId, java.util.function.Function<java.time.Clock, Instant> decision) {
+        var scopes=jdbc.query("select workspace_id from provider_attempt where id=?",(rs,n)->rs.getString(1),attemptId);
+        if (scopes.isEmpty()) return false;
+        return Boolean.TRUE.equals(lane.submitCritical(scopes.getFirst(),()->transactions.execute(status ->
+                markDispatchedInTransaction(attemptId,decision))).toCompletableFuture().join());
+    }
+
+    private boolean markDispatchedInTransaction(String attemptId, java.util.function.Function<java.time.Clock, Instant> decision) {
+        io.github.samzhu.bot.usage.internal.admission.UsageWriterLock.registrationForAttempt(jdbc,attemptId);
         // Wait for the database row before sampling the clock, so lock contention cannot move a
         // dispatch into the wrong period.
         var rows =
@@ -75,8 +120,24 @@ WHERE id=? AND execution_outcome='IN_PROGRESS' AND started_at IS NULL
     }
 
     @Override
-    @Transactional
     public void append(String attemptId, Snapshot snapshot) {
+        var scopes=jdbc.query("select workspace_id from provider_attempt where id=?",(rs,n)->rs.getString(1),attemptId);
+        if (scopes.isEmpty()) throw new IllegalArgumentException("Unknown usage attempt");
+        String workspace=scopes.getFirst();
+        try {
+            lane.submitCritical(workspace, () -> transactions.execute(status -> {
+                io.github.samzhu.bot.usage.internal.admission.UsageWriterLock.registrationForAttempt(jdbc,attemptId);
+                appendInTransaction(attemptId,snapshot);
+                refreshAttemptPeriod(attemptId,workspace);
+                return null;
+            })).toCompletableFuture().join();
+        } catch (java.util.concurrent.CompletionException ex) {
+            if (ex.getCause() instanceof RuntimeException cause) throw cause;
+            throw ex;
+        }
+    }
+
+    private void appendInTransaction(String attemptId, Snapshot snapshot) {
         if (snapshot.ordinal() < 0
                 || (snapshot.rawJson() == null && !"UNKNOWN".equals(snapshot.semantic())))
             throw new IllegalArgumentException("Invalid snapshot");
@@ -179,6 +240,16 @@ UPDATE provider_attempt SET usage_presence=?,capture_completeness=?,projection_s
                 attemptId);
     }
 
+    private void refreshAttemptPeriod(String attemptId,String workspace) {
+        var rows=jdbc.query("select simulation,started_at from provider_attempt where id=? and workspace_id=?",
+                (rs,n)->new Object[]{rs.getBoolean(1),rs.getTimestamp(2)},attemptId,workspace);
+        if (rows.isEmpty() || rows.getFirst()[1]==null) return;
+        var row=rows.getFirst(); var zone=java.time.ZoneId.of("Asia/Taipei");
+        var period=java.time.YearMonth.from(((Timestamp)row[1]).toInstant().atZone(zone));
+        budgetProjection.recompute(workspace,(boolean)row[0] ? io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.SIMULATION : io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.REAL,
+                period.atDay(1).atStartOfDay(zone).toInstant(),period.plusMonths(1).atDay(1).atStartOfDay(zone).toInstant());
+    }
+
     private void validateJson(String raw) {
         try (var parser = new com.fasterxml.jackson.core.JsonFactory().createParser(raw)) {
             if (parser.nextToken() == null) throw new IllegalArgumentException("Empty usage JSON");
@@ -237,21 +308,43 @@ UPDATE provider_attempt SET usage_presence=?,capture_completeness=?,projection_s
 
     @Override
     public void notDispatched(String attemptId, String reason) {
-        jdbc.update(
-                """
-UPDATE provider_attempt SET execution_outcome='NOT_DISPATCHED',execution_reason=?,finished_at=?,started_at=NULL,projection_version=projection_version+1,
-    usage_presence='UNKNOWN' WHERE id=? AND execution_outcome='IN_PROGRESS'
-""",
-                reason,
-                Timestamp.from(clock.instant()),
-                attemptId);
+        var scopes=jdbc.query("select workspace_id from provider_attempt where id=?",(rs,n)->rs.getString(1),attemptId);
+        if (scopes.isEmpty()) throw new IllegalArgumentException("Unknown usage attempt");
+        try {
+            lane.submitCritical(scopes.getFirst(), () -> transactions.execute(status -> {
+                io.github.samzhu.bot.usage.internal.admission.UsageWriterLock.registrationForAttempt(jdbc,attemptId);
+                var rows=jdbc.query("select started_at,execution_outcome from provider_attempt where id=? for update",
+                        (rs,n)->new Object[]{rs.getTimestamp(1),rs.getString(2)},attemptId);
+                if (rows.isEmpty()) throw new IllegalStateException("RECOVERY_REQUIRED");
+                var row=rows.getFirst();
+                if ("NOT_DISPATCHED".equals(row[1])) return null;
+                Boolean uncertain=jdbc.queryForObject("""
+                        select exists(select 1 from workspace_admission_dispatch where attempt_id=? and state='PENDING')
+                            or exists(select 1 from workspace_admission_claim where attempt_id=?)
+                        """,Boolean.class,attemptId,attemptId);
+                if (row[0]!=null || !"IN_PROGRESS".equals(row[1]) || Boolean.TRUE.equals(uncertain))
+                    throw new IllegalStateException("RECOVERY_REQUIRED");
+                jdbc.update("""
+                        update provider_attempt set execution_outcome='NOT_DISPATCHED',execution_reason=?,finished_at=?,
+                            projection_version=projection_version+1,usage_presence='UNKNOWN'
+                         where id=? and execution_outcome='IN_PROGRESS' and started_at is null
+                        """,reason,Timestamp.from(clock.instant()),attemptId);
+                return null;
+            })).toCompletableFuture().join();
+        } catch (java.util.concurrent.CompletionException ex) {
+            if (ex.getCause() instanceof RuntimeException cause) throw cause;
+            throw ex;
+        }
     }
 
     @Override
     public void recordResponseId(String attemptId, String responseId) {
         if (responseId == null || responseId.isBlank()) return;
-        int updated =
-                jdbc.update(
+        var scopes=jdbc.query("select workspace_id from provider_attempt where id=?",(rs,n)->rs.getString(1),attemptId);
+        if (scopes.isEmpty()) throw new IllegalArgumentException("Unknown usage attempt");
+        lane.submitCritical(scopes.getFirst(),()->transactions.execute(status -> {
+            io.github.samzhu.bot.usage.internal.admission.UsageWriterLock.registrationForAttempt(jdbc,attemptId);
+            int updated=jdbc.update(
                         """
                         UPDATE provider_attempt SET provider_response_id=?
                         WHERE id=? AND (provider_response_id IS NULL OR provider_response_id=?)
@@ -259,11 +352,21 @@ UPDATE provider_attempt SET execution_outcome='NOT_DISPATCHED',execution_reason=
                         responseId,
                         attemptId,
                         responseId);
-        if (updated != 1) throw new IllegalStateException("Provider response identity conflict");
+            if (updated != 1) throw new IllegalStateException("Provider response identity conflict");
+            return null;
+        })).toCompletableFuture().join();
     }
 
     @Override
     public void finish(String id, String outcome) {
+        var scopes=jdbc.query("select workspace_id from provider_attempt where id=?",(rs,n)->rs.getString(1),id);
+        if (scopes.isEmpty()) return;
+        String workspace=scopes.getFirst();
+        lane.submitCritical(workspace, () -> transactions.execute(status -> {
+            io.github.samzhu.bot.usage.internal.admission.UsageWriterLock.registrationForAttempt(jdbc,id);
+            var rows=jdbc.query("select simulation,started_at from provider_attempt where id=? and workspace_id=? for update",
+                    (rs,n)->new Object[]{rs.getBoolean(1),rs.getTimestamp(2)},id,workspace);
+            if (rows.isEmpty()) return null;
         jdbc.update(
                 """
 UPDATE provider_attempt SET execution_outcome=?,finished_at=?,projection_version=projection_version+1,
@@ -281,6 +384,16 @@ WHERE id=? AND execution_outcome='IN_PROGRESS'
                 outcome,
                 outcome,
                 id);
+
+            var row=rows.getFirst();
+            if (row[1]!=null) {
+                var period=java.time.YearMonth.from(((Timestamp)row[1]).toInstant().atZone(java.time.ZoneId.of("Asia/Taipei")));
+                budgetProjection.recompute(workspace, (boolean)row[0] ? io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.SIMULATION : io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.REAL,
+                        period.atDay(1).atStartOfDay(java.time.ZoneId.of("Asia/Taipei")).toInstant(),
+                        period.plusMonths(1).atDay(1).atStartOfDay(java.time.ZoneId.of("Asia/Taipei")).toInstant());
+            }
+            return null;
+        })).toCompletableFuture().join();
     }
 
     @Override

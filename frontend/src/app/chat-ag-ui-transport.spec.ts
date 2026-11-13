@@ -147,6 +147,33 @@ describe('ChatAgUiTransport', () => {
       expect(transport.agent('A').messages().filter(m => m.role === 'user').length).toBe(expected === 'REJECTED' ? 0 : 1);
     }
   });
+  it('treats a monthly cap denial as a definite rejection without retaining an optimistic message', async () => {
+    const fetcher = vi.fn(async () => Response.json({code:'MONTH_CAP', message:'untrusted server text'}, {status:503}));
+    const transport = new ChatAgUiTransport(fetcher);
+    const registry = new ChatSessionRegistry(transport, () => 'budget-run');
+    registry.edit('conversation:A', '  draft\n  ');
+    await registry.submit('conversation:A');
+    expect(registry.session('conversation:A').result()).toMatchObject({status:'REJECTED', reason:'MONTH_CAP'});
+    expect(registry.session('conversation:A').draft()).toBe('  draft\n  ');
+    expect(transport.agent('A').messages().filter(m => m.role === 'user')).toEqual([]);
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it('keeps a late unknown-budget rejection in its original conversation', async () => {
+    let reply!: (value:Response)=>void;
+    const transport = new ChatAgUiTransport(vi.fn(() => new Promise<Response>(resolve => reply=resolve)));
+    const registry = new ChatSessionRegistry(transport, () => 'budget-original');
+    registry.edit('conversation:A', '  A raw  ');
+    const pending = registry.submit('conversation:A');
+    registry.edit('conversation:B', '  B draft  ');
+    await vi.waitFor(() => expect(reply).toBeDefined());
+    reply(Response.json({code:'MONTH_UNKNOWN',message:'do not show'}, {status:503}));
+    await pending;
+    expect(registry.session('conversation:A').result()).toMatchObject({status:'REJECTED',reason:'MONTH_UNKNOWN'});
+    expect(registry.session('conversation:A').draft()).toBe('  A raw  ');
+    expect(registry.session('conversation:B').draft()).toBe('  B draft  ');
+    expect(registry.session('conversation:B').result()).toBeNull();
+    expect(transport.agent('A').messages().filter(m=>m.role==='user')).toEqual([]);
+  });
   it('restores exact raw input when the server explicitly rejects without creating a run', async () => {
     const transport = new ChatAgUiTransport(vi.fn(async () => Response.json({code:'INVALID_AG_UI_INPUT'}, {status:400})));
     const registry = new ChatSessionRegistry(transport, () => 'run');

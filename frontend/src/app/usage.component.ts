@@ -3,9 +3,10 @@ import { NativeUsageValue, UsageSnapshot, UsageStore } from './usage.store';
 import { CostExplanationComponent } from './cost-explanation.component';
 import { UsageReportsComponent } from './usage-reports.component';
 import { CostRevisionComponent } from './cost-revision.component';
+import { MonthlyBudgetComponent } from './monthly-budget.component';
 
 @Component({
-  selector: 'app-usage', standalone: true, imports: [CostExplanationComponent, UsageReportsComponent, CostRevisionComponent],
+  selector: 'app-usage', standalone: true, imports: [CostExplanationComponent, UsageReportsComponent, CostRevisionComponent, MonthlyBudgetComponent],
   template: `
     <section class="usage" role="region" tabindex="0" aria-label="個人用量內容，可垂直捲動">
       <button type="button" (click)="back.emit()">返回對話</button>
@@ -13,12 +14,15 @@ import { CostRevisionComponent } from './cost-revision.component';
       <nav aria-label="用量頁面">
         <button type="button" [attr.aria-pressed]="activeTab()==='attempts'" (click)="activeTab.set('attempts')">逐次用量</button>
         <button type="button" [attr.aria-pressed]="activeTab()==='reports'" (click)="activeTab.set('reports')">報表</button>
-        @if(manager){<button type="button" [attr.aria-pressed]="activeTab()==='revisions'" (click)="activeTab.set('revisions')">費用修訂管理</button>}
+        @if(workspaceId){<button type="button" [attr.aria-pressed]="activeTab()==='budget'" (click)="activeTab.set('budget')">工作區月預算</button>}
+        @if(manager){<button type="button" [attr.aria-pressed]="activeTab()==='revisions'" (click)="openCostRevisions(false)">費用修訂管理</button>}
       </nav>
       @if (activeTab()==='reports') {
         <app-usage-reports [workspaceId]="workspaceId" [manager]="manager" />
+      } @else if(activeTab()==='budget' && workspaceId) {
+        <app-monthly-budget [workspaceId]="workspaceId" [manager]="manager" (reviewCosts)="openCostRevisions($event)" />
       } @else if(activeTab()==='revisions' && manager) {
-        <app-cost-revision [workspaceId]="workspaceId" [manager]="manager" />
+        <app-cost-revision [workspaceId]="workspaceId" [manager]="manager" [initialSimulation]="revisionSimulation()" />
       } @else {
       @if (store.loading()) { <p role="status">載入用量中…</p> }
       @if (store.error()) { <p role="alert">{{store.error()}} <button type="button" (click)="store.retry()">重試</button></p> }
@@ -72,7 +76,9 @@ import { CostRevisionComponent } from './cost-revision.component';
 export class UsageComponent implements OnChanges, OnDestroy {
   @Input() workspaceId: string | null = null;
   @Input() manager = false;
-  readonly activeTab=signal<'attempts'|'reports'|'revisions'>('attempts');
+  readonly activeTab=signal<'attempts'|'reports'|'revisions'|'budget'>('attempts');
+  readonly revisionSimulation=signal(false);
+  openCostRevisions(simulation:boolean):void { this.revisionSimulation.set(simulation); this.activeTab.set('revisions'); }
   readonly back = output<void>(); readonly store = new UsageStore();
   ngOnChanges(): void { void this.store.setWorkspace(this.workspaceId); }
   ngOnDestroy(): void { void this.store.setWorkspace(null); }

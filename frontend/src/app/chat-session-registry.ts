@@ -1,6 +1,7 @@
 import { signal, WritableSignal } from '@angular/core';
 
-export type RunResult = { status: 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'REJECTED' | 'DUPLICATE' | 'UNKNOWN' };
+export type BudgetDenialReason = 'MONTH_CAP' | 'MONTH_UNKNOWN';
+export type RunResult = { status: 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'REJECTED' | 'DUPLICATE' | 'UNKNOWN'; reason?: BudgetDenialReason };
 export interface ChatSessionTransport {
   createConversation(botId: string, workspaceId?: string): Promise<string>;
   run(conversationId: string, runId: string, raw: string, onDelta: (text: string) => void): Promise<RunResult>;
