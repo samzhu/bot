@@ -1,0 +1,17 @@
+# Reference only: never imported into the active runtime catalog.
+model: "gpt-5-mini"
+snapshot: "gpt-5-mini-2025-08-07"
+model-status: "DEPRECATED"
+# Reference does not authorize changing the configured model.
+price-revision: "openai-gpt-5-mini-general-api-reference-2026-11-16"
+unit: "USD_PER_1000000_TOKENS"
+source: "https://developers.openai.com/api/docs/models/gpt-5-mini.md"
+release-source: "https://openai.com/index/introducing-gpt-5-for-developers/"
+verified-date: "2026-11-16"
+pricing-scope: "GENERAL_API_REFERENCE"
+tier: "NOT_EXPLICITLY_SPECIFIED"
+cache-write: "UNKNOWN"
+rates:
+  input: "0.25"
+  cache_read: "0.025"
+  output: "2"
