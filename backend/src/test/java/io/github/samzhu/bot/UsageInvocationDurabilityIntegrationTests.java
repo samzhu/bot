@@ -193,7 +193,7 @@ class UsageInvocationDurabilityIntegrationTests {
 
     @Test
     void failedAttemptWritePreventsDispatchAndSessionThenRecoveryDispatches() throws Exception {
-        assertTrue(count("SHOW server_version_num") >= 180000 && count("SHOW server_version_num") < 190000);
+        assertTrue(count("SHOW server_version_num") >= 160000 && count("SHOW server_version_num") < 170000);
         FAKE.calls.set(0);
         FAKE.streams.set(0);
         FAKE.subscriptions.set(0);

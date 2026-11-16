@@ -15,11 +15,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 @SpringBootTest
 @ActiveProfiles("test")
-@Import(Postgres18CompatibilityIntegrationTests.Pg18Config.class)
-class Postgres18CompatibilityIntegrationTests {
+@Import(Postgres16CompatibilityIntegrationTests.Pg16Config.class)
+class Postgres16CompatibilityIntegrationTests {
 
     @TestConfiguration(proxyBeanMethods = false)
-    static class Pg18Config {
+    static class Pg16Config {
         @Bean
         @ServiceConnection
         PostgreSQLContainer postgresContainer() {
@@ -31,8 +31,8 @@ class Postgres18CompatibilityIntegrationTests {
     JdbcTemplate jdbc;
 
     @Test
-    void postgres18ProvidesVectorAndJsonbThroughServiceConnection() {
-        assertThat(jdbc.queryForObject("show server_version_num", Integer.class)).isBetween(180000, 189999);
+    void postgres16ProvidesVectorAndJsonbThroughServiceConnection() {
+        assertThat(jdbc.queryForObject("show server_version_num", Integer.class)).isBetween(160000, 169999);
         jdbc.execute("CREATE EXTENSION IF NOT EXISTS vector");
         assertThat(jdbc.queryForObject("SELECT '[1,2,3]'::vector::text", String.class)).isEqualTo("[1,2,3]");
         assertThat(jdbc.queryForObject("SELECT '{\"n\":9007199254740993}'::jsonb->>'n'", String.class))
