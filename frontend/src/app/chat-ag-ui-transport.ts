@@ -77,7 +77,14 @@ export class ChatAgUiTransport implements ChatSessionTransport {
       entry.hydrating.set(true);
       task = this.graphql(`query SessionHistory($id: ID!) { conversation(id: $id) { id workspaceId botId title pinned createdAt updatedAt messages(limit: 20, offset: 0) { id runId role content interrupted createdAt } runs(limit: 50, offset: 0) { id status errorMessage } } }`, { id: conversationId })
         .then(data => {
-          if (!Array.isArray(data?.conversation?.messages)) throw new Error('Missing conversation history');
+          if (data?.conversation === null) return null;
+          const conversation = data?.conversation;
+          if (!conversation || typeof conversation.id !== 'string' || !conversation.id.trim() || conversation.id !== conversationId ||
+              typeof conversation.workspaceId !== 'string' || !conversation.workspaceId.trim() ||
+              typeof conversation.botId !== 'string' || !conversation.botId.trim() ||
+              !Array.isArray(conversation.messages) || !Array.isArray(conversation.runs)) {
+            throw new Error('Invalid conversation history');
+          }
           return data.conversation;
         }).catch(error => { entry.historyError.set(true); throw error; })
         .finally(() => { entry.hydrating.set(false); this.hydration.delete(conversationId); });
@@ -85,6 +92,7 @@ export class ChatAgUiTransport implements ChatSessionTransport {
     }
     // A shared fetch is not a shared authorization decision: each caller checks its own scope.
     return task.then(conversation => {
+      if (conversation === null) { entry.historyError.set(false); return null; }
       if (expectedWorkspaceId && conversation.workspaceId !== expectedWorkspaceId) throw new Error('Inaccessible conversation history');
       const statuses = new Map<string, string>((conversation.runs || []).map((run: {id: string; status: string}) => [run.id, run.status]));
       this.mergeHistory(conversationId, conversation.messages.map((row: {runId: string}) => ({...row, runStatus: statuses.get(row.runId)})));

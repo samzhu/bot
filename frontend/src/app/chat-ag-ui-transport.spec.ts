@@ -2,7 +2,37 @@ import { describe, expect, it, vi } from 'vitest';
 import { ChatAgUiTransport } from './chat-ag-ui-transport';
 import { ChatSessionRegistry } from './chat-session-registry';
 
+const historyIdentity = {id:'A', workspaceId:'workspace', botId:'bot', runs:[]};
+
 describe('ChatAgUiTransport', () => {
+  it('returns unavailable when a successful history response has a null conversation', async () => {
+    const transport = new ChatAgUiTransport(vi.fn(async () => Response.json({data:{conversation:null}})));
+    await expect(transport.hydrate('stale', 'workspace')).resolves.toBeNull();
+  });
+  it.each([
+    ['HTTP error', new Response('', {status: 503})],
+    ['GraphQL permission error', Response.json({data:{conversation:null},errors:[{message:'denied'}]})],
+    ['missing conversation field', Response.json({data:{}})],
+    ['missing messages', Response.json({data:{conversation:{id:'C'}}})],
+  ])('keeps %s as a history failure', async (_label, response) => {
+    const transport = new ChatAgUiTransport(vi.fn(async () => response));
+    await expect(transport.hydrate('C', 'workspace')).rejects.toThrow();
+  });
+  it('rejects history without the requested conversation identity', async () => {
+    const transport = new ChatAgUiTransport(vi.fn(async () => Response.json({data:{conversation:{workspaceId:'personal',messages:[],runs:[]}}})));
+    await expect(transport.hydrate('C', 'personal')).rejects.toThrow();
+  });
+  it.each([
+    ['wrong id', {id:'other',workspaceId:'personal',botId:'bot',messages:[],runs:[]}],
+    ['empty workspace', {id:'C',workspaceId:'',botId:'bot',messages:[],runs:[]}],
+    ['missing bot', {id:'C',workspaceId:'personal',messages:[],runs:[]}],
+    ['missing runs', {id:'C',workspaceId:'personal',botId:'bot',messages:[]}],
+    ['invalid runs', {id:'C',workspaceId:'personal',botId:'bot',messages:[],runs:null}],
+    ['invalid messages', {id:'C',workspaceId:'personal',botId:'bot',messages:null,runs:[]}],
+  ])('rejects malformed history: %s', async (_label, conversation) => {
+    const transport = new ChatAgUiTransport(vi.fn(async () => Response.json({data:{conversation}})));
+    await expect(transport.hydrate('C', 'personal')).rejects.toThrow();
+  });
   it('recognizes only the exact access-denied codes for start and cancel', async () => {
     for (const [code, expected] of [['CONVERSATION_ACCESS_DENIED','REJECTED'], ['OTHER','UNKNOWN']] as const) {
       const transport = new ChatAgUiTransport(vi.fn(async () => Response.json({code}, {status:404})));
@@ -23,7 +53,7 @@ describe('ChatAgUiTransport', () => {
     const transport = new ChatAgUiTransport(fetcher);
     const first = transport.hydrate('C', firstScope);
     const second = transport.hydrate('C', secondScope);
-    resolve(Response.json({data:{conversation:{id:'C', workspaceId:'A', messages:[], runs:[]}}}));
+    resolve(Response.json({data:{conversation:{id:'C', workspaceId:'A', botId:'bot', messages:[], runs:[]}}}));
     const results = await Promise.allSettled([first, second]);
     expect(fetcher).toHaveBeenCalledOnce();
     expect(results.map(r => r.status)).toEqual([firstScope === 'A' ? 'fulfilled' : 'rejected', secondScope === 'A' ? 'fulfilled' : 'rejected']);
@@ -33,7 +63,7 @@ describe('ChatAgUiTransport', () => {
     try {
       globalThis.fetch = async function(this: unknown) {
         if (this !== globalThis) throw new TypeError('Illegal invocation');
-        return Response.json({data:{conversation:{messages:[]}}});
+        return Response.json({data:{conversation:{...historyIdentity,messages:[]}}});
       } as typeof fetch;
       const transport = new ChatAgUiTransport();
       await expect(transport.hydrate('A')).resolves.toBeTruthy();
@@ -41,7 +71,7 @@ describe('ChatAgUiTransport', () => {
   });
   it('hydrates failed and cancelled assistant messages with non-success delivery', async () => {
     const transport = new ChatAgUiTransport(vi.fn(async () => Response.json({data:{conversation:{
-      messages:[{id:'cancelled',runId:'r2',role:'ASSISTANT',content:'partial',interrupted:true},{id:'failed',runId:'r1',role:'ASSISTANT',content:'partial',interrupted:true}],
+      ...historyIdentity, messages:[{id:'cancelled',runId:'r2',role:'ASSISTANT',content:'partial',interrupted:true},{id:'failed',runId:'r1',role:'ASSISTANT',content:'partial',interrupted:true}],
       runs:[{id:'r1',status:'FAILED'},{id:'r2',status:'CANCELLED'}]
     }}})));
     await transport.hydrate('A');
@@ -58,7 +88,7 @@ describe('ChatAgUiTransport', () => {
       {id:'system',runId:'r',role:'SYSTEM',content:'hidden',createdAt:'2026-01-01T00:00:00Z'},
       {id:'user',runId:'r',role:'USER',content:'hello',createdAt:'2026-01-01T00:00:01Z'}
     ];
-    const transport = new ChatAgUiTransport(vi.fn(async () => Response.json({data:{conversation:{messages:[...rows].reverse()}}})));
+    const transport = new ChatAgUiTransport(vi.fn(async () => Response.json({data:{conversation:{...historyIdentity,messages:[...rows].reverse()}}})));
     await transport.hydrate('A');
     expect(transport.agent('A').messages().map(m => m.id)).toEqual(['user']);
     expect(transport.historyOffset('A')).toBe(2);
@@ -71,12 +101,12 @@ describe('ChatAgUiTransport', () => {
     const fetcher = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
       const query = JSON.parse(String(init?.body)).query;
       if (query.includes('SessionHistory')) return new Promise<Response>(resolve => resolveHistory = resolve);
-      return Promise.resolve(Response.json({data:{run:{status:'COMPLETED'},conversation:{messages:rows.slice(42,62).reverse()}}}));
+      return Promise.resolve(Response.json({data:{run:{status:'COMPLETED'},conversation:{...historyIdentity,messages:rows.slice(42,62).reverse()}}}));
     });
     const transport = new ChatAgUiTransport(fetcher);
     const hydration = transport.hydrate('A');
     await transport.reconcile('A','r62');
-    resolveHistory(Response.json({data:{conversation:{messages:rows.slice(40,60).reverse()}}}));
+    resolveHistory(Response.json({data:{conversation:{...historyIdentity,messages:rows.slice(40,60).reverse()}}}));
     await hydration;
     expect(transport.agent('A').messages().map(m => m.id)).toEqual(rows.slice(40,62).map(m => m.id));
     expect(transport.historyOffset('A')).toBe(22);
@@ -84,7 +114,7 @@ describe('ChatAgUiTransport', () => {
   it('does not double-count overlapping older-page rows and newly reconciled messages', async () => {
     const rows = Array.from({length:62}, (_, i) => ({id:`m${String(i+1).padStart(2,'0')}`,runId:`r${i+1}`,role:'USER',content:`m${i+1}`,createdAt:new Date(1700000000000+i*1000).toISOString()}));
     let terminal = false;
-    const transport = new ChatAgUiTransport(vi.fn(async () => Response.json({data:{run:{status:'COMPLETED'},conversation:{messages:(terminal ? rows.slice(42,62) : rows.slice(40,60)).reverse()}}})));
+    const transport = new ChatAgUiTransport(vi.fn(async () => Response.json({data:{run:{status:'COMPLETED'},conversation:{...historyIdentity,messages:(terminal ? rows.slice(42,62) : rows.slice(40,60)).reverse()}}})));
     await transport.hydrate('A');
     expect(transport.historyOffset('A')).toBe(20);
     let resolvePage!: (value: typeof rows) => void;
@@ -99,7 +129,7 @@ describe('ChatAgUiTransport', () => {
   it('preserves the same range when an overlapping older page finishes before reconciliation', async () => {
     const rows = Array.from({length:62}, (_, i) => ({id:`m${String(i+1).padStart(2,'0')}`,runId:`r${i+1}`,role:'USER',content:`m${i+1}`,createdAt:new Date(1700000000000+i*1000).toISOString()}));
     let terminal = false;
-    const transport = new ChatAgUiTransport(vi.fn(async () => Response.json({data:{run:{status:'COMPLETED'},conversation:{messages:(terminal ? rows.slice(42,62) : rows.slice(40,60)).reverse()}}})));
+    const transport = new ChatAgUiTransport(vi.fn(async () => Response.json({data:{run:{status:'COMPLETED'},conversation:{...historyIdentity,messages:(terminal ? rows.slice(42,62) : rows.slice(40,60)).reverse()}}})));
     await transport.hydrate('A');
     let resolvePage!: (value: typeof rows) => void;
     const page = new Promise<typeof rows>(resolve => resolvePage = resolve).then(result => transport.mergeHistory('A', result, true));
@@ -116,7 +146,7 @@ describe('ChatAgUiTransport', () => {
   it('tracks the loaded offset when reconciliation adds newly persisted messages', async () => {
     const rows = Array.from({length:22}, (_, i) => ({id:`m${i + 1}`,runId:`r${i + 1}`,role:'USER',content:`m${i + 1}`}));
     let terminal = false;
-    const transport = new ChatAgUiTransport(vi.fn(async () => Response.json({data:{run:{status:'COMPLETED'},conversation:{messages:(terminal ? rows.slice(2,22) : rows.slice(0,20)).reverse()}}})));
+    const transport = new ChatAgUiTransport(vi.fn(async () => Response.json({data:{run:{status:'COMPLETED'},conversation:{...historyIdentity,messages:(terminal ? rows.slice(2,22) : rows.slice(0,20)).reverse()}}})));
     await transport.hydrate('A');
     expect(transport.historyOffset('A')).toBe(20);
     terminal = true;
@@ -130,7 +160,7 @@ describe('ChatAgUiTransport', () => {
     const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));
       expect(body.query).toContain('messages(limit: 20, offset: 0)');
-      return Response.json({data:{run:{id:'r60',status:'COMPLETED'},conversation:{messages:rows.slice(40).reverse()}}});
+      return Response.json({data:{run:{id:'r60',status:'COMPLETED'},conversation:{...historyIdentity,messages:rows.slice(40).reverse()}}});
     });
     const transport = new ChatAgUiTransport(fetcher);
     await transport.hydrate('A');
@@ -188,7 +218,7 @@ describe('ChatAgUiTransport', () => {
     const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));
       expect(body.query).toContain('limit: 20');
-      return Response.json({data:{conversation:{messages:rows.slice(40).reverse()}}});
+      return Response.json({data:{conversation:{...historyIdentity,messages:rows.slice(40).reverse()}}});
     });
     const transport = new ChatAgUiTransport(fetcher);
     await transport.hydrate('A');
@@ -212,13 +242,13 @@ describe('ChatAgUiTransport', () => {
     resolve(new Response('', {status:500}));
     await expect(pending).rejects.toThrow();
     expect(transport.agent('A').isInputBlocked?.()).toBe(true);
-    fetcher.mockResolvedValueOnce(Response.json({data:{conversation:{messages:[]}}}));
+    fetcher.mockResolvedValueOnce(Response.json({data:{conversation:{...historyIdentity,messages:[]}}}));
     await transport.hydrate('A');
     expect(transport.agent('A').isInputBlocked?.()).toBe(false);
   });
   it('reconciles the optimistic user even if duplicate 409 has no RUN_STARTED', async () => {
     const fetcher = vi.fn(async (url: string | URL | Request) => url === '/graphql'
-      ? Response.json({data:{run:{id:'run',status:'COMPLETED'},conversation:{messages:[{id:'db-user',runId:'run',role:'USER',content:'hello'}]}}})
+      ? Response.json({data:{run:{id:'run',status:'COMPLETED'},conversation:{...historyIdentity,messages:[{id:'db-user',runId:'run',role:'USER',content:'hello'}]}}})
       : Response.json({code:'DUPLICATE_RUN'},{status:409}));
     const transport = new ChatAgUiTransport(fetcher);
     expect((await transport.run('A','run','hello',() => {})).status).toBe('DUPLICATE');
@@ -230,7 +260,7 @@ describe('ChatAgUiTransport', () => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({start(controller) { push = chunk => controller.enqueue(chunk); }});
     const fetcher = vi.fn(async (url: string | URL | Request) => url === '/graphql'
-      ? Response.json({ data:{conversation:{messages:[{id:'assistant',runId:'run',role:'ASSISTANT',content:'old'}]}} })
+      ? Response.json({ data:{conversation:{...historyIdentity,messages:[{id:'assistant',runId:'run',role:'ASSISTANT',content:'old'}]}} })
       : new Response(stream,{headers:{'Content-Type':'text/event-stream'}}));
     const transport = new ChatAgUiTransport(fetcher);
     const running = transport.run('A', 'run', 'hi', () => {});
@@ -250,7 +280,7 @@ describe('ChatAgUiTransport', () => {
         const messages = saved
           ? [{id:'db-user',runId:'run-id',role:'USER',content:'hello'}, {id:'db-assistant',runId:'run-id',role:'ASSISTANT',content:'answer'}]
           : [{id:'history',runId:'old',role:'USER',content:'earlier'}];
-        return Response.json({data:{conversation:{messages:messages.reverse()},run:{id:'run-id',status:'COMPLETED'}}});
+        return Response.json({data:{conversation:{...historyIdentity,messages:messages.reverse()},run:{id:'run-id',status:'COMPLETED'}}});
       }
       const input = JSON.parse(String(init?.body));
       saved = true;

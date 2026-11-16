@@ -275,6 +275,7 @@ export class App implements OnInit {
   });
 
   async ngOnInit(): Promise<void> {
+    const initialGeneration = this.selectionGeneration;
     try {
       await this.workspaces.load();
       const workspaceId = this.workspaces.selectedId();
@@ -282,7 +283,11 @@ export class App implements OnInit {
       this.conversationStore.setWorkspace(workspaceId);
       this.navigation()?.setWorkspace(workspaceId);
       await this.loadBots();
+      const initialDraft = this.chatSession();
+      const initialDraftVersion = initialDraft.draftVersion();
       await this.loadConversations();
+      if (this.selectionGeneration !== initialGeneration || this.workspaces.selectedId() !== workspaceId ||
+          initialDraftVersion !== 0 || initialDraft.draftVersion() !== initialDraftVersion) return;
 
       // Check localStorage for previously active conversation to survive reloads
       const savedId = this.getStorageItem('bot_active_conversation_id');
@@ -475,6 +480,14 @@ export class App implements OnInit {
        * discard the outdated response so it doesn't overwrite the newly selected conversation or draft.
        */
       if (this.selectionGeneration !== currentGen || this.currentConversationId() !== id) {
+        return;
+      }
+
+      if (conversation === null) {
+        const pendingDraft = this.chatSession();
+        await this.newConversation();
+        // Keep text entered during verification in its own session, without replacing another draft.
+        if (pendingDraft.draftVersion() > 0 && pendingDraft.draft()) this.selectedSource.set(pendingDraft);
         return;
       }
 
