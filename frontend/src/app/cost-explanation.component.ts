@@ -5,7 +5,7 @@ import { UsageCost, UsageCostStatus } from './usage.store';
   selector: 'app-cost-explanation',
   standalone: true,
   template: `
-    <div class="cost-explanation">
+    <div class="cost-explanation" [class.compact]="compact()">
       <p class="status"><strong>{{ statusLabel(cost().status, cost().needsReprice) }}</strong>
         @if (cost().simulation) { <strong class="simulation">模擬估算，不計入真實費用</strong> }
       </p>
@@ -84,6 +84,7 @@ import { UsageCost, UsageCostStatus } from './usage.store';
   `,
   styles: [`
     :host { display: block; min-width: 0; }
+    .compact { min-inline-size: 14rem; max-inline-size: 22rem; white-space: normal; overflow-wrap: anywhere; }
     .status { display: flex; flex-wrap: wrap; gap: .5rem; margin-block: .25rem; }
     .simulation { border: 2px solid currentColor; padding: .15rem .35rem; }
     .stale { font-weight: 700; }

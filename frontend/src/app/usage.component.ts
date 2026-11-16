@@ -71,7 +71,7 @@ import { MonthlyBudgetComponent } from './monthly-budget.component';
       }
     </section>
   `,
-  styles: [`:host{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;min-width:0;overflow:hidden}.usage{flex:1 1 auto;min-height:0;min-width:0;padding:1rem;overflow:auto}.table-scroll{overflow:auto;max-inline-size:100%}table{border-collapse:separate;border-spacing:0}th,td{padding:.5rem;text-align:start;vertical-align:top;white-space:nowrap}thead th{position:sticky;inset-block-start:0;background:Canvas}tbody th{position:sticky;inset-inline-start:0;background:Canvas}small{display:block;white-space:normal}pre{white-space:pre-wrap;overflow-wrap:anywhere}`]
+  styles: [`:host{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;min-width:0;overflow:hidden}.usage{flex:1 1 auto;min-height:0;min-width:0;padding:1rem;overflow:auto}.table-scroll{overflow:auto;max-inline-size:100%;container-type:inline-size}table{border-collapse:separate;border-spacing:0}th,td{padding:.5rem;text-align:start;vertical-align:top;white-space:nowrap}thead th{position:sticky;inset-block-start:0;background:Canvas}tbody th{position:sticky;inset-inline-start:0;background:Canvas}@container (max-width:600px){tbody th{position:static}}small{display:block;white-space:normal}pre{white-space:pre-wrap;overflow-wrap:anywhere}`]
 })
 export class UsageComponent implements OnChanges, OnDestroy {
   @Input() workspaceId: string | null = null;
