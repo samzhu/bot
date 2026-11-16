@@ -15,6 +15,7 @@ import java.util.concurrent.CompletionStage;
 public class JdbcWorkspaceMonthlyBudgetOperations implements WorkspaceMonthlyBudgetOperations {
     private static final BigDecimal MAX_CAP = new BigDecimal("999999999999999999.999999999999");
     private final JdbcTemplate jdbc;
+    private final MonthlyBudgetProperties properties;
     private final TransactionTemplate tx;
     private final WorkspaceOperations workspaces;
     private final WorkspaceLane lane;
@@ -25,8 +26,9 @@ public class JdbcWorkspaceMonthlyBudgetOperations implements WorkspaceMonthlyBud
     public JdbcWorkspaceMonthlyBudgetOperations(JdbcTemplate jdbc,
                                                 org.springframework.transaction.PlatformTransactionManager manager,
                                                 WorkspaceOperations workspaces, WorkspaceLane lane, BudgetCancellationOutbox outbox,
-                                                DefaultWorkspaceAdmission admission,java.time.Clock clock) {
+                                                DefaultWorkspaceAdmission admission,java.time.Clock clock, MonthlyBudgetProperties properties) {
         this.jdbc = jdbc;
+        this.properties = properties;
         this.tx = new TransactionTemplate(manager);
         this.workspaces = workspaces;
         this.lane = lane;
@@ -166,9 +168,16 @@ public class JdbcWorkspaceMonthlyBudgetOperations implements WorkspaceMonthlyBud
 
     private void ensureRow(Scope scope) {
         jdbc.update("""
-                INSERT INTO workspace_monthly_budget(workspace_id, partition)
-                VALUES (?, ?) ON CONFLICT DO NOTHING
-                """, scope.workspaceId(), scope.partition().name());
+                INSERT INTO workspace_monthly_budget(workspace_id, partition, cap_usd)
+                VALUES (?, ?, ?) ON CONFLICT DO NOTHING
+                """, scope.workspaceId(), scope.partition().name(), properties.cap());
+        // Only a never-configured legacy row can receive the initial value; saved choices win.
+        jdbc.update("""
+                UPDATE workspace_monthly_budget b SET cap_usd=?
+                 WHERE b.workspace_id=? AND b.partition=? AND b.config_version=0 AND b.cap_usd IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM workspace_monthly_budget_command c
+                                   WHERE c.workspace_id=b.workspace_id AND c.partition=b.partition)
+                """, properties.cap(), scope.workspaceId(), scope.partition().name());
         jdbc.update("""
                 INSERT INTO workspace_monthly_budget_period(workspace_id, partition, period_start)
                 VALUES (?, ?, ?) ON CONFLICT DO NOTHING

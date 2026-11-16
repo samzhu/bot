@@ -50,12 +50,63 @@ class WorkspaceMonthlyBudgetGraphQLTests {
         var budget=result.path("data").path("workspaceMonthlyBudget");
         assertEquals(workspace,budget.path("workspaceId").asText());
         assertFalse(budget.path("enabled").asBoolean());
-        assertTrue(budget.path("capUsd").isNull());
+        assertEquals(0, new java.math.BigDecimal("10").compareTo(new java.math.BigDecimal(budget.path("capUsd").asText())));
         assertEquals(0,new java.math.BigDecimal(budget.path("knownSubtotalUsd").asText()).signum());
         assertEquals("0",budget.path("terminalUnknownCount").asText());
         assertEquals("DISABLED",budget.path("state").asText());
         assertEquals("DISABLED",budget.path("reason").asText());
         assertEquals("0",budget.path("configVersion").asText());
+    }
+
+    @Test void untouchedLegacyRowGetsDefaultButSavedNullAndDisabledChoiceStaySaved() throws Exception {
+        String workspace=graph("{ personalWorkspace { id } }").path("data").path("personalWorkspace").path("id").asText();
+        jdbc.update("insert into workspace_monthly_budget(workspace_id,partition,enabled,cap_usd,config_version) values (?,'REAL',false,null,0)",workspace);
+        var initial=graph("{ workspaceMonthlyBudget(workspaceId:\""+workspace+"\",simulation:false) { capUsd enabled configVersion } }");
+        assertFalse(initial.has("errors"),initial.toString());
+        var first=initial.path("data").path("workspaceMonthlyBudget");
+        assertEquals(0,new java.math.BigDecimal("10").compareTo(new java.math.BigDecimal(first.path("capUsd").asText())));
+        assertFalse(first.path("enabled").asBoolean());
+        assertEquals("0",first.path("configVersion").asText());
+        String key="explicit-null-"+java.util.UUID.randomUUID();
+        String mutation="mutation { configureWorkspaceMonthlyBudget(input:{workspaceId:\""+workspace+"\",simulation:false,enabled:false,capUsd:null,expectedConfigVersion:\"0\",idempotencyKey:\""+key+"\"}) { outcome budget { capUsd enabled configVersion } } }";
+        var saved=graph(mutation); assertFalse(saved.has("errors"),saved.toString());
+        assertEquals("APPLIED",saved.path("data").path("configureWorkspaceMonthlyBudget").path("outcome").asText());
+        var replay=graph(mutation); assertEquals("REPLAYED",replay.path("data").path("configureWorkspaceMonthlyBudget").path("outcome").asText());
+        var after=graph("{ workspaceMonthlyBudget(workspaceId:\""+workspace+"\",simulation:false) { capUsd enabled configVersion } }").path("data").path("workspaceMonthlyBudget");
+        assertTrue(after.path("capUsd").isNull()); assertFalse(after.path("enabled").asBoolean()); assertEquals("1",after.path("configVersion").asText());
+        assertEquals(1,jdbc.queryForObject("select count(*) from workspace_monthly_budget_command where workspace_id=? and partition='REAL'",Integer.class,workspace));
+    }
+
+    @Test void versionZeroWithCommandEvidenceIsNotOverwritten() throws Exception {
+        String workspace=graph("{ personalWorkspace { id } }").path("data").path("personalWorkspace").path("id").asText();
+        jdbc.update("insert into workspace_monthly_budget(workspace_id,partition,enabled,cap_usd,config_version) values (?,'REAL',false,null,0)",workspace);
+        jdbc.update("insert into workspace_monthly_budget_command(workspace_id,partition,actor_id,idempotency_key,expected_config_version,enabled,cap_usd) values (?,'REAL','dev-user','legacy',0,false,null)",workspace);
+        var result=graph("{ workspaceMonthlyBudget(workspaceId:\""+workspace+"\",simulation:false) { capUsd enabled configVersion } }");
+        assertFalse(result.has("errors"),result.toString());
+        assertTrue(result.path("data").path("workspaceMonthlyBudget").path("capUsd").isNull());
+    }
+
+    @Test void savedBudgetSurvivesFreshApplicationWithChangedDefault() throws Exception {
+        String workspace=graph("{ personalWorkspace { id } }").path("data").path("personalWorkspace").path("id").asText();
+        var saved=configure(workspace,"restart-"+java.util.UUID.randomUUID(),"0","7.25");
+        assertFalse(saved.has("errors"),saved.toString());
+        var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
+        try (var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class)
+                .web(org.springframework.boot.WebApplicationType.SERVLET).profiles("test")
+                .properties("server.port=0", "spring.datasource.url="+ds.getJdbcUrl(),
+                        "spring.datasource.username="+ds.getUsername(), "spring.datasource.password="+ds.getPassword(),
+                        "spring.docker.compose.enabled=false")
+                .run("--bot.budget.monthly.default-cap-usd=25")) {
+            int restartPort=((org.springframework.boot.web.server.servlet.context.ServletWebServerApplicationContext)context).getWebServer().getPort();
+            var request=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+restartPort+"/graphql"))
+                    .header("Content-Type","application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(Map.of("query", "{ workspaceMonthlyBudget(workspaceId:\""+workspace+"\",simulation:false) { capUsd enabled configVersion } }")))).build();
+            var result=json.readTree(http.send(request,HttpResponse.BodyHandlers.ofString()).body());
+            assertFalse(result.has("errors"),result.toString());
+            var budget=result.path("data").path("workspaceMonthlyBudget");
+            assertEquals(0,new java.math.BigDecimal("7.25").compareTo(new java.math.BigDecimal(budget.path("capUsd").asText())));
+            assertTrue(budget.path("enabled").asBoolean()); assertEquals("1",budget.path("configVersion").asText());
+        }
     }
 
     @Test void durableReplayUsesCurrentBudgetAndConflictingPayloadDoesNotMutate() throws Exception {

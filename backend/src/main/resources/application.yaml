@@ -1,4 +1,7 @@
 bot:
+  budget:
+    monthly:
+      default-cap-usd: "10"
   conversation:
     window-turns: 10
   run:
