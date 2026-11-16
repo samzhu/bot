@@ -11,7 +11,8 @@ import org.springframework.test.context.ActiveProfiles;
 import static org.junit.jupiter.api.Assertions.*;
 
 @org.junit.jupiter.api.TestMethodOrder(org.junit.jupiter.api.MethodOrderer.OrderAnnotation.class)
-@SpringBootTest
+// This suite explicitly covers dispatch before any catalog exists.
+@SpringBootTest(properties={"spring.config.location=optional:classpath:/no-catalog-test/", "bot.budget.monthly.default-cap-usd=10"})
 @Import(TestcontainersConfiguration.class)
 @ActiveProfiles("test")
 class PricingPublishIntegrationTests {

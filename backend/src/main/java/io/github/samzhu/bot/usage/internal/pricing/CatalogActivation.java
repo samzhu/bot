@@ -36,6 +36,30 @@ public class CatalogActivation {
     }
     public Revision publish(String sourceRevision, String sourceReference, List<PriceCatalog.Entry> entries) {
         if (sourceRevision == null || sourceRevision.isBlank() || sourceReference == null || sourceReference.isBlank()) throw new IllegalArgumentException("source and revision required");
+        // Reject invalid rates before committing a revision that dispatch could sample.
+        for (var entry : entries) {
+            var price = entry.snapshot();
+            // The production Gemini text route requires every priced token category it uses.
+            if ("GOOGLE".equals(price.provider()) && "generateContent".equals(price.endpoint())
+                    && "gemini-3.8-flash".equals(price.model()) && "GEMINI_API".equals(price.channel())
+                    && !price.rates().keySet().containsAll(java.util.Set.of("input", "cache_read", "output", "thoughts", "tool_input")))
+                throw new IllegalArgumentException("Missing required catalog rate");
+            for (var rate : entry.snapshot().rates().values()) {
+                if (!rate.matches("[0-9]+(?:\\.[0-9]+)?"))
+                    throw new IllegalArgumentException("Invalid catalog rate");
+            }
+        }
+        for (int i=0; i<entries.size(); i++) {
+            var a=entries.get(i);
+            for (int j=i+1; j<entries.size(); j++) {
+                var b=entries.get(j);
+                var x=a.snapshot(); var y=b.snapshot();
+                if (x.provider().equals(y.provider()) && x.endpoint().equals(y.endpoint())
+                        && x.model().equals(y.model()) && x.channel().equals(y.channel())
+                        && a.fromInclusive().isBefore(b.untilExclusive()) && b.fromInclusive().isBefore(a.untilExclusive()))
+                    throw new IllegalArgumentException("Overlapping catalog entries");
+            }
+        }
         String id=UUID.randomUUID().toString();
         String hash=contentHash(sourceReference,entries);
         Revision created=transactions.execute(tx -> {
@@ -49,8 +73,10 @@ public class CatalogActivation {
             for (var e:entries) {
                 String rates;
                 try { rates=json.writeValueAsString(e.snapshot().rates()); } catch(Exception ex) { throw new IllegalArgumentException(ex); }
-                jdbc.update("insert into pricing_catalog_entry(id,revision_id,provider,endpoint,model,channel,price_revision,effective_from,effective_until,rates) values (?,?,?,?,?,?,?,?,?,?::jsonb)",
-                    UUID.randomUUID().toString(),id,e.snapshot().provider(),e.snapshot().endpoint(),e.snapshot().model(),e.snapshot().channel(),e.snapshot().revision(),Timestamp.from(e.fromInclusive()),Timestamp.from(e.untilExclusive()),rates);
+                String metadata;
+                try { metadata=e.metadata()==null ? null : json.writeValueAsString(e.metadata()); } catch(Exception ex) { throw new IllegalArgumentException(ex); }
+                jdbc.update("insert into pricing_catalog_entry(id,revision_id,provider,endpoint,model,channel,price_revision,effective_from,effective_until,rates,metadata) values (?,?,?,?,?,?,?,?,?,?::jsonb,?::jsonb)",
+                    UUID.randomUUID().toString(),id,e.snapshot().provider(),e.snapshot().endpoint(),e.snapshot().model(),e.snapshot().channel(),e.snapshot().revision(),Timestamp.from(e.fromInclusive()),Timestamp.from(e.untilExclusive()),rates,metadata);
             }
             return new Revision(id,generation);
         });
@@ -61,7 +87,12 @@ public class CatalogActivation {
         try {
             var normalized=entries.stream().map(e -> {
                 var p=e.snapshot();
-                try { return json.writeValueAsString(List.of(p.provider(),p.endpoint(),p.model(),p.channel(),p.revision(),e.fromInclusive().toString(),e.untilExclusive().toString(),new java.util.TreeMap<>(p.rates()))); }
+                try {
+                    var fields=new java.util.ArrayList<Object>(List.of(p.provider(),p.endpoint(),p.model(),p.channel(),p.revision(),e.fromInclusive().toString(),e.untilExclusive().toString(),new java.util.TreeMap<>(p.rates())));
+                    // Preserve historical hashes when legacy entries have no metadata.
+                    if (e.metadata()!=null) fields.add(e.metadata());
+                    return json.writeValueAsString(fields);
+                }
                 catch (Exception ex) { throw new IllegalArgumentException(ex); }
             }).sorted().toList();
             byte[] bytes=json.writeValueAsBytes(List.of(source,normalized));
