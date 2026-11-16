@@ -12,7 +12,7 @@ import { MonthlyBudgetComponent } from './monthly-budget.component';
       <button type="button" (click)="back.emit()">返回對話</button>
       <h1>個人用量</h1>
       <nav aria-label="用量頁面">
-        <button type="button" [attr.aria-pressed]="activeTab()==='attempts'" (click)="activeTab.set('attempts')">逐次用量</button>
+        <button type="button" [attr.aria-pressed]="activeTab()==='attempts'" (click)="showAttempts()">逐次用量</button>
         <button type="button" [attr.aria-pressed]="activeTab()==='reports'" (click)="activeTab.set('reports')">報表</button>
         @if(workspaceId){<button type="button" [attr.aria-pressed]="activeTab()==='budget'" (click)="activeTab.set('budget')">工作區月預算</button>}
         @if(manager){<button type="button" [attr.aria-pressed]="activeTab()==='revisions'" (click)="openCostRevisions(false)">費用修訂管理</button>}
@@ -78,6 +78,7 @@ export class UsageComponent implements OnChanges, OnDestroy {
   @Input() manager = false;
   readonly activeTab=signal<'attempts'|'reports'|'revisions'|'budget'>('attempts');
   readonly revisionSimulation=signal(false);
+  showAttempts():void { this.activeTab.set('attempts'); void this.store.retry(); }
   openCostRevisions(simulation:boolean):void { this.revisionSimulation.set(simulation); this.activeTab.set('revisions'); }
   readonly back = output<void>(); readonly store = new UsageStore();
   ngOnChanges(): void { void this.store.setWorkspace(this.workspaceId); }
