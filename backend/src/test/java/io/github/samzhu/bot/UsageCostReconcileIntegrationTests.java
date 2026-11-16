@@ -45,7 +45,8 @@ class UsageCostReconcileIntegrationTests {
         jdbc.update("insert into usage_cost_current(attempt_id,estimate_id) values (?,?)",id,oldEstimate);
         jdbc.update("insert into pricing_catalog_revision(id,source_reference,source_revision,content_hash) values (?,'fixture',?,'hash')",catalog,"revision-"+suffix);
         jdbc.update("insert into pricing_catalog_entry(id,revision_id,provider,endpoint,model,channel,price_revision,effective_from,effective_until,rates) values (?,?,'FAKE_GEMINI','generateContent','fixture-gemini','FAKE','fixture-v2',now()-interval '1 day',now()+interval '1 day','{\"input\":\"1\",\"cache_read\":\"0.1\",\"output\":\"2\",\"thoughts\":\"2\",\"tool_input\":\"1\"}'::jsonb)","entry-"+suffix,catalog);
-        var response=graph("mutation { reconcileCost(input:{workspaceId:\""+workspace+"\",attemptId:\""+id+"\",expectedRevision:\""+oldEstimate+"\",expectedSourceProjectionVersion:\"1\",idempotencyKey:\"test\",catalogRevisionId:\""+catalog+"\",evidenceReference:\"fixture-evidence\",reason:\"verified\"}) { outcome revision { id status knownSubtotal completeAmount sourceSnapshotId priceSnapshotId catalogRevisionId } effectiveCost { amount completeAmount } } }");
+        String command="mutation { reconcileCost(input:{workspaceId:\""+workspace+"\",attemptId:\""+id+"\",expectedRevision:\""+oldEstimate+"\",expectedSourceProjectionVersion:\"1\",idempotencyKey:\"test\",catalogRevisionId:\""+catalog+"\",evidenceReference:\"fixture-evidence\",reason:\"verified\"}) { outcome revision { id status knownSubtotal completeAmount sourceSnapshotId priceSnapshotId catalogRevisionId } effectiveCost { amount completeAmount } } }";
+        var response=graph(command);
         assertFalse(response.has("errors"),response.toString());
         var revision=response.path("data").path("reconcileCost").path("revision");
         assertEquals("COMPLETE",revision.path("status").asText());
@@ -65,10 +66,23 @@ class UsageCostReconcileIntegrationTests {
         assertEquals("MISSING",old.path("priceSelectionState").asText()); assertTrue(old.path("priceRatesJson").isNull());
         var updated=java.util.stream.StreamSupport.stream(history.path("data").path("costRevisions").path("nodes").spliterator(),false).filter(n->revision.path("id").asText().equals(n.path("id").asText())).findFirst().orElseThrow();
         assertEquals("MATCHED",updated.path("priceSelectionState").asText()); assertEquals("0.1",json.readTree(updated.path("priceRatesJson").asText()).path("cache_read").asText());
+        var replay=graph(command);
+        assertFalse(replay.has("errors"),replay.toString());
+        assertEquals("REPLAYED",replay.path("data").path("reconcileCost").path("outcome").asText());
+        assertEquals(revision.path("id").asText(),replay.path("data").path("reconcileCost").path("revision").path("id").asText());
+        assertEquals("0.001620000000",replay.path("data").path("reconcileCost").path("effectiveCost").path("completeAmount").asText());
         var duplicate=graph("mutation { reconcileCost(input:{workspaceId:\""+workspace+"\",attemptId:\""+id+"\",expectedRevision:\""+oldEstimate+"\",expectedSourceProjectionVersion:\"1\",idempotencyKey:\"test\",catalogRevisionId:\""+catalog+"\",evidenceReference:\"different-evidence\",reason:\"verified\"}) { outcome } }");
         assertEquals("CONFLICT",duplicate.path("errors").get(0).path("extensions").path("code").asText());
         assertEquals(1,jdbc.queryForObject("select count(*) from usage_cost_revision_audit where attempt_id=?",Integer.class,id));
         assertEquals(revision.path("id").asText(),jdbc.queryForObject("select estimate_id from usage_cost_current where attempt_id=?",String.class,id));
+        var summaries=graph("{ workspaceUsageAttempt(workspaceId:\""+workspace+"\",id:\""+id+"\") { cost { knownSubtotal completeAmount currentRevision } } workspaceUsageReport(workspaceId:\""+workspace+"\",periodDays:7,simulation:true) { summary { knownSubtotal completeTotal unknownCount } } workspaceMonthlyBudget(workspaceId:\""+workspace+"\",simulation:true) { knownSubtotalUsd terminalUnknownCount } }");
+        assertFalse(summaries.has("errors"),summaries.toString());
+        var data=summaries.path("data");
+        assertEquals("0.001620000000",data.path("workspaceUsageAttempt").path("cost").path("knownSubtotal").asText());
+        assertEquals(revision.path("id").asText(),data.path("workspaceUsageAttempt").path("cost").path("currentRevision").asText());
+        assertEquals("0.001620000000",data.path("workspaceUsageReport").path("summary").path("knownSubtotal").asText());
+        assertEquals("0.001620000000",data.path("workspaceMonthlyBudget").path("knownSubtotalUsd").asText());
+        assertEquals("0",data.path("workspaceMonthlyBudget").path("terminalUnknownCount").asText());
     }
     @Test void googleUnknownCoverageCannotBecomeCompleteEvenWithFinalAndPrice() throws Exception {
         String s=UUID.randomUUID().toString().substring(0,8), w="google-w-"+s,id="google-a-"+s,snap="google-s-"+s,cat="google-c-"+s;
@@ -85,6 +99,15 @@ class UsageCostReconcileIntegrationTests {
         var revision=result.path("data").path("reconcileCost").path("revision");
         assertEquals("PARTIAL",revision.path("status").asText()); assertTrue(revision.path("completeAmount").isNull());
         assertTrue(jdbc.queryForObject("select details::text like '%COVERAGE_UNKNOWN%' from usage_cost_estimate where id=?",Boolean.class,revision.path("id").asText()));
+        var resultViews=graph("{ workspaceUsageAttempt(workspaceId:\""+w+"\",id:\""+id+"\") { cost { status knownSubtotal completeAmount needsReprice reasons } } workspaceUsageReport(workspaceId:\""+w+"\",periodDays:7,simulation:false) { summary { status knownSubtotal completeTotal unknownCount coverageUnknownCount } } workspaceMonthlyBudget(workspaceId:\""+w+"\",simulation:false) { knownSubtotalUsd terminalUnknownCount } }");
+        assertFalse(resultViews.has("errors"),resultViews.toString());
+        var data=resultViews.path("data"); var cost=data.path("workspaceUsageAttempt").path("cost");
+        var summary=data.path("workspaceUsageReport").path("summary"); var budget=data.path("workspaceMonthlyBudget");
+        assertEquals("PARTIAL",cost.path("status").asText()); assertTrue(cost.path("completeAmount").isNull()); assertFalse(cost.path("needsReprice").asBoolean());
+        assertEquals("0.001620000000",cost.path("knownSubtotal").asText());
+        assertEquals("PARTIAL",summary.path("status").asText()); assertEquals("0.001620000000",summary.path("knownSubtotal").asText());
+        assertTrue(summary.path("completeTotal").isNull()); assertEquals("1",summary.path("unknownCount").asText()); assertEquals("1",summary.path("coverageUnknownCount").asText());
+        assertEquals("0.001620000000",budget.path("knownSubtotalUsd").asText()); assertEquals("1",budget.path("terminalUnknownCount").asText());
     }
     private com.fasterxml.jackson.databind.JsonNode graph(String query) throws Exception {
         var request=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/graphql")).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(Map.of("query",query)))).build();
