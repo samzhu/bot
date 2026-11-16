@@ -24,8 +24,9 @@ describe('#49 reconciliation across usage pages', () => {
       else throw new Error(`Unexpected request ${req.query}`);return Response.json({data});
     }));
     const fixture=TestBed.createComponent(UsageComponent);fixture.componentRef.setInput('workspaceId','workspace');fixture.componentRef.setInput('manager',true);fixture.detectChanges();const root=fixture.nativeElement as HTMLElement;
+    [...root.querySelectorAll<HTMLButtonElement>('nav button')].find(b=>b.textContent?.trim()==='逐次用量')!.click(); fixture.detectChanges();
     const button=(label:string)=>[...root.querySelectorAll('button')].find(b=>b.textContent?.trim()===label)!;
-    await vi.waitFor(()=>{fixture.detectChanges();expect(root.textContent).toContain('尚未定價');});button('費用修訂管理').click();
+    await vi.waitFor(()=>{fixture.detectChanges();expect(root.textContent).toContain('尚未定價');});const more=root.querySelector<HTMLDetailsElement>('nav details')!;expect(more.open).toBe(false);more.querySelector<HTMLElement>('summary')!.click();expect(more.open).toBe(true);button('費用修訂管理').click();
     await vi.waitFor(()=>{fixture.detectChanges();expect(root.querySelector('app-cost-revision tbody button')).toBeTruthy();});root.querySelector<HTMLButtonElement>('app-cost-revision tbody button')!.click();
     await vi.waitFor(()=>{fixture.detectChanges();expect(root.querySelector('#reconcile-cost-form')).toBeTruthy();});
     const select=root.querySelector<HTMLSelectElement>('#reconcile-catalog')!;select.value='catalog';select.dispatchEvent(new Event('change',{bubbles:true}));
@@ -42,34 +43,36 @@ describe('#49 reconciliation across usage pages', () => {
     expect(requests.find(r=>r.query.includes('query CostReviewAttemptSnapshots'))?.variables).toMatchObject({workspaceId:'workspace',id:'attempt'});
     expect(requests.find(r=>r.query.includes('query CostRevisions'))?.variables).toMatchObject({workspaceId:'workspace',attemptId:'attempt'});
     expect(requests.filter(r=>r.query.includes('query MyUsageAttempts')).every(r=>r.variables.workspaceId==='workspace')).toBe(true);
-    expect(requests.filter(r=>r.query.includes('query MyUsageAttempts'))).toHaveLength(2);expect(requests.find(r=>r.query.includes('query MyUsageReport'))?.variables).toMatchObject({workspaceId:'workspace',simulation:false});expect(requests.find(r=>r.query.includes('query MonthlyBudget'))?.variables).toMatchObject({workspaceId:'workspace',simulation:false});
+    expect(requests.filter(r=>r.query.includes('query MyUsageAttempts'))).toHaveLength(3);expect(requests.find(r=>r.query.includes('query MyUsageReport'))?.variables).toMatchObject({workspaceId:'workspace',simulation:false});expect(requests.find(r=>r.query.includes('query MonthlyBudget'))?.variables).toMatchObject({workspaceId:'workspace',simulation:false});
   });
   it('offers retry when re-entering the usage list fails', async () => {
     let reads=0;
     vi.stubGlobal('fetch',vi.fn(async (_url:RequestInfo|URL,init?:RequestInit)=>{
       const req=JSON.parse(String(init?.body));
-      if(req.query.includes('query MyUsageAttempts')) return ++reads===2 ? new Response('',{status:503}) : Response.json({data:{myUsageAttempts:{nodes:[],pageInfo:{hasNextPage:false,endCursor:null}}}});
+      if(req.query.includes('query MyUsageAttempts')) return ++reads===3 ? new Response('',{status:503}) : Response.json({data:{myUsageAttempts:{nodes:[],pageInfo:{hasNextPage:false,endCursor:null}}}});
       if(req.query.includes('query MonthlyBudget')) return Response.json({data:{workspaceMonthlyBudget:{workspaceId:'workspace',simulation:false,period:'2026-11',periodStart:'2026-11-01',periodEnd:'2026-12-01',enabled:false,capUsd:'10',knownSubtotalUsd:null,terminalUnknownCount:'0',state:'DISABLED',reason:'DISABLED',configVersion:'0',generation:'1'}}});
       return Response.json({data:{}});
     }));
     const f=TestBed.createComponent(UsageComponent);f.componentRef.setInput('workspaceId','workspace');f.detectChanges();const root=f.nativeElement as HTMLElement;
+    [...root.querySelectorAll<HTMLButtonElement>('nav button')].find(b=>b.textContent?.trim()==='逐次用量')!.click(); f.detectChanges();
     const button=(label:string)=>[...root.querySelectorAll('button')].find(b=>b.textContent?.trim()===label)!;
     await vi.waitFor(()=>{f.detectChanges();expect(root.textContent).toContain('目前沒有用量紀錄');});button('工作區月預算').click();f.detectChanges();button('逐次用量').click();
     await vi.waitFor(()=>{f.detectChanges();expect(root.querySelector('[role=alert]')?.textContent).toContain('用量載入失敗');});
-    root.querySelector<HTMLButtonElement>('[role=alert] button')!.click();await vi.waitFor(()=>{f.detectChanges();expect(root.textContent).toContain('目前沒有用量紀錄');});expect(reads).toBe(3);
+    root.querySelector<HTMLButtonElement>('[role=alert] button')!.click();await vi.waitFor(()=>{f.detectChanges();expect(root.textContent).toContain('目前沒有用量紀錄');});expect(reads).toBe(4);
   });
   it('does not display a delayed re-entry response after switching workspace', async () => {
     let aReads=0;let finish!:(response:Response)=>void;
     vi.stubGlobal('fetch',vi.fn(async (_url:RequestInfo|URL,init?:RequestInit)=>{
       const req=JSON.parse(String(init?.body));
       if(req.query.includes('query MyUsageAttempts')) {
-        if(req.variables.workspaceId==='A' && ++aReads===2)return new Promise<Response>(resolve=>finish=resolve);
+        if(req.variables.workspaceId==='A' && ++aReads===3)return new Promise<Response>(resolve=>finish=resolve);
         return Response.json({data:{myUsageAttempts:{nodes:[],pageInfo:{hasNextPage:false,endCursor:null}}}});
       }
       if(req.query.includes('query MonthlyBudget'))return Response.json({data:{workspaceMonthlyBudget:{workspaceId:req.variables.workspaceId,simulation:false,period:'2026-11',periodStart:'2026-11-01',periodEnd:'2026-12-01',enabled:false,capUsd:'10',knownSubtotalUsd:null,terminalUnknownCount:'0',state:'DISABLED',reason:'DISABLED',configVersion:'0',generation:'1'}}});
       return Response.json({data:{}});
     }));
     const f=TestBed.createComponent(UsageComponent);f.componentRef.setInput('workspaceId','A');f.detectChanges();const root=f.nativeElement as HTMLElement;
+    [...root.querySelectorAll<HTMLButtonElement>('nav button')].find(b=>b.textContent?.trim()==='逐次用量')!.click(); f.detectChanges();
     const button=(label:string)=>[...root.querySelectorAll('button')].find(b=>b.textContent?.trim()===label)!;
     await vi.waitFor(()=>{f.detectChanges();expect(root.textContent).toContain('目前沒有用量紀錄');});button('工作區月預算').click();f.detectChanges();button('逐次用量').click();
     await vi.waitFor(()=>expect(finish).toBeDefined());f.componentRef.setInput('workspaceId','B');f.detectChanges();

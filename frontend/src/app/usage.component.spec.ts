@@ -11,7 +11,7 @@ it('shows API unpriced status and exact native values in an accessible table', a
   const native = {value:'900719925474099312345',presence:'PRESENT',meaning:'provider raw input'};
   const missing = {value:null,presence:'UNKNOWN',meaning:'capture incomplete'};
   vi.stubGlobal('fetch',vi.fn(async () => Response.json({data:{myUsageAttempts:{nodes:[{id:'a',workspaceId:'A',preparedAt:'2026-01-01T00:00:00.123456Z',startedAt:null,provider:'gemini',model:'m',executionOutcome:'COMPLETED',attemptCoverage:'UNKNOWN',simulation:true,input:native,output:missing,cacheRead:missing,cacheWrite:missing,cost:unpricedCost(true)}],pageInfo:{hasNextPage:false,endCursor:null}}}})));
-  const fixture = TestBed.createComponent(UsageComponent); fixture.componentRef.setInput('workspaceId','A'); fixture.detectChanges();
+  const fixture = TestBed.createComponent(UsageComponent); fixture.componentRef.setInput('workspaceId','A'); fixture.detectChanges(); (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>('nav button:nth-child(2)')!.click(); fixture.detectChanges();
   await vi.waitFor(() => expect(fixture.componentInstance.store.attempts()).toHaveLength(1)); fixture.detectChanges();
   const el = fixture.nativeElement as HTMLElement;
   expect(el.querySelector('table caption')?.textContent).toContain('個人用量');
@@ -28,7 +28,7 @@ it('uses fresh attempt metadata together with its new snapshot in detail', async
     if (query.includes('MyUsageAttempts')) return Response.json({data:{myUsageAttempts:{nodes:[a],pageInfo:{hasNextPage:false,endCursor:null}}}});
     return Response.json({data:{myUsageAttempt:{...a,executionOutcome:'COMPLETED',projectionVersion:'2',effectiveSnapshotId:'s2',snapshots:{nodes:[snapshot],pageInfo:{hasNextPage:false,endCursor:null}}}}});
   }));
-  const fixture = TestBed.createComponent(UsageComponent); fixture.componentRef.setInput('workspaceId','A'); fixture.detectChanges();
+  const fixture = TestBed.createComponent(UsageComponent); fixture.componentRef.setInput('workspaceId','A'); fixture.detectChanges(); (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>('nav button:nth-child(2)')!.click(); fixture.detectChanges();
   await vi.waitFor(() => expect(fixture.componentInstance.store.attempts()).toHaveLength(1)); fixture.detectChanges();
   (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>('tbody button')!.click();
   await vi.waitFor(() => expect(fixture.componentInstance.store.snapshots()).toHaveLength(1)); fixture.detectChanges();
@@ -44,7 +44,7 @@ it('shows ledger registration time separately from a not-yet-dispatched attempt'
     if (query.includes('MyUsageAttempts')) return Response.json({data:{myUsageAttempts:{nodes:[a],pageInfo:{hasNextPage:false,endCursor:null}}}});
     return Response.json({data:{myUsageAttempt:{...a,snapshots:{nodes:[],pageInfo:{hasNextPage:false,endCursor:null}}}}});
   }));
-  const fixture = TestBed.createComponent(UsageComponent); fixture.componentRef.setInput('workspaceId','A'); fixture.detectChanges();
+  const fixture = TestBed.createComponent(UsageComponent); fixture.componentRef.setInput('workspaceId','A'); fixture.detectChanges(); (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>('nav button:nth-child(2)')!.click(); fixture.detectChanges();
   await vi.waitFor(() => expect(fixture.componentInstance.store.attempts()).toHaveLength(1)); fixture.detectChanges();
   const el = fixture.nativeElement as HTMLElement;
   expect(el.textContent).toContain('登記時間'); expect(el.textContent).toContain(a.preparedAt);
@@ -63,7 +63,7 @@ it('shows JSON null separately from unavailable and downloads exact text after a
     if (query.includes('AuthorizeUsageDownload')) return Response.json({data:{myUsageAttempt:{id:'a'}}});
     return Response.json({data:{myUsageAttempt:{...attempt,snapshots:{nodes:[snapshot('1',raw,'TEXT_FALLBACK'),snapshot('2','null','JSONB'),snapshot('3',null,'UNAVAILABLE')],pageInfo:{hasNextPage:false,endCursor:null}}}}});
   }));
-  const fixture = TestBed.createComponent(UsageComponent); fixture.componentRef.setInput('workspaceId','A'); fixture.detectChanges();
+  const fixture = TestBed.createComponent(UsageComponent); fixture.componentRef.setInput('workspaceId','A'); fixture.detectChanges(); (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>('nav button:nth-child(2)')!.click(); fixture.detectChanges();
   await vi.waitFor(() => expect(fixture.componentInstance.store.attempts()).toHaveLength(1)); fixture.detectChanges();
   (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>('tbody button')!.click();
   await vi.waitFor(() => expect(fixture.componentInstance.store.snapshots()).toHaveLength(3)); fixture.detectChanges();
@@ -89,7 +89,7 @@ it('does not create a blob when download reauthorization is denied', async () =>
     return Response.json({data:{myUsageAttempt:{...a,snapshots:{nodes:[snapshot],pageInfo:{hasNextPage:false,endCursor:null}}}}});
   }));
   const create = vi.fn(() => 'blob:test'); vi.stubGlobal('URL',{createObjectURL:create,revokeObjectURL:vi.fn()});
-  const fixture = TestBed.createComponent(UsageComponent); fixture.componentRef.setInput('workspaceId','A'); fixture.detectChanges();
+  const fixture = TestBed.createComponent(UsageComponent); fixture.componentRef.setInput('workspaceId','A'); fixture.detectChanges(); (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>('nav button:nth-child(2)')!.click(); fixture.detectChanges();
   await vi.waitFor(() => expect(fixture.componentInstance.store.attempts()).toHaveLength(1)); fixture.detectChanges();
   (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>('tbody button')!.click();
   await vi.waitFor(() => expect(fixture.componentInstance.store.snapshots()).toHaveLength(1)); fixture.detectChanges();
@@ -102,7 +102,7 @@ it('bounds and names the vertically scrollable usage content for wheel and keybo
   const native = {value:null,presence:'UNKNOWN',meaning:'incomplete'};
   const row = {id:'a',workspaceId:'A',preparedAt:'2026-01-01',startedAt:null,provider:'p',model:'m',simulation:false,input:native,output:native,cacheRead:native,cacheWrite:native,cost:unpricedCost()};
   vi.stubGlobal('fetch',vi.fn(async () => Response.json({data:{myUsageAttempts:{nodes:[row],pageInfo:{hasNextPage:false,endCursor:null}}}})));
-  const fixture = TestBed.createComponent(UsageComponent); fixture.componentRef.setInput('workspaceId','A'); fixture.detectChanges();
+  const fixture = TestBed.createComponent(UsageComponent); fixture.componentRef.setInput('workspaceId','A'); fixture.detectChanges(); (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>('nav button:nth-child(2)')!.click(); fixture.detectChanges();
   await vi.waitFor(() => expect(fixture.componentInstance.store.attempts()).toHaveLength(1)); fixture.detectChanges();
   const host = fixture.nativeElement as HTMLElement;
   const style = getComputedStyle(host);
@@ -129,7 +129,7 @@ it('explains current cost without parsing decimals or showing stale amounts', as
     const selected = rows.find(row => row.id === request.variables['id'])!;
     return Response.json({data:{myUsageAttempt:{...selected,snapshots:{nodes:[],pageInfo:{hasNextPage:false,endCursor:null}}}}});
   }));
-  const fixture = TestBed.createComponent(UsageComponent); fixture.componentRef.setInput('workspaceId','A'); fixture.detectChanges();
+  const fixture = TestBed.createComponent(UsageComponent); fixture.componentRef.setInput('workspaceId','A'); fixture.detectChanges(); (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>('nav button:nth-child(2)')!.click(); fixture.detectChanges();
   await vi.waitFor(() => expect(fixture.componentInstance.store.attempts()).toHaveLength(5)); fixture.detectChanges();
   const el = fixture.nativeElement as HTMLElement;
   const table = el.querySelector('table')!;
