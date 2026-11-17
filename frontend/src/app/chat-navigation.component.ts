@@ -1,6 +1,6 @@
-import { Component, computed, DestroyRef, effect, ElementRef, inject, input, OnInit, output, signal, viewChild } from '@angular/core';
+import { Component, computed, DestroyRef, effect, ElementRef, inject, input, OnInit, output, signal, untracked, viewChild } from '@angular/core';
 import { A11yModule } from '@angular/cdk/a11y';
-import { ChatSidenavComponent, ChatSidenavScrimComponent, ChatHistorySearchPaletteComponent, ChatThreadListComponent, type ChatSidenavMode, type Thread, type ThreadActionAdapter } from '@threadplane/chat';
+import { ChatSidenavScrimComponent, ChatHistorySearchPaletteComponent, ChatThreadListComponent, type ChatSidenavMode, type Thread, type ThreadActionAdapter } from '@threadplane/chat';
 import { ChatSearchStore } from './chat-search.store';
 import { BotStore } from './bot/bot-store';
 import { BotView, getBotExecutionModeDisplay } from './bot/bot.model';
@@ -10,7 +10,7 @@ import { ConversationListStore, ConversationView } from './conversation-list-sto
 @Component({
   selector: 'app-chat-navigation',
   standalone: true,
-  imports: [A11yModule, ChatSidenavComponent, ChatSidenavScrimComponent, ChatHistorySearchPaletteComponent, ChatThreadListComponent],
+  imports: [A11yModule, ChatSidenavScrimComponent, ChatHistorySearchPaletteComponent, ChatThreadListComponent],
   providers: [BotStore, ChatSearchStore],
   templateUrl: './chat-navigation.component.html',
   styleUrl: './chat-navigation.component.css'
@@ -25,9 +25,9 @@ export class ChatNavigationComponent implements OnInit {
   setWorkspace(id: string | null): void { this.search.setWorkspace(id); this.conversationError.set(false); this.conversationLoading.set(false); }
   readonly activeConversationId = input<string | null>(null);
   readonly initializing = input(false);
+  readonly contextOpen = input(true);
   readonly conversationSelected = output<string>();
   readonly botSelected = output<BotView>();
-  readonly modeSelected = output<'conversations' | 'bots'>();
   readonly newChatRequested = output<void>();
   readonly usageRequested = output<void>();
   readonly layoutModeChanged = output<ChatSidenavMode>();
@@ -43,7 +43,7 @@ export class ChatNavigationComponent implements OnInit {
   private drawerTrigger: HTMLElement | null = null;
   private searchTrigger: HTMLElement | null = null;
   private readonly botStore = inject(BotStore);
-  readonly mode = signal<'conversations' | 'bots'>('conversations');
+  readonly mode = input<'conversations' | 'bots'>('conversations');
   readonly bots = signal<BotView[]>([]);
   readonly botsLoading = signal(false);
   readonly botsError = signal<string | null>(null);
@@ -61,6 +61,9 @@ export class ChatNavigationComponent implements OnInit {
       update(); media.addEventListener('change', update);
       this.destroyRef.onDestroy(() => media.removeEventListener('change', update));
     }
+    effect(() => {
+      if (this.mode() === 'bots') untracked(() => { if (!this.botsLoaded && !this.botsLoading()) this.refreshBots(); });
+    });
     effect(() => {
       if (this.search.error()) {
         // The palette and drawer must both be closed before an external retry can receive focus.
@@ -131,13 +134,6 @@ export class ChatNavigationComponent implements OnInit {
     if (this.conversations.isAnyPinPending() || this.conversations.pinRefreshError() || this.conversations.isRetryingRefetch()) return null;
     return { pin: id => this.setPinned(id, true), unpin: id => this.setPinned(id, false) };
   });
-
-  selectMode(mode: 'conversations' | 'bots'): void {
-    this.search.closeSearch();
-    this.mode.set(mode);
-    this.modeSelected.emit(mode);
-    if (mode === 'bots' && !this.botsLoaded && !this.botsLoading()) this.refreshBots();
-  }
 
   async loadConversations(): Promise<void> {
     if (this.conversationLoading()) return;

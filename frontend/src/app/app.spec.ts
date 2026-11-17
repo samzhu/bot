@@ -142,7 +142,7 @@ describe('App ThreadPlane public behavior', () => {
   });
   it('opens personal usage and returns to the same unsent chat draft', async () => {
     const {app,fixture,root} = await setup(); app.chatDraftChanged('unsent draft'); fixture.detectChanges();
-    const usage = Array.from(root.querySelectorAll('button')).find(button => button.textContent?.includes('個人用量'));
+    const usage = root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="個人用量"]');
     expect(usage).toBeTruthy(); usage!.click(); fixture.detectChanges();
     expect(root.querySelector('app-usage')).toBeTruthy();
     const back = Array.from(root.querySelectorAll('button')).find(button => button.textContent?.includes('返回對話'));
@@ -154,11 +154,339 @@ describe('App ThreadPlane public behavior', () => {
     vi.spyOn(app.chatTransport,'run').mockReturnValue(running.promise);
     app.openBotDraft(botA); app.chatDraftChanged('question'); app.submitChat('question');
     await vi.waitFor(() => expect(app.currentConversationId()).toBe('usage-run'));
-    fixture.detectChanges(); Array.from(root.querySelectorAll('button')).find(b => b.textContent?.includes('個人用量'))!.click(); fixture.detectChanges();
+    fixture.detectChanges(); root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="個人用量"]')!.click(); fixture.detectChanges();
     expect(app.chatSessions.session('conversation:usage-run').active()).toBe(true);
     running.resolve({status:'COMPLETED'}); await vi.waitFor(() => expect(app.chatSessions.session('conversation:usage-run').active()).toBe(false));
     fixture.detectChanges(); Array.from(root.querySelectorAll('button')).find(b => b.textContent?.includes('返回對話'))!.click(); fixture.detectChanges();
     expect(app.currentConversationId()).toBe('usage-run'); expect(app.chatSession().result()?.status).toBe('COMPLETED');
+  });
+  it('toggles the context without replacing the chat or making requests', async () => {
+    const {fixture, root} = await setup();
+    const textarea = input(root, '  raw\n draft '); fixture.detectChanges();
+    const surface = root.querySelector('app-chat-surface');
+    const before = requests.length;
+    const toggle = root.querySelector<HTMLButtonElement>('button[aria-controls="navigation-context"]');
+    expect(toggle).toBeTruthy();
+    expect(toggle!.getAttribute('aria-expanded')).toBe('true');
+    expect(root.querySelector('[aria-label="主要功能"]')).toBeTruthy();
+    toggle!.click(); fixture.detectChanges();
+    const context = root.querySelector<HTMLElement>('#navigation-context')!;
+    expect(toggle!.getAttribute('aria-expanded')).toBe('false');
+    expect(context.hidden || context.hasAttribute('inert')).toBe(true);
+    expect(root.querySelector('app-chat-surface')).toBe(surface);
+    expect(textarea.value).toBe('  raw\n draft ');
+    toggle!.click(); fixture.detectChanges();
+    expect(toggle!.getAttribute('aria-expanded')).toBe('true');
+    expect(context.hidden || context.hasAttribute('inert')).toBe(false);
+    expect(root.querySelector('app-chat-surface')).toBe(surface);
+    expect(requests).toHaveLength(before);
+  });
+  it('keeps the same chat and raw draft while visiting usage and returning', async () => {
+    const {fixture, root} = await setup();
+    const textarea = input(root, '  saved\n draft '); fixture.detectChanges();
+    const surface = root.querySelector('app-chat-surface');
+    root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="個人用量"]')!.click();
+    fixture.detectChanges();
+    expect(root.querySelector('app-usage')).toBeTruthy();
+    const back = Array.from(root.querySelectorAll('button')).find(button => button.textContent?.includes('返回對話'))!;
+    back.click(); fixture.detectChanges();
+    expect(root.querySelector('app-chat-surface')).toBe(surface);
+    expect(root.querySelector<HTMLTextAreaElement>('chat-input textarea')!.value).toBe('  saved\n draft ');
+  });
+  it('switches the active feature and context to chat when starting a Bot draft', async () => {
+    const {fixture, root} = await setup();
+    const bots = root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="Bot"]')!;
+    bots.click(); fixture.detectChanges();
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.querySelector('[data-testid="bot-item-a"]')).toBeTruthy(); });
+    root.querySelector<HTMLButtonElement>('[data-testid="bot-item-a"]')!.click(); fixture.detectChanges();
+    expect(root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!.getAttribute('aria-pressed')).toBe('true');
+    expect(root.querySelector('[aria-label="近期對話"]')).toBeTruthy();
+    expect(root.querySelector('[aria-label="Bot 清單"]')).toBeNull();
+    expect(root.querySelector('[data-testid="header-bot-name"]')?.textContent).toContain('Bot A');
+  });
+  it('reselecting the active conversation feature preserves the draft without requests', async () => {
+    const {fixture, root} = await setup();
+    const textarea = input(root, '  draft '); fixture.detectChanges();
+    const before = requests.length;
+    root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!.click();
+    fixture.detectChanges();
+    expect(textarea.value).toBe('  draft ');
+    expect(requests).toHaveLength(before);
+  });
+  it('returns focus to the header toggle when collapsing a focused context', async () => {
+    const {fixture, root} = await setup();
+    const toggle = root.querySelector<HTMLButtonElement>('button[aria-controls="navigation-context"]')!;
+    const select = root.querySelector<HTMLSelectElement>('#workspace-select')!;
+    document.body.appendChild(root); select.focus(); expect(document.activeElement).toBe(select);
+    toggle.click(); fixture.detectChanges();
+    expect(document.activeElement).toBe(toggle);
+  });
+  it('offers the context toggle from Bot management', async () => {
+    const {fixture, root} = await setup();
+    root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="Bot"]')!.click();
+    fixture.detectChanges();
+    const toggle = root.querySelector<HTMLButtonElement>('main button[aria-controls="navigation-context"]');
+    expect(toggle).toBeTruthy();
+    expect(toggle!.closest('[hidden]')).toBeNull();
+    toggle!.click(); fixture.detectChanges();
+    expect(toggle!.getAttribute('aria-expanded')).toBe('false');
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
+  });
+  it('keeps the existing narrow-screen navigation usable', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture, root} = await setup();
+    const open = root.querySelector<HTMLButtonElement>('button[aria-label="開啟導覽"]')!;
+    const context = root.querySelector<HTMLElement>('#navigation-context')!;
+    expect(context.hidden).toBe(true);
+    open.click(); fixture.detectChanges();
+    expect(context.hidden).toBe(false);
+  });
+  it('keeps a partial AG-UI run active across a usage visit', async () => {
+    const {fixture, root} = await setup();
+    const encoder = new TextEncoder(); let push!: (event: object) => void; let close!: () => void; let runId = ''; let calls = 0;
+    const stream = new ReadableStream<Uint8Array>({ start(controller) { push = event => controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)); close = () => controller.close(); } });
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (String(url).includes('/api/ag-ui')) { calls++; runId = body.runId; return new Response(stream, {headers:{'Content-Type':'text/event-stream'}}); }
+      if (body.query?.includes('CreateConversation')) return Response.json({data:{createConversation:conversation('stream')}});
+      if (body.query?.includes('myUsageAttempts')) return Response.json({data:{myUsageAttempts:{nodes:[],pageInfo:{hasNextPage:false,endCursor:null}}}});
+      return Response.json({data:{}});
+    }));
+    const textarea = input(root, '  question  '); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('chat-input button[aria-label="Send message"]')!.click();
+    await vi.waitFor(() => expect(calls).toBe(1));
+    push({type:'RUN_STARTED',threadId:'stream',runId});
+    push({type:'TEXT_MESSAGE_START',messageId:'answer',role:'assistant'});
+    push({type:'TEXT_MESSAGE_CONTENT',messageId:'answer',delta:'partial answer'});
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.textContent).toContain('partial answer'); });
+    const surface = root.querySelector('app-chat-surface');
+    root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="個人用量"]')!.click(); fixture.detectChanges();
+    push({type:'TEXT_MESSAGE_CONTENT',messageId:'answer',delta:' complete text'});
+    push({type:'TEXT_MESSAGE_END',messageId:'answer'});
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.textContent).toContain('partial answer complete text'); });
+    Array.from(root.querySelectorAll('button')).find(button => button.textContent?.includes('返回對話'))!.click(); fixture.detectChanges();
+    expect(root.querySelector('app-chat-surface')).toBe(surface);
+    expect(root.textContent).toContain('partial answer complete text');
+    expect(root.querySelector('chat-input button[aria-label="Stop generating"]')).toBeTruthy();
+    expect(calls).toBe(1);
+    expect(textarea.value).toBe('');
+    push({type:'RUN_FINISHED',threadId:'stream',runId}); close();
+  });
+  it('shows a partial run failure after returning from Bot management', async () => {
+    const {fixture, root} = await setup();
+    const encoder = new TextEncoder(); let push!: (event: object) => void; let close!: () => void; let runId = ''; let calls = 0;
+    const stream = new ReadableStream<Uint8Array>({ start(controller) { push = event => controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)); close = () => controller.close(); } });
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (String(url).includes('/api/ag-ui')) { calls++; runId = body.runId; return new Response(stream, {headers:{'Content-Type':'text/event-stream'}}); }
+      if (body.query?.includes('CreateConversation')) return Response.json({data:{createConversation:conversation('stream')}});
+      if (body.query?.includes('bots(')) return Response.json({data:{bots:[botA,botB],defaultLocalBot:local}});
+      return Response.json({data:{}});
+    }));
+    input(root, '  raw input  '); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('chat-input button[aria-label="Send message"]')!.click();
+    await vi.waitFor(() => expect(calls).toBe(1));
+    push({type:'RUN_STARTED',threadId:'stream',runId});
+    push({type:'TEXT_MESSAGE_START',messageId:'answer',role:'assistant'});
+    push({type:'TEXT_MESSAGE_CONTENT',messageId:'answer',delta:'partial failure'});
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.textContent).toContain('partial failure'); });
+    root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="Bot"]')!.click(); fixture.detectChanges();
+    push({type:'RUN_ERROR',message:'failed'}); close();
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.textContent).toContain('執行失敗'); });
+    root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!.click(); fixture.detectChanges();
+    expect(root.textContent).toContain('partial failure');
+    expect(root.querySelector<HTMLTextAreaElement>('chat-input textarea')!.value).toBe('  raw input  ');
+    expect(root.querySelector('chat-input button[aria-label="Stop generating"]')).toBeNull();
+    expect(calls).toBe(1);
+  });
+  it('keeps a newer draft when a partial run is cancelled', async () => {
+    const {fixture, root} = await setup();
+    const encoder = new TextEncoder(); let push!: (event: object) => void; let close!: () => void; let runId = ''; let calls = 0;
+    const stream = new ReadableStream<Uint8Array>({ start(controller) { push = event => controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)); close = () => controller.close(); } });
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (String(url).includes('/api/ag-ui')) { calls++; runId = body.runId; return new Response(stream, {headers:{'Content-Type':'text/event-stream'}}); }
+      if (body.query?.includes('CreateConversation')) return Response.json({data:{createConversation:conversation('stream')}});
+      if (body.query?.includes('bots(')) return Response.json({data:{bots:[botA,botB],defaultLocalBot:local}});
+      return Response.json({data:{}});
+    }));
+    input(root, '  raw input  '); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('chat-input button[aria-label="Send message"]')!.click();
+    await vi.waitFor(() => expect(calls).toBe(1));
+    push({type:'RUN_STARTED',threadId:'stream',runId});
+    push({type:'TEXT_MESSAGE_START',messageId:'answer',role:'assistant'});
+    push({type:'TEXT_MESSAGE_CONTENT',messageId:'answer',delta:'partial cancelled'});
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.textContent).toContain('partial cancelled'); });
+    root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="Bot"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!.click(); fixture.detectChanges();
+    input(root, ' newer draft '); fixture.detectChanges();
+    push({type:'TEXT_MESSAGE_END',messageId:'answer'});
+    push({type:'RUN_FINISHED',threadId:'stream',runId,outcome:{type:'cancelled'}}); close();
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.textContent).toContain('回覆已停止'); });
+    expect(root.textContent).toContain('partial cancelled');
+    expect(root.querySelector<HTMLTextAreaElement>('chat-input textarea')!.value).toBe(' newer draft ');
+    expect(root.querySelector('chat-input button[aria-label="Stop generating"]')).toBeNull();
+    expect(calls).toBe(1);
+  });
+  it('keeps a newer draft when a partial run fails', async () => {
+    const {fixture, root} = await setup();
+    const encoder = new TextEncoder(); let push!: (event: object) => void; let close!: () => void; let runId = ''; let calls = 0;
+    const stream = new ReadableStream<Uint8Array>({ start(controller) { push = event => controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)); close = () => controller.close(); } });
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (String(url).includes('/api/ag-ui')) { calls++; runId = body.runId; return new Response(stream, {headers:{'Content-Type':'text/event-stream'}}); }
+      if (body.query?.includes('CreateConversation')) return Response.json({data:{createConversation:conversation('stream')}});
+      if (body.query?.includes('bots(')) return Response.json({data:{bots:[botA,botB],defaultLocalBot:local}});
+      return Response.json({data:{}});
+    }));
+    input(root, '  raw input  '); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('chat-input button[aria-label="Send message"]')!.click();
+    await vi.waitFor(() => expect(calls).toBe(1));
+    push({type:'RUN_STARTED',threadId:'stream',runId});
+    push({type:'TEXT_MESSAGE_START',messageId:'answer',role:'assistant'});
+    push({type:'TEXT_MESSAGE_CONTENT',messageId:'answer',delta:'partial newer failure'});
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.textContent).toContain('partial newer failure'); });
+    root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="Bot"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!.click(); fixture.detectChanges();
+    input(root, ' newer draft '); fixture.detectChanges();
+    push({type:'RUN_ERROR',message:'failed'}); close();
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.textContent).toContain('執行失敗'); });
+    expect(root.textContent).toContain('partial newer failure');
+    expect(root.querySelector<HTMLTextAreaElement>('chat-input textarea')!.value).toBe(' newer draft ');
+    expect(root.querySelector('chat-input button[aria-label="Stop generating"]')).toBeNull();
+    expect(calls).toBe(1);
+  });
+  it('restores original raw draft when a partial run is cancelled without a new edit', async () => {
+    const {fixture, root} = await setup();
+    const encoder = new TextEncoder(); let push!: (event: object) => void; let close!: () => void; let runId = ''; let calls = 0;
+    const stream = new ReadableStream<Uint8Array>({ start(controller) { push = event => controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)); close = () => controller.close(); } });
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (String(url).includes('/api/ag-ui')) { calls++; runId = body.runId; return new Response(stream, {headers:{'Content-Type':'text/event-stream'}}); }
+      if (body.query?.includes('CreateConversation')) return Response.json({data:{createConversation:conversation('stream')}});
+      if (body.query?.includes('bots(')) return Response.json({data:{bots:[botA,botB],defaultLocalBot:local}});
+      return Response.json({data:{}});
+    }));
+    input(root, '  raw input  '); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('chat-input button[aria-label="Send message"]')!.click();
+    await vi.waitFor(() => expect(calls).toBe(1));
+    push({type:'RUN_STARTED',threadId:'stream',runId});
+    push({type:'TEXT_MESSAGE_START',messageId:'answer',role:'assistant'});
+    push({type:'TEXT_MESSAGE_CONTENT',messageId:'answer',delta:'partial cancelled'});
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.textContent).toContain('partial cancelled'); });
+    root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="Bot"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!.click(); fixture.detectChanges();
+    push({type:'TEXT_MESSAGE_END',messageId:'answer'});
+    push({type:'RUN_FINISHED',threadId:'stream',runId,outcome:{type:'cancelled'}}); close();
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.textContent).toContain('回覆已停止'); });
+    expect(root.textContent).toContain('partial cancelled');
+    expect(root.querySelector<HTMLTextAreaElement>('chat-input textarea')!.value).toBe('  raw input  ');
+    expect(root.querySelector('chat-input button[aria-label="Stop generating"]')).toBeNull();
+    expect(calls).toBe(1);
+  });
+  it('identifies each feature with an icon and an accessible label', async () => {
+    const {root} = await setup();
+    for (const label of ['對話', 'Bot', '個人用量']) {
+      const button = root.querySelector<HTMLButtonElement>(`nav[aria-label="主要功能"] button[aria-label="${label}"]`)!;
+      expect(button.querySelector('svg[aria-hidden="true"]')).toBeTruthy();
+      expect(button.querySelector('.rail-label')?.textContent).toContain(label);
+    }
+  });
+  it('keeps the workspace and full conversation title available in the chat header', async () => {
+    const {fixture, root} = await setup();
+    const header = root.querySelector('app-chat-surface header')!;
+    expect(header.textContent).toContain('Personal');
+    const title = header.querySelector<HTMLElement>('[data-testid="chat-header-title"]')!;
+    expect(title.getAttribute('title')).toBe('New Conversation');
+    expect(title.getAttribute('tabindex')).toBe('0');
+  });
+  it('names the context for the selected feature', async () => {
+    const {fixture, root} = await setup();
+    const context = root.querySelector('#navigation-context')!;
+    expect(context.querySelector('.navigation-title h2')?.textContent).toContain('對話');
+    root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="Bot"]')!.click(); fixture.detectChanges();
+    expect(context.querySelector('.navigation-title h2')?.textContent).toContain('Bot');
+  });
+  it('preserves the desktop sidebar shortcut without intercepting composer input', async () => {
+    const {fixture, root} = await setup();
+    const context = root.querySelector<HTMLElement>('#navigation-context')!;
+    const textarea = root.querySelector<HTMLTextAreaElement>('chat-input textarea')!;
+    const editing = new KeyboardEvent('keydown', {key:'b',ctrlKey:true,bubbles:true,cancelable:true});
+    textarea.dispatchEvent(editing); fixture.detectChanges();
+    expect(editing.defaultPrevented).toBe(false); expect(context.hidden).toBe(false);
+    const shortcut = new KeyboardEvent('keydown', {key:'b',ctrlKey:true,bubbles:true,cancelable:true});
+    window.dispatchEvent(shortcut); fixture.detectChanges();
+    expect(shortcut.defaultPrevented).toBe(true); expect(context.hidden).toBe(true);
+  });
+  it('opens search with the existing shortcut while leaving editable input alone', async () => {
+    const {fixture, root} = await setup();
+    const inputArea = root.querySelector<HTMLTextAreaElement>('chat-input textarea')!;
+    const editing = new KeyboardEvent('keydown', {key:'k',metaKey:true,bubbles:true,cancelable:true});
+    inputArea.dispatchEvent(editing); fixture.detectChanges();
+    expect(editing.defaultPrevented).toBe(false); expect(root.querySelector('[role="combobox"]')).toBeNull();
+    const editable = document.createElement('div'); editable.setAttribute('contenteditable', 'true');
+    Object.defineProperty(editable, 'isContentEditable', {value:true}); root.appendChild(editable);
+    const editShortcut = new KeyboardEvent('keydown', {key:'k',ctrlKey:true,bubbles:true,cancelable:true});
+    editable.dispatchEvent(editShortcut); fixture.detectChanges();
+    expect(editShortcut.defaultPrevented).toBe(false); expect(root.querySelector('[role="combobox"]')).toBeNull();
+    const shortcut = new KeyboardEvent('keydown', {key:'k',metaKey:true,bubbles:true,cancelable:true});
+    window.dispatchEvent(shortcut); fixture.detectChanges();
+    expect(shortcut.defaultPrevented).toBe(true); expect(root.querySelector('[role="combobox"]')).toBeTruthy();
+  });
+  it('does not intercept the sidebar shortcut in usage', async () => {
+    const {fixture, root} = await setup();
+    root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="個人用量"]')!.click(); fixture.detectChanges();
+    const shortcut = new KeyboardEvent('keydown', {key:'b',metaKey:true,bubbles:true,cancelable:true});
+    window.dispatchEvent(shortcut); fixture.detectChanges();
+    expect(shortcut.defaultPrevented).toBe(false);
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
+  });
+  it('does not intercept the sidebar shortcut in drawer mode', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture, root} = await setup();
+    const shortcut = new KeyboardEvent('keydown', {key:'b',ctrlKey:true,bubbles:true,cancelable:true});
+    window.dispatchEvent(shortcut); fixture.detectChanges();
+    expect(shortcut.defaultPrevented).toBe(false);
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
+  });
+  it('opens narrow navigation after a desktop collapse without changing desktop preference', async () => {
+    let change!: () => void; const media = {matches:false, addEventListener:(_:string, fn:()=>void)=>{change=fn;}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}};
+    vi.stubGlobal('matchMedia', () => media);
+    const {fixture, root} = await setup();
+    root.querySelector<HTMLButtonElement>('button[aria-controls="navigation-context"]')!.click(); fixture.detectChanges();
+    media.matches = true; change(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button[aria-label="開啟導覽"]')!.click(); fixture.detectChanges();
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
+    media.matches = false; change(); fixture.detectChanges();
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
+  });
+  it('does not expose a mobile context opener on usage', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture, root} = await setup();
+    root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="個人用量"]')!.click(); fixture.detectChanges();
+    expect(root.querySelector('button[aria-label="開啟導覽"]')).toBeNull();
+  });
+  it('does not intercept modified, already-handled, or composing shortcuts', async () => {
+    const {fixture, root} = await setup();
+    for (const options of [{shiftKey:true}, {altKey:true}, {isComposing:true}]) {
+      const event = new KeyboardEvent('keydown', {key:'b',ctrlKey:true,bubbles:true,cancelable:true,...options});
+      window.dispatchEvent(event); fixture.detectChanges();
+      expect(event.defaultPrevented).toBe(false);
+      expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
+    }
+    const handled = new KeyboardEvent('keydown', {key:'k',metaKey:true,bubbles:true,cancelable:true}); handled.preventDefault();
+    window.dispatchEvent(handled); fixture.detectChanges();
+    expect(root.querySelector('[role="combobox"]')).toBeNull();
+  });
+  it('makes the rail and main inert while the mobile navigation is modal', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture, root} = await setup();
+    const rail = root.querySelector<HTMLElement>('nav[aria-label="主要功能"]')!;
+    const main = root.querySelector<HTMLElement>('main')!;
+    root.querySelector<HTMLButtonElement>('button[aria-label="開啟導覽"]')!.click(); fixture.detectChanges();
+    expect(rail.hasAttribute('inert')).toBe(true); expect(main.hasAttribute('inert')).toBe(true);
+    root.querySelector<HTMLElement>('[role="dialog"][aria-label="側欄導覽"]')!.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape',bubbles:true})); fixture.detectChanges();
+    expect(rail.hasAttribute('inert')).toBe(false); expect(main.hasAttribute('inert')).toBe(false);
   });
   it('renders native window and composer with the general chat title', async () => {
     const {root} = await setup();

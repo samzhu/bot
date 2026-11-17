@@ -36,12 +36,13 @@ import { Agent, AgentError, ChatErrorComponent, ChatInputComponent, ChatMessageC
     </div>
     </chat-window>
   `,
-  styles: [':host{display:flex;flex-direction:column;min-height:0;flex:1}.transcript{flex:1;min-height:0;overflow:auto}']
+  styles: [':host{display:flex;flex-direction:column;min-height:0;flex:1}[chatHeader]{min-width:0;flex:1}.transcript{flex:1;min-height:0;overflow:auto}']
 })
 export class ChatSurfaceComponent {
   private readonly changeDetector = inject(ChangeDetectorRef);
   readonly agent = input.required<Agent>();
   readonly draft = input('');
+  readonly visible = input(true);
   readonly inputBlocked = input(false);
   readonly runUnknown = input(false);
   readonly runFailed = input(false);
@@ -92,13 +93,14 @@ export class ChatSurfaceComponent {
     });
     effect(() => {
       this.agent().messages();
+      const visible = this.visible();
       const area = this.transcript()?.nativeElement;
-      if (area && this.followLatest) requestAnimationFrame(() => { if (this.followLatest && area.isConnected) area.scrollTop = area.scrollHeight; });
+      if (visible && area && this.followLatest) requestAnimationFrame(() => { if (this.visible() && this.followLatest && area.isConnected) area.scrollTop = area.scrollHeight; });
     });
   }
   onScroll(): void {
     const area = this.transcript()?.nativeElement;
-    if (area) this.followLatest = area.scrollHeight - area.scrollTop - area.clientHeight < 48;
+    if (area && this.visible()) this.followLatest = area.scrollHeight - area.scrollTop - area.clientHeight < 48;
   }
   onInput(event: Event): void {
     if (event.target instanceof HTMLTextAreaElement) this.draftChanged.emit(event.target.value);

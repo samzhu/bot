@@ -1,15 +1,24 @@
 <div class="layout-container" data-threadplane-chat-theme="light" [attr.aria-busy]="isInitializing()">
-  <app-chat-navigation [workspaces]="workspaces.workspaces()" [workspaceId]="workspaces.selectedId()" [workspaceLoading]="workspaces.loading() || isInitializing()" [workspaceError]="workspaces.error()" (workspaceSelected)="selectWorkspace($event)" (workspaceRetry)="retryWorkspaces()" [activeConversationId]="currentConversationId()" [initializing]="isInitializing()"
+  <nav class="feature-rail" aria-label="主要功能" [attr.inert]="navigationLayout() === 'drawer' && navigation()?.navigationOpen() ? '' : null">
+    <button type="button" title="對話" aria-label="對話" [attr.aria-pressed]="currentView() === 'chat'" (click)="selectFeature('chat')"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h16v11H9l-5 4z"/></svg><span class="rail-label">對話</span></button>
+    <button type="button" title="Bot" aria-label="Bot" [attr.aria-pressed]="currentView() === 'bots'" (click)="selectFeature('bots')"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="7" width="16" height="12" rx="3"/><path d="M12 3v4M8 12h.01M16 12h.01M8 16h8"/></svg><span class="rail-label">Bot</span></button>
+    <button type="button" title="個人用量" aria-label="個人用量" [attr.aria-pressed]="currentView() === 'usage'" (click)="selectFeature('usage')"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20h16M6 17v-5h3v5M11 17V7h3v10M16 17V4h3v13"/></svg><span class="rail-label">個人用量</span></button>
+  </nav>
+  <app-chat-navigation [mode]="currentView() === 'bots' ? 'bots' : 'conversations'" [contextOpen]="currentView() !== 'usage' && (navigationLayout() === 'drawer' || contextOpen())" [workspaces]="workspaces.workspaces()" [workspaceId]="workspaces.selectedId()" [workspaceLoading]="workspaces.loading() || isInitializing()" [workspaceError]="workspaces.error()" (workspaceSelected)="selectWorkspace($event)" (workspaceRetry)="retryWorkspaces()" [activeConversationId]="currentConversationId()" [initializing]="isInitializing()"
     (conversationSelected)="selectConversation($event)" (botSelected)="openBotDraft($event)"
-    (modeSelected)="onNavigationMode($event)" (newChatRequested)="newConversation()"
+    (newChatRequested)="newConversation()"
     (usageRequested)="currentView.set('usage')" (layoutModeChanged)="navigationLayout.set($event)" />
-  <main class="main-area" [attr.data-navigation-mode]="navigationLayout()">
+  <main class="main-area" [attr.data-navigation-mode]="navigationLayout()" [attr.inert]="navigationLayout() === 'drawer' && navigation()?.navigationOpen() ? '' : null">
+    @if (currentView() !== 'usage') {
     <button class="mobile-navigation" type="button" aria-label="開啟導覽" (click)="navigation()?.openNavigation()">☰</button>
+    }
     @if (currentView() === 'bots') {
+      <header class="header"><button type="button" aria-label="切換側欄" aria-controls="navigation-context" [attr.aria-expanded]="contextOpen()" (click)="toggleContext($event)">☰</button><span class="workspace-name" tabindex="0" [title]="selectedWorkspaceName()">{{selectedWorkspaceName()}}</span><h1>Bot</h1></header>
       <app-bot-manager (startChat)="openBotDraft($event)" (saved)="navigation()?.refreshBots()" />
     } @else if (currentView() === 'usage') {
       <app-usage [workspaceId]="workspaces.selectedId()" [manager]="selectedWorkspaceManager()" (back)="currentView.set('chat')" />
-    } @else {
+    }
+    <div class="chat-view" [hidden]="currentView() !== 'chat'">
       @if (streamError()) { <p role="alert">{{streamError()}} @if (streamError() === '載入對話歷史失敗。') { <button type="button" (click)="retryHistory()">重試載入</button> } @if (streamError()?.includes('狀態尚未確認')) { <button type="button" (click)="checkChatStatus()">查詢執行狀態</button> }</p> }
       @if (specifiedBot(); as bot) {
         @if (getModeDisplay(bot).isSimulated) { <p class="simulation-banner" data-testid="simulation-banner" role="status">本機模擬模式：正式 Agent 尚未連線。</p> }
@@ -22,14 +31,14 @@
         </div>
       }
       @if (hasMoreMessages()) { <button type="button" (click)="loadEarlierMessages()" [disabled]="isLoadingEarlier()">載入較早訊息</button> }
-      <app-chat-surface [agent]="chatAgent()" [draft]="chatSession().draft()" [inputBlocked]="!chatCanSend()"
+      <app-chat-surface [visible]="currentView() === 'chat'" [agent]="chatAgent()" [draft]="chatSession().draft()" [inputBlocked]="!chatCanSend()"
         [runUnknown]="chatSession().result()?.status === 'UNKNOWN'" [runCancelled]="chatSession().result()?.status === 'CANCELLED'" [runFailed]="chatSession().result()?.status === 'FAILED' || chatSession().result()?.status === 'REJECTED'" [runDenialReason]="chatSession().result()?.reason" (draftChanged)="chatDraftChanged($event)"
         (submitRequested)="submitChat($event)" (stopRequested)="stopChat()" (checkStatusRequested)="checkChatStatus()">
-        <header chatHeader class="header"><h1 data-testid="chat-header-title">{{currentTitle()}}</h1>
+        <header chatHeader class="header"><button type="button" aria-label="切換側欄" aria-controls="navigation-context" [attr.aria-expanded]="contextOpen()" (click)="toggleContext($event)">☰</button><span class="workspace-name" tabindex="0" [title]="selectedWorkspaceName()">{{selectedWorkspaceName()}}</span><h1 data-testid="chat-header-title" tabindex="0" [title]="currentTitle()">{{currentTitle()}}</h1>
           @if (specifiedBot(); as bot) { <div data-testid="header-bot-meta"><span data-testid="header-bot-name">{{bot.name}}</span>
             @if (getModeDisplay(bot).isSimulated || !bot.canChat) { <span data-testid="header-execution-mode">{{getModeDisplay(bot).isSimulated ? '模擬' : '停用'}}</span> }</div> }
         </header>
       </app-chat-surface>
-    }
+    </div>
   </main>
 </div>

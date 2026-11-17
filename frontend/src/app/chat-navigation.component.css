@@ -28,3 +28,10 @@ p[role="status"] { padding: var(--tplane-chat-space-1, .25rem) 0; }
 .bot-list { display: flex; flex-direction: column; gap: var(--tplane-chat-space-2, .5rem); list-style: none; margin: 0 0 var(--tplane-chat-space-2, .5rem); padding: 0; }
 .bot-item { display: flex; flex-direction: column; align-items: flex-start; width: 100%; text-align: left; padding: var(--tplane-chat-space-2, .5rem) var(--tplane-chat-space-3, .75rem); }
 .bot-item small { margin-top: .25rem; color: var(--tplane-chat-text-muted); }
+
+.context-panel { width: 280px; height: 100dvh; display: flex; flex-direction: column; border-right: 1px solid var(--tplane-chat-separator); }
+.context-panel[hidden] { display: none; }
+.navigation { min-height: 0; max-height: none; flex: 1; }
+.navigation-title { padding: .75rem 1rem; }
+
+@media (max-width: 767px) { .drawer-focus { position: fixed; z-index: 1001; inset: 0 auto 0 60px; pointer-events: none; } .context-panel { pointer-events: auto; background: var(--tplane-chat-bg); } }

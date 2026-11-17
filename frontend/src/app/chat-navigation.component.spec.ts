@@ -33,22 +33,21 @@ describe('ChatNavigationComponent', () => {
     const conversationStore = TestBed.inject(ConversationListStore);
     conversationStore.activeConversation.set({ id: 'deep', botId: 'b', title: 'Deep', pinned: false, createdAt: '', updatedAt: '' });
     fixture.componentRef.setInput('activeConversationId', 'deep');
-    const modes: string[] = []; const selected: string[] = [];
-    component.modeSelected.subscribe(value => modes.push(value));
+    const selected: string[] = [];
     component.botSelected.subscribe(value => selected.push(value.id));
     fixture.detectChanges(); await settle(fixture);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(fixture.nativeElement.textContent).toContain('Deep');
-    (fixture.nativeElement.querySelector('[data-testid="nav-bots"]') as HTMLButtonElement).click();
+    fixture.componentRef.setInput('mode', 'bots'); fixture.detectChanges();
     fixture.detectChanges(); await settle(fixture);
-    expect(modes).toEqual(['bots']);
+    expect(fixture.nativeElement.querySelector('[aria-label="Bot 清單"]')).toBeTruthy();
     expect(parentStore.bots()).toEqual([]);
     expect(fixture.nativeElement.textContent).not.toContain('Bot default');
     expect(fixture.nativeElement.textContent).toContain('未連線 (停用)');
     (fixture.nativeElement.querySelector('[data-testid="bot-item-0"]') as HTMLButtonElement).click();
     fixture.detectChanges();
     expect(selected).toEqual(['0']);
-    expect(fixture.nativeElement.querySelector('[data-testid="nav-bots"]').getAttribute('aria-pressed')).toBe('true');
+    expect(fixture.nativeElement.querySelector('[aria-label="Bot 清單"]')).toBeTruthy();
     (fixture.nativeElement.querySelector('[data-testid="bots-more"]') as HTMLButtonElement).click();
     await settle(fixture);
     expect(fixture.nativeElement.textContent).toContain('Bot 24');
@@ -69,11 +68,11 @@ describe('ChatNavigationComponent', () => {
     const fixture = TestBed.createComponent(ChatNavigationComponent); const selected: string[] = [];
     fixture.componentInstance.conversationSelected.subscribe(value => selected.push(value));
     fixture.detectChanges(); await TestBed.inject(ConversationListStore).loadConversations(); await settle(fixture);
-    (fixture.nativeElement.querySelector('[data-testid="nav-bots"]') as HTMLButtonElement).click(); await settle(fixture);
+    fixture.componentRef.setInput('mode', 'bots'); fixture.detectChanges(); await settle(fixture);
     expect(fixture.nativeElement.querySelector('[role="alert"]')).toBeTruthy();
     (fixture.nativeElement.querySelector('[data-testid="bots-retry"]') as HTMLButtonElement).click(); await settle(fixture);
     expect(fixture.nativeElement.textContent).toContain('Bot one');
-    (fixture.nativeElement.querySelector('[data-testid="nav-conversations"]') as HTMLButtonElement).click(); fixture.detectChanges();
+    fixture.componentRef.setInput('mode', 'conversations'); fixture.detectChanges(); fixture.detectChanges();
     const button = Array.from(fixture.nativeElement.querySelectorAll('button') as NodeListOf<HTMLButtonElement>).find(b => b.textContent?.includes('Conversation'));
     expect(button).toBeTruthy(); button!.click();
     expect(selected).toEqual(['c1']);
@@ -117,7 +116,7 @@ describe('ChatNavigationComponent', () => {
     });
     const fixture = TestBed.createComponent(ChatNavigationComponent);
     fixture.detectChanges(); await settle(fixture);
-    (fixture.nativeElement.querySelector('[data-testid="nav-bots"]') as HTMLButtonElement).click();
+    fixture.componentRef.setInput('mode', 'bots'); fixture.detectChanges();
     await settle(fixture);
     fixture.componentInstance.refreshBots(); await settle(fixture);
     resolveOld(response([bot('old')])); await settle(fixture);
@@ -131,12 +130,12 @@ describe('ChatNavigationComponent', () => {
     const pinnedHeading = fixture.nativeElement.querySelector('[aria-label="釘選對話"] h2 button') as HTMLButtonElement;
     pinnedHeading.click(); fixture.detectChanges();
     expect(pinnedHeading.getAttribute('aria-expanded')).toBe('false');
-    (fixture.nativeElement.querySelector('[data-testid="nav-bots"]') as HTMLButtonElement).click(); await settle(fixture);
+    fixture.componentRef.setInput('mode', 'bots'); fixture.detectChanges(); await settle(fixture);
     (fixture.nativeElement.querySelector('[data-testid="bots-more"]') as HTMLButtonElement).click(); await settle(fixture);
     const botReads = fetchMock.mock.calls.length;
-    (fixture.nativeElement.querySelector('[data-testid="nav-conversations"]') as HTMLButtonElement).click(); fixture.detectChanges();
+    fixture.componentRef.setInput('mode', 'conversations'); fixture.detectChanges(); fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[aria-label="釘選對話"] h2 button').getAttribute('aria-expanded')).toBe('false');
-    (fixture.nativeElement.querySelector('[data-testid="nav-bots"]') as HTMLButtonElement).click(); fixture.detectChanges();
+    fixture.componentRef.setInput('mode', 'bots'); fixture.detectChanges(); fixture.detectChanges();
     expect(fixture.nativeElement.textContent).toContain('Bot 24');
     expect(fetchMock).toHaveBeenCalledTimes(botReads);
   });
@@ -279,22 +278,15 @@ describe('ChatNavigationComponent', () => {
     expect(fixture.nativeElement.querySelector('.search-alert button')).toBeTruthy();
   });
 
-  it('keeps app-owned workspace controls in the SDK primary slot with styling hooks and pressed-state tabs', async () => {
+  it('keeps the workspace selector and new chat and search actions in the context', async () => {
     const fixture = TestBed.createComponent(ChatNavigationComponent);
     fixture.componentRef.setInput('workspaces', [{ id: 'w1', name: 'Personal' }]);
     fixture.componentRef.setInput('workspaceId', 'w1');
     fixture.detectChanges(); await settle(fixture);
     const root = fixture.nativeElement as HTMLElement;
-    const panel = root.querySelector('[sidenavPrimary].primary-panel') as HTMLElement;
-    expect(panel).not.toBeNull();
-    expect(panel.querySelector('label[for="workspace-select"]')).not.toBeNull();
-    expect(panel.querySelector('select#workspace-select')).not.toBeNull();
-    expect(panel.querySelector('button.action')?.textContent).toContain('個人用量');
-    const conversations = root.querySelector('[data-testid="nav-conversations"]') as HTMLButtonElement;
-    const bots = root.querySelector('[data-testid="nav-bots"]') as HTMLButtonElement;
-    expect(conversations.getAttribute('aria-pressed')).toBe('true');
-    expect(bots.getAttribute('aria-pressed')).toBe('false');
-    // SDK components stay unwrapped: chat-sidenav is still rendered by the package, not replaced.
-    expect(root.querySelector('chat-sidenav')).not.toBeNull();
+    expect(root.querySelector('label[for="workspace-select"]')).not.toBeNull();
+    expect(root.querySelector('select#workspace-select')).not.toBeNull();
+    expect(root.querySelector('[aria-label="Search conversations"]')).not.toBeNull();
+    expect(root.textContent).toContain('新對話');
   });
 });

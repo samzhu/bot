@@ -53,15 +53,42 @@ export interface GraphQLMessageView {
     ChatSurfaceComponent,
     UsageComponent
   ],
+  host: { '(window:keydown)': 'onShortcut($event)' },
   templateUrl: './app.html',
   styleUrl: './app.css'
 })
 export class App implements OnInit {
   readonly workspaces = new WorkspaceStore();
+  readonly selectedWorkspaceName = computed(() => this.workspaces.workspaces().find(item => item.id === this.workspaces.selectedId())?.name ?? '');
   readonly selectedWorkspaceManager = computed(() => this.workspaces.workspaces().find(item => item.id === this.workspaces.selectedId())?.role === 'MANAGER');
   private readonly sourceWorkspaces = new WeakMap<ChatSession, string>();
   readonly navigation = viewChild(ChatNavigationComponent);
   readonly navigationLayout = signal<ChatSidenavMode>('expanded');
+  readonly contextOpen = signal(true);
+  toggleContext(event: Event): void {
+    if (this.contextOpen() && document.getElementById('navigation-context')?.contains(document.activeElement)) {
+      (event.currentTarget as HTMLElement).focus();
+    }
+    this.contextOpen.update(open => !open);
+  }
+  onShortcut(event: KeyboardEvent): void {
+    const target = event.target;
+    if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey || event.defaultPrevented || event.isComposing ||
+        (target instanceof HTMLElement && (target.matches('input, textarea') || target.isContentEditable))) return;
+    const key = event.key.toLowerCase();
+    if (key === 'k') { event.preventDefault(); this.navigation()?.openSearch(); }
+    else if (key === 'b' && this.navigationLayout() !== 'drawer' && this.currentView() !== 'usage') {
+      event.preventDefault();
+      if (this.contextOpen() && document.getElementById('navigation-context')?.contains(document.activeElement)) {
+        document.querySelector<HTMLButtonElement>('main button[aria-controls="navigation-context"]:not([hidden] *)')?.focus();
+      }
+      this.contextOpen.update(open => !open);
+    }
+  }
+  selectFeature(view: 'chat' | 'bots' | 'usage'): void {
+    if (view !== 'usage') this.contextOpen.set(true);
+    this.currentView.set(view);
+  }
   readonly chatTransport = new ChatAgUiTransport();
   private readonly sessionGeneration = signal(0);
   private readonly verifiedConversationId = signal<string | null>(null);
@@ -138,11 +165,6 @@ export class App implements OnInit {
   retryHistory(): void {
     const id = this.currentConversationId();
     if (id) void this.selectConversation(id);
-  }
-
-  onNavigationMode(mode: 'conversations' | 'bots'): void {
-    if (mode === 'bots') this.switchToBotManager();
-    else this.switchToChatView();
   }
 
   // Injected feature stores
