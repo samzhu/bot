@@ -17,7 +17,7 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
   .mobile-navigation { display: block; align-self: flex-start; }
 }
 
-.feature-rail { display: flex; flex: 0 0 60px; flex-direction: column; align-items: center; gap: .5rem; padding-block: .5rem; border-right: 1px solid var(--tplane-chat-separator); }
+.feature-rail { position: relative; z-index: 11; display: flex; flex: 0 0 60px; flex-direction: column; align-items: center; gap: .5rem; padding-block: .5rem; border-right: 1px solid var(--tplane-chat-separator); }
 .feature-rail button { min-width: 44px; min-height: 44px; cursor: pointer; }
 .feature-rail button[aria-pressed="true"] { font-weight: bold; border-inline-start: 4px solid currentColor; }
 
@@ -37,3 +37,6 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .header [data-testid="header-bot-name"] { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .header [data-testid="header-execution-mode"] { flex: none; }
 .header [data-testid="header-bot-name"]:focus-visible { position: fixed; z-index: 20; inset: 1rem 1rem auto; max-height: calc(100dvh - 2rem); overflow: auto; overflow-wrap: anywhere; white-space: normal; padding: .75rem; background: var(--tplane-chat-surface); color: var(--tplane-chat-text); border: 1px solid var(--tplane-chat-separator); }
+
+/* Keep the shared navigation out of the flex flow while peeking. */
+app-chat-navigation.peek { position: absolute; z-index: 10; left: 60px; top: 0; background: var(--tplane-chat-bg); box-shadow: var(--tplane-chat-shadow-md, 0 4px 16px #0003); }

@@ -26,6 +26,11 @@ export class ChatNavigationComponent implements OnInit {
   readonly activeConversationId = input<string | null>(null);
   readonly initializing = input(false);
   readonly contextOpen = input(true);
+  readonly peek = input(false);
+  readonly peekReturnTarget = input<HTMLElement | null>(null);
+  readonly peekSearchStarted = output<void>();
+  readonly peekClosed = output<void>();
+  readonly peekPinned = output<void>();
   readonly conversationSelected = output<string>();
   readonly botSelected = output<BotView>();
   readonly newChatRequested = output<void>();
@@ -90,7 +95,9 @@ export class ChatNavigationComponent implements OnInit {
     if (!open) { this.search.closeSearch(); setTimeout(() => this.drawerTrigger?.focus()); }
   }
   openSearch(): void {
-    this.searchTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    this.searchTrigger = this.peek() ? this.peekReturnTarget() : document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // The SDK palette uses a separate fixed layer; dismiss the peek before opening it.
+    if (this.peek()) this.peekSearchStarted.emit();
     this.search.openSearch();
   }
   changeSearchQuery(value: string): void {
@@ -100,11 +107,17 @@ export class ChatNavigationComponent implements OnInit {
     this.search.changeQuery(value);
   }
   closeSearch(): void {
+    const active = document.activeElement;
     this.search.closeSearch();
     setTimeout(() => {
-      const trigger = this.searchTrigger;
-      if (trigger?.isConnected && !trigger.closest('[inert]')) trigger.focus();
-      else this.drawerTrigger?.focus();
+      // The palette is removed during render; do not override a newer focus choice.
+      if (document.activeElement !== active && document.activeElement !== document.body) return;
+      const visible = (element: HTMLElement | null): element is HTMLElement => !!element?.isConnected &&
+        !element.closest('[hidden], [inert]') && getComputedStyle(element).display !== 'none' &&
+        (document.documentElement.getClientRects().length === 0 || Array.from(element.getClientRects()).some(rect => rect.width > 0 && rect.height > 0));
+      const rails = Array.from(document.querySelectorAll<HTMLElement>('nav[aria-label="主要功能"] button'));
+      const target = [this.searchTrigger, this.drawerTrigger, ...rails].find(visible);
+      target?.focus();
     });
   }
   onPaletteKeydown(event: KeyboardEvent): void {
@@ -124,6 +137,7 @@ export class ChatNavigationComponent implements OnInit {
   newChat(): void {
     this.search.closeSearch();
     this.newChatRequested.emit();
+    if (this.peek()) this.peekClosed.emit();
     if (this.layoutMode() === 'drawer') this.setNavigationOpen(false);
   }
 
@@ -148,8 +162,8 @@ export class ChatNavigationComponent implements OnInit {
     finally { this.conversationLoading.set(false); }
   }
 
-  selectConversation(id: string): void { this.search.closeSearch(); this.conversationSelected.emit(id); if (this.layoutMode() === 'drawer') this.setNavigationOpen(false); }
-  selectBot(bot: BotView): void { this.search.closeSearch(); this.botSelected.emit(bot); if (this.layoutMode() === 'drawer') this.setNavigationOpen(false); }
+  selectConversation(id: string): void { this.search.closeSearch(); this.conversationSelected.emit(id); if (this.peek()) this.peekClosed.emit(); if (this.layoutMode() === 'drawer') this.setNavigationOpen(false); }
+  selectBot(bot: BotView): void { this.search.closeSearch(); this.botSelected.emit(bot); if (this.peek()) this.peekClosed.emit(); if (this.layoutMode() === 'drawer') this.setNavigationOpen(false); }
   botStatus(bot: BotView): string { return getBotExecutionModeDisplay(bot).badgeText; }
 
   refreshBots(): void { void this.loadBotRange(Math.max(20, this.bots().length)); }

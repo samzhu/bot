@@ -1,8 +1,9 @@
 <chat-sidenav-scrim [open]="layoutMode() === 'drawer' && navigationOpen()" (dismiss)="setNavigationOpen(false)" />
-<div #drawer class="drawer-focus" tabindex="-1" (keydown.escape)="navigationOpen() && setNavigationOpen(false)" [attr.role]="layoutMode() === 'drawer' && navigationOpen() ? 'dialog' : null" [attr.aria-modal]="layoutMode() === 'drawer' && navigationOpen() ? 'true' : null" [attr.aria-label]="layoutMode() === 'drawer' ? '側欄導覽' : null" [attr.inert]="layoutMode() === 'drawer' && !navigationOpen() ? '' : null" [cdkTrapFocus]="layoutMode() === 'drawer' && navigationOpen() && !search.open()">
+<div #drawer class="drawer-focus" tabindex="-1" (keydown.escape)="peek() ? peekClosed.emit() : navigationOpen() && setNavigationOpen(false)" [attr.role]="layoutMode() === 'drawer' && navigationOpen() ? 'dialog' : null" [attr.aria-modal]="layoutMode() === 'drawer' && navigationOpen() ? 'true' : null" [attr.aria-label]="layoutMode() === 'drawer' ? '側欄導覽' : null" [attr.inert]="layoutMode() === 'drawer' && !navigationOpen() ? '' : null" [cdkTrapFocus]="layoutMode() === 'drawer' && navigationOpen() && !search.open()">
 <div id="navigation-context" class="context-panel" [hidden]="!contextOpen() || (layoutMode() === 'drawer' && !navigationOpen())" [attr.inert]="!contextOpen() || (layoutMode() === 'drawer' && !navigationOpen()) ? '' : null">
   <div class="navigation-title"><h2>{{mode() === 'bots' ? 'Bot' : '對話'}}</h2>
-    @if (layoutMode() === 'drawer') { <button type="button" aria-label="關閉導覽" (click)="setNavigationOpen(false)">✕</button> }
+    @if (peek()) { <button type="button" aria-label="固定展開導覽" (click)="peekPinned.emit()">固定</button> }
+    @if (layoutMode() === 'drawer' || peek()) { <button type="button" aria-label="關閉導覽" (click)="peek() ? peekClosed.emit() : setNavigationOpen(false)">✕</button> }
   </div>
   <div class="primary-panel">
   <label for="workspace-select">目前工作區</label>

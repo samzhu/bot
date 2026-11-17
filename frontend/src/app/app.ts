@@ -53,7 +53,7 @@ export interface GraphQLMessageView {
     ChatSurfaceComponent,
     UsageComponent
   ],
-  host: { '(window:keydown)': 'onShortcut($event)', '(focusin)': 'rememberShellFocus($event)' },
+  host: { '(window:keydown)': 'onShortcut($event)', '(document:click)': 'onDocumentClick($event)', '(focusin)': 'rememberShellFocus($event)' },
   templateUrl: './app.html',
   styleUrl: './app.css'
 })
@@ -65,6 +65,24 @@ export class App implements OnInit {
   readonly navigation = viewChild(ChatNavigationComponent);
   readonly navigationLayout = signal<ChatSidenavMode>('expanded');
   readonly contextOpen = signal(true);
+  readonly peekOpen = signal(false);
+  peekTrigger: HTMLElement | null = null;
+  pinPeek(): void {
+    const active = document.activeElement;
+    this.contextOpen.set(true);
+    this.peekOpen.set(false);
+    // Rendering removes the pin control; never override a newer deliberate focus change.
+    setTimeout(() => {
+      if (document.activeElement === active || document.activeElement === document.body) document.querySelector<HTMLElement>('#navigation-context button:not([disabled]), #navigation-context select:not([disabled])')?.focus();
+    });
+  }
+  closePeek(restoreFocus = false): void {
+    const active = document.activeElement;
+    this.peekOpen.set(false);
+    if (restoreFocus) setTimeout(() => {
+      if (document.activeElement === active || document.activeElement === document.body) this.peekTrigger?.focus();
+    });
+  }
   // Responsive CSS can blur a control to BODY before the media-change callback runs.
   // Keep the last shell focus only to recover a now-invalid control without stealing new focus.
   private lastShellFocus: HTMLElement | null = null;
@@ -77,6 +95,7 @@ export class App implements OnInit {
     const active = focused === document.body ? this.lastShellFocus : focused;
     const wasModalHost = active?.matches('[role="dialog"][aria-label="側欄導覽"]') ?? false;
     this.navigationLayout.set(mode);
+    if (previous !== mode) this.closePeek();
     if (previous === mode || !active || (!this.lastShellFocus && focused === document.body)) return;
     requestAnimationFrame(() => {
       if (this.navigationLayout() !== mode || (document.activeElement !== active && document.activeElement !== document.body)) return;
@@ -88,13 +107,21 @@ export class App implements OnInit {
       }
     });
   }
+  onDocumentClick(event: MouseEvent): void {
+    const target = event.target;
+    if (this.peekOpen() && target instanceof Element && !target.closest('app-chat-navigation, .feature-rail')) this.closePeek();
+  }
   toggleContext(event: Event): void {
+    if (this.peekOpen()) { this.pinPeek(); return; }
     if (this.contextOpen() && document.getElementById('navigation-context')?.contains(document.activeElement)) {
       (event.currentTarget as HTMLElement).focus();
     }
     this.contextOpen.update(open => !open);
   }
   onShortcut(event: KeyboardEvent): void {
+    if (event.key === 'Escape' && this.peekOpen() && !event.defaultPrevented) {
+      event.preventDefault(); this.closePeek(true); return;
+    }
     const target = event.target;
     if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey || event.defaultPrevented || event.isComposing ||
         (target instanceof HTMLElement && (target.matches('input, textarea') || target.isContentEditable))) return;
@@ -102,6 +129,7 @@ export class App implements OnInit {
     if (key === 'k') { event.preventDefault(); this.navigation()?.openSearch(); }
     else if (key === 'b' && this.navigationLayout() !== 'drawer' && this.currentView() !== 'usage') {
       event.preventDefault();
+      if (this.peekOpen()) { this.pinPeek(); return; }
       if (this.contextOpen() && document.getElementById('navigation-context')?.contains(document.activeElement)) {
         document.querySelector<HTMLButtonElement>('main button[aria-controls="navigation-context"]:not([hidden] *)')?.focus();
       }
@@ -109,9 +137,19 @@ export class App implements OnInit {
     }
   }
   selectFeature(view: 'chat' | 'bots' | 'usage', event: Event): void {
+    if (view === 'usage') this.closePeek();
     if (view !== 'usage') {
       if (this.navigationLayout() === 'drawer') this.navigation()?.openNavigation(event.currentTarget as HTMLElement);
-      else this.contextOpen.set(true);
+      else if (!this.contextOpen()) {
+        const close = this.peekOpen() && this.currentView() === view;
+        this.peekTrigger = event.currentTarget as HTMLElement;
+        if (close) this.closePeek(true); else {
+          this.peekOpen.set(true);
+          if (event instanceof MouseEvent && event.detail === 0) setTimeout(() => {
+            if (this.peekOpen() && document.activeElement === this.peekTrigger) document.querySelector<HTMLElement>('#navigation-context button:not([disabled]), #navigation-context select:not([disabled])')?.focus();
+          });
+        }
+      }
     }
     this.currentView.set(view);
   }
