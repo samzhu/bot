@@ -57,7 +57,11 @@ export class ChatNavigationComponent implements OnInit {
   constructor() {
     if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
       const media = window.matchMedia('(max-width: 767px)');
-      const update = () => { this.setLayoutMode(media.matches ? 'drawer' : 'expanded'); this.navigationOpen.set(false); };
+      const update = () => {
+        this.search.closeSearch();
+        this.setLayoutMode(media.matches ? 'drawer' : 'expanded');
+        this.navigationOpen.set(false);
+      };
       update(); media.addEventListener('change', update);
       this.destroyRef.onDestroy(() => media.removeEventListener('change', update));
     }
@@ -75,10 +79,10 @@ export class ChatNavigationComponent implements OnInit {
 
   ngOnInit(): void { this.layoutModeChanged.emit(this.layoutMode()); }
 
-  openNavigation(): void {
-    this.drawerTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  openNavigation(trigger?: HTMLElement): void {
+    this.drawerTrigger = trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     this.navigationOpen.set(true);
-    setTimeout(() => this.drawer()?.nativeElement.focus());
+    setTimeout(() => { if (this.navigationOpen() && this.layoutMode() === 'drawer') this.drawer()?.nativeElement.focus(); });
   }
   setLayoutMode(mode: ChatSidenavMode): void { this.layoutMode.set(mode); this.layoutModeChanged.emit(mode); }
   setNavigationOpen(open: boolean): void {

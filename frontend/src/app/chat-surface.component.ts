@@ -56,6 +56,11 @@ export class ChatSurfaceComponent {
   readonly composer = viewChild(ChatInputComponent);
   readonly transcript = viewChild<ElementRef<HTMLElement>>('transcript');
   private followLatest = true;
+  private readingAnchor: { node: Text; offset: number; top: number } | null = null;
+  private anchorAgent: Agent | null = null;
+  private transcriptWidth = 0;
+  private transcriptHeight = 0;
+  private restoringScroll = false;
   readonly content = messageContent;
   readonly markdown = markdownDocument;
   readonly blocked = computed(() => this.inputBlocked() || !!this.agent().isInputBlocked?.());
@@ -86,6 +91,39 @@ export class ChatSurfaceComponent {
     stop: async () => { this.stopRequested.emit(); }
   }));
   constructor() {
+    // Native scroll anchoring may choose a whole long message rather than the text being read.
+    // Keep a local text position across reflow; hidden or programmatic scrolls must not change intent.
+    effect(onCleanup => {
+      const area = this.transcript()?.nativeElement;
+      if (!area || typeof ResizeObserver === 'undefined') return;
+      const observer = new ResizeObserver(() => {
+        if (!this.visible() || !area.clientWidth || !area.clientHeight) return;
+        const width = area.clientWidth, height = area.clientHeight;
+        if (!this.transcriptWidth || !this.transcriptHeight) { this.transcriptWidth = width; this.transcriptHeight = height; return; }
+        if (width === this.transcriptWidth && height === this.transcriptHeight) return;
+        this.transcriptWidth = width; this.transcriptHeight = height;
+        this.restoringScroll = true;
+        if (this.followLatest) area.scrollTop = area.scrollHeight;
+        else if (this.readingAnchor?.node.isConnected && area.contains(this.readingAnchor.node)) {
+          const anchor = this.readingAnchor;
+          const range = document.createRange();
+          range.setStart(anchor.node, Math.min(anchor.offset, anchor.node.length));
+          range.collapse(true);
+          const top = range.getBoundingClientRect().top - area.getBoundingClientRect().top;
+          area.scrollTop += top - anchor.top;
+        }
+        requestAnimationFrame(() => { this.restoringScroll = false; });
+      });
+      observer.observe(area);
+      onCleanup(() => observer.disconnect());
+    });
+    effect(() => {
+      const agent = this.agent();
+      if (this.anchorAgent !== agent) {
+        this.anchorAgent = agent;
+        this.readingAnchor = null;
+      }
+    });
     effect(() => {
       const text = this.draft();
       const composer = this.composer();
@@ -100,7 +138,33 @@ export class ChatSurfaceComponent {
   }
   onScroll(): void {
     const area = this.transcript()?.nativeElement;
-    if (area && this.visible()) this.followLatest = area.scrollHeight - area.scrollTop - area.clientHeight < 48;
+    if (!area || !this.visible() || !area.clientHeight || this.restoringScroll ||
+        (this.transcriptWidth && (area.clientWidth !== this.transcriptWidth || area.clientHeight !== this.transcriptHeight))) return;
+    this.followLatest = area.scrollHeight - area.scrollTop - area.clientHeight < 48;
+    if (!this.followLatest) this.rememberReadingAnchor(area);
+  }
+  private rememberReadingAnchor(area: HTMLElement): void {
+    const box = area.getBoundingClientRect();
+    const target = box.top + box.height / 2;
+    const walker = document.createTreeWalker(area, NodeFilter.SHOW_TEXT);
+    const range = document.createRange();
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const text = node as Text;
+      if (!text.length || !text.data.trim()) continue;
+      range.selectNodeContents(text);
+      const bounds = range.getBoundingClientRect();
+      if (bounds.bottom < target || bounds.top > box.bottom) continue;
+      let low = 0, high = text.length - 1;
+      while (low < high) {
+        const mid = Math.floor((low + high) / 2);
+        range.setStart(text, mid); range.setEnd(text, mid + 1);
+        if (range.getBoundingClientRect().bottom < target) low = mid + 1; else high = mid;
+      }
+      range.setStart(text, low); range.collapse(true);
+      this.readingAnchor = { node: text, offset: low, top: range.getBoundingClientRect().top - box.top };
+      return;
+    }
+    this.readingAnchor = null;
   }
   onInput(event: Event): void {
     if (event.target instanceof HTMLTextAreaElement) this.draftChanged.emit(event.target.value);

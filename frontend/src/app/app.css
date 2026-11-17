@@ -32,3 +32,8 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .header h1, .workspace-name { min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .header h1:focus-visible, .workspace-name:focus-visible { position: fixed; z-index: 20; inset: 1rem 1rem auto; max-width: none; max-height: calc(100dvh - 2rem); overflow: auto; overflow-wrap: anywhere; white-space: normal; padding: .75rem; background: var(--tplane-chat-surface); color: var(--tplane-chat-text); border: 1px solid var(--tplane-chat-separator); }
+
+.header [data-testid="header-bot-meta"] { min-width: 0; max-width: 40%; white-space: nowrap; }
+.header [data-testid="header-bot-name"] { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.header [data-testid="header-execution-mode"] { flex: none; }
+.header [data-testid="header-bot-name"]:focus-visible { position: fixed; z-index: 20; inset: 1rem 1rem auto; max-height: calc(100dvh - 2rem); overflow: auto; overflow-wrap: anywhere; white-space: normal; padding: .75rem; background: var(--tplane-chat-surface); color: var(--tplane-chat-text); border: 1px solid var(--tplane-chat-separator); }

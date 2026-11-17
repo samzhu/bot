@@ -165,7 +165,7 @@ describe('App ThreadPlane public behavior', () => {
     const textarea = input(root, '  raw\n draft '); fixture.detectChanges();
     const surface = root.querySelector('app-chat-surface');
     const before = requests.length;
-    const toggle = root.querySelector<HTMLButtonElement>('button[aria-controls="navigation-context"]');
+    const toggle = root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]');
     expect(toggle).toBeTruthy();
     expect(toggle!.getAttribute('aria-expanded')).toBe('true');
     expect(root.querySelector('[aria-label="主要功能"]')).toBeTruthy();
@@ -215,7 +215,7 @@ describe('App ThreadPlane public behavior', () => {
   });
   it('returns focus to the header toggle when collapsing a focused context', async () => {
     const {fixture, root} = await setup();
-    const toggle = root.querySelector<HTMLButtonElement>('button[aria-controls="navigation-context"]')!;
+    const toggle = root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!;
     const select = root.querySelector<HTMLSelectElement>('#workspace-select')!;
     document.body.appendChild(root); select.focus(); expect(document.activeElement).toBe(select);
     toggle.click(); fixture.detectChanges();
@@ -225,7 +225,7 @@ describe('App ThreadPlane public behavior', () => {
     const {fixture, root} = await setup();
     root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="Bot"]')!.click();
     fixture.detectChanges();
-    const toggle = root.querySelector<HTMLButtonElement>('main button[aria-controls="navigation-context"]');
+    const toggle = root.querySelector<HTMLButtonElement>('main button[aria-label="切換側欄"]');
     expect(toggle).toBeTruthy();
     expect(toggle!.closest('[hidden]')).toBeNull();
     toggle!.click(); fixture.detectChanges();
@@ -240,6 +240,7 @@ describe('App ThreadPlane public behavior', () => {
     expect(context.hidden).toBe(true);
     open.click(); fixture.detectChanges();
     expect(context.hidden).toBe(false);
+    expect(open.getAttribute('aria-expanded')).toBe('true');
   });
   it('keeps a partial AG-UI run active across a usage visit', async () => {
     const {fixture, root} = await setup();
@@ -453,7 +454,7 @@ describe('App ThreadPlane public behavior', () => {
     let change!: () => void; const media = {matches:false, addEventListener:(_:string, fn:()=>void)=>{change=fn;}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}};
     vi.stubGlobal('matchMedia', () => media);
     const {fixture, root} = await setup();
-    root.querySelector<HTMLButtonElement>('button[aria-controls="navigation-context"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
     media.matches = true; change(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('button[aria-label="開啟導覽"]')!.click(); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
@@ -487,6 +488,245 @@ describe('App ThreadPlane public behavior', () => {
     expect(rail.hasAttribute('inert')).toBe(true); expect(main.hasAttribute('inert')).toBe(true);
     root.querySelector<HTMLElement>('[role="dialog"][aria-label="側欄導覽"]')!.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape',bubbles:true})); fixture.detectChanges();
     expect(rail.hasAttribute('inert')).toBe(false); expect(main.hasAttribute('inert')).toBe(false);
+  });
+  it('closes the mobile drawer with its visible close control and returns focus', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture, root} = await setup(); document.body.appendChild(root);
+    const open = root.querySelector<HTMLButtonElement>('button[aria-label="開啟導覽"]')!;
+    open.style.display = 'block'; // jsdom does not apply the stubbed media query.
+    open.focus(); expect(document.activeElement).toBe(open); open.click(); fixture.detectChanges();
+    const dialog = root.querySelector<HTMLElement>('[role="dialog"][aria-label="側欄導覽"]')!;
+    expect(dialog).toBeTruthy();
+    const before = requests.length;
+    const close = dialog.querySelector<HTMLButtonElement>('button[aria-label="關閉導覽"]');
+    expect(close).toBeTruthy();
+    expect(close!.hidden).toBe(false);
+    close!.click(); fixture.detectChanges();
+    await vi.waitFor(() => expect(document.activeElement).toBe(open));
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
+    expect(root.querySelector('main')!.hasAttribute('inert')).toBe(false);
+    expect(root.querySelector('nav[aria-label="主要功能"]')!.hasAttribute('inert')).toBe(false);
+    expect(requests).toHaveLength(before);
+    root.remove();
+  });
+  it('opens the mobile drawer from the conversation rail without changing desktop preference', async () => {
+    let change!: () => void; const media = {matches:false, addEventListener:(_:string, fn:()=>void)=>{change=fn;}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}};
+    vi.stubGlobal('matchMedia', () => media);
+    const {fixture, root} = await setup();
+    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    media.matches = true; change(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!.click(); fixture.detectChanges();
+    expect(root.querySelector('[role="dialog"][aria-label="側欄導覽"]')).toBeTruthy();
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
+    media.matches = false; change(); fixture.detectChanges();
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
+  });
+  it('opens the Bot drawer from the mobile rail and returns focus to that rail button', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture, root} = await setup(); document.body.appendChild(root);
+    const bot = root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="Bot"]')!;
+    bot.focus(); bot.click(); fixture.detectChanges();
+    const dialog = root.querySelector<HTMLElement>('[role="dialog"][aria-label="側欄導覽"]')!;
+    expect(dialog).toBeTruthy(); expect(dialog.querySelector('[aria-label="Bot 清單"]')).toBeTruthy();
+    dialog.querySelector<HTMLButtonElement>('button[aria-label="關閉導覽"]')!.click(); fixture.detectChanges();
+    await vi.waitFor(() => expect(document.activeElement).toBe(bot));
+    root.remove();
+  });
+  it('closes search before the mobile drawer when Escape is pressed twice', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture, root} = await setup(); document.body.appendChild(root);
+    root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!.click(); fixture.detectChanges();
+    const search = root.querySelector<HTMLButtonElement>('button[aria-label="Search conversations"]')!;
+    search.focus(); search.click(); fixture.detectChanges();
+    const palette = root.querySelector<HTMLElement>('chat-history-search-palette [role="dialog"]')!;
+    expect(palette).toBeTruthy();
+    palette.querySelector<HTMLInputElement>('input')!.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true})); fixture.detectChanges();
+    expect(root.querySelector('chat-history-search-palette [role="dialog"]')).toBeNull();
+    expect(root.querySelector('[role="dialog"][aria-label="側欄導覽"]')).toBeTruthy();
+    await vi.waitFor(() => expect(document.activeElement).toBe(search));
+    root.querySelector<HTMLElement>('[role="dialog"][aria-label="側欄導覽"]')!.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); fixture.detectChanges();
+    expect(root.querySelector('[role="dialog"][aria-label="側欄導覽"]')).toBeNull();
+    root.remove();
+  });
+  it('does not expose a desktop-only context toggle on narrow screens', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {root} = await setup();
+    expect(root.querySelector('button[aria-label="切換側欄"]')).toBeNull();
+    expect(root.querySelector('button[aria-label="開啟導覽"]')).toBeTruthy();
+  });
+  it('dismisses mobile navigation through its backdrop and restores the rail trigger', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture, root} = await setup(); document.body.appendChild(root);
+    const trigger = root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!;
+    trigger.focus(); trigger.click(); fixture.detectChanges();
+    const backdrop = root.querySelector<HTMLButtonElement>('chat-sidenav-scrim button')!;
+    expect(backdrop).toBeTruthy(); backdrop.click(); fixture.detectChanges();
+    await vi.waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
+    expect(root.querySelector('main')!.hasAttribute('inert')).toBe(false);
+    root.remove();
+  });
+  it('closes the mobile drawer after selecting a conversation', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture, root} = await setup(); document.body.appendChild(root);
+    vi.stubGlobal('fetch', vi.fn(async (_url:string, init?:RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.query?.includes('conversations(')) return Response.json({data:{conversations:body.variables.pinned ? [] : [conversation('selected')]}});
+      if (body.query?.includes('SessionHistory')) return Response.json({data:{conversation:conversation('selected')}});
+      return Response.json({data:{}});
+    }));
+    const trigger = root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!;
+    trigger.focus(); trigger.click(); fixture.detectChanges();
+    Array.from(root.querySelectorAll('button')).find(button => button.textContent?.includes('重新載入對話'))!.click();
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.textContent).toContain('selected'); });
+    Array.from(root.querySelectorAll<HTMLButtonElement>('chat-thread-list button')).find(button => button.textContent?.includes('selected'))!.click(); fixture.detectChanges();
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
+    await vi.waitFor(() => expect(document.activeElement).toBe(trigger));
+    root.remove();
+  });
+  it('clears the mobile search and modal when crossing to desktop', async () => {
+    let change!: () => void; const media = {matches:true, addEventListener:(_:string, fn:()=>void)=>{change=fn;}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}};
+    vi.stubGlobal('matchMedia', () => media);
+    const {fixture, root} = await setup();
+    root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button[aria-label="Search conversations"]')!.click(); fixture.detectChanges();
+    expect(root.querySelector('chat-history-search-palette [role="dialog"]')).toBeTruthy();
+    media.matches = false; change(); fixture.detectChanges();
+    expect(root.querySelector('chat-history-search-palette [role="dialog"]')).toBeNull();
+    expect(root.querySelector('[role="dialog"][aria-label="側欄導覽"]')).toBeNull();
+    expect(root.querySelector('main')!.hasAttribute('inert')).toBe(false);
+    expect(root.querySelector('nav[aria-label="主要功能"]')!.hasAttribute('inert')).toBe(false);
+  });
+  it('keeps a partial and full-but-unfinished run through drawer and resize', async () => {
+    let change!: () => void; const media = {matches:false, addEventListener:(_:string, fn:()=>void)=>{change=fn;}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}};
+    vi.stubGlobal('matchMedia', () => media);
+    const {fixture, root} = await setup();
+    const encoder = new TextEncoder(); let push!: (event:object)=>void; let finish!: ()=>void; let runId = ''; let calls = 0;
+    const stream = new ReadableStream<Uint8Array>({start(controller) { push = event => controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)); finish = () => controller.close(); }});
+    vi.stubGlobal('fetch', vi.fn(async (url:string, init?:RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (String(url).includes('/api/ag-ui')) { calls++; runId=body.runId; return new Response(stream,{headers:{'Content-Type':'text/event-stream'}}); }
+      if (body.query?.includes('CreateConversation')) return Response.json({data:{createConversation:conversation('stream')}});
+      return Response.json({data:{}});
+    }));
+    input(root,'  original raw  '); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('chat-input button[aria-label="Send message"]')!.click();
+    await vi.waitFor(()=>expect(calls).toBe(1));
+    push({type:'RUN_STARTED',threadId:'stream',runId}); push({type:'TEXT_MESSAGE_START',messageId:'answer',role:'assistant'}); push({type:'TEXT_MESSAGE_CONTENT',messageId:'answer',delta:'partial'});
+    await vi.waitFor(()=>{fixture.detectChanges(); expect(root.textContent).toContain('partial');});
+    const surface=root.querySelector('app-chat-surface'); const textarea=root.querySelector<HTMLTextAreaElement>('chat-input textarea')!;
+    media.matches=true; change(); fixture.detectChanges(); root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!.click(); fixture.detectChanges();
+    push({type:'TEXT_MESSAGE_CONTENT',messageId:'answer',delta:' full'}); push({type:'TEXT_MESSAGE_END',messageId:'answer'});
+    await vi.waitFor(()=>{fixture.detectChanges(); expect(root.textContent).toContain('partial full');});
+    root.querySelector<HTMLButtonElement>('button[aria-label="關閉導覽"]')!.click(); fixture.detectChanges(); media.matches=false; change(); fixture.detectChanges();
+    expect(root.querySelector('app-chat-surface')).toBe(surface); expect(root.querySelector('chat-input textarea')).toBe(textarea);
+    expect(root.querySelector('chat-input button[aria-label="Stop generating"]')).toBeTruthy(); expect(calls).toBe(1); expect(runId).toBeTruthy();
+    push({type:'RUN_FINISHED',threadId:'stream',runId}); finish();
+  });
+  it('returns focus to the mobile opener after a pointer activation that did not focus it', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture, root} = await setup(); document.body.appendChild(root);
+    const other=root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!;
+    const open=root.querySelector<HTMLButtonElement>('button[aria-label="開啟導覽"]')!; open.style.display='block';
+    other.focus(); expect(document.activeElement).toBe(other); open.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button[aria-label="關閉導覽"]')!.click(); fixture.detectChanges();
+    await vi.waitFor(()=>expect(document.activeElement).toBe(open)); root.remove();
+  });
+  it('exposes the mobile opener relationship and actual expanded state', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture, root} = await setup();
+    const open=root.querySelector<HTMLButtonElement>('button[aria-label="開啟導覽"]')!;
+    const controlled = open.getAttribute('aria-controls');
+    expect(controlled).toBeTruthy(); expect(root.querySelector(`#${controlled}`)).toBeTruthy();
+    expect(open.getAttribute('aria-expanded')).toBe('false');
+    open.click(); fixture.detectChanges(); expect(open.getAttribute('aria-expanded')).toBe('true');
+    root.querySelector<HTMLButtonElement>('button[aria-label="關閉導覽"]')!.click(); fixture.detectChanges();
+    expect(open.getAttribute('aria-expanded')).toBe('false');
+  });
+  it.each([['FAILED',true],['FAILED',false],['CANCELLED',true],['CANCELLED',false]] as const)('preserves the same-source draft after %s across drawer and resize (new edit: %s)', async (outcome, edited) => {
+    let change!: () => void; const media = {matches:false, addEventListener:(_:string, fn:()=>void)=>{change=fn;}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}};
+    vi.stubGlobal('matchMedia', () => media);
+    const {fixture, root} = await setup();
+    const encoder=new TextEncoder(); let push!:(event:object)=>void; let finish!:()=>void; let runId=''; let calls=0;
+    const stream=new ReadableStream<Uint8Array>({start(controller){push=event=>controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)); finish=()=>controller.close();}});
+    vi.stubGlobal('fetch',vi.fn(async (url:string, init?:RequestInit)=>{
+      const body=JSON.parse(String(init?.body || '{}'));
+      if (String(url).includes('/api/ag-ui')) {calls++;runId=body.runId;return new Response(stream,{headers:{'Content-Type':'text/event-stream'}});}
+      if (body.query?.includes('CreateConversation')) return Response.json({data:{createConversation:conversation('stream')}});
+      return Response.json({data:{}});
+    }));
+    input(root,'  raw sent  ');fixture.detectChanges();root.querySelector<HTMLButtonElement>('chat-input button[aria-label="Send message"]')!.click();
+    await vi.waitFor(()=>expect(calls).toBe(1));
+    push({type:'RUN_STARTED',threadId:'stream',runId});push({type:'TEXT_MESSAGE_START',messageId:'answer',role:'assistant'});push({type:'TEXT_MESSAGE_CONTENT',messageId:'answer',delta:'partial result'});
+    await vi.waitFor(()=>{fixture.detectChanges();expect(root.textContent).toContain('partial result');});
+    media.matches=true;change();fixture.detectChanges();root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!.click();fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button[aria-label="關閉導覽"]')!.click();fixture.detectChanges();
+    if (edited) { input(root,' newer draft '); fixture.detectChanges(); }
+    if (outcome==='FAILED') push({type:'RUN_ERROR',message:'failed'});
+    else {push({type:'TEXT_MESSAGE_END',messageId:'answer'});push({type:'RUN_FINISHED',threadId:'stream',runId,outcome:{type:'cancelled'}});}
+    finish();await vi.waitFor(()=>{fixture.detectChanges();expect(root.textContent).toContain(outcome==='FAILED' ? '執行失敗' : '回覆已停止');});
+    media.matches=false;change();fixture.detectChanges();
+    expect(root.querySelector<HTMLTextAreaElement>('chat-input textarea')!.value).toBe(edited ? ' newer draft ' : '  raw sent  ');
+    expect(root.textContent).toContain('partial result');expect(calls).toBe(1);expect(runId).toBeTruthy();
+  });
+  it('moves focus to an available rail control when mobile close disappears on desktop', async () => {
+    let change!:()=>void; const media={matches:false,addEventListener:(_:string,fn:()=>void)=>{change=fn;},removeEventListener:()=>{},addListener:()=>{},removeListener:()=>{}};
+    vi.stubGlobal('matchMedia',()=>media);
+    const {fixture,root}=await setup();document.body.appendChild(root);
+    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click();fixture.detectChanges();
+    media.matches=true;change();fixture.detectChanges();
+    const rail=root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!;
+    rail.click();fixture.detectChanges();
+    const close=root.querySelector<HTMLButtonElement>('button[aria-label="關閉導覽"]')!;close.focus();expect(document.activeElement).toBe(close);
+    media.matches=false;change();fixture.detectChanges();
+    await vi.waitFor(()=>expect(document.activeElement).toBe(rail));root.remove();
+  });
+  it('restores focus after breakpoint removes search or the desktop toggle', async () => {
+    let change!:()=>void;const media={matches:false,addEventListener:(_:string,fn:()=>void)=>{change=fn;},removeEventListener:()=>{},addListener:()=>{},removeListener:()=>{}};
+    vi.stubGlobal('matchMedia',()=>media);
+    const {fixture,root}=await setup();document.body.appendChild(root);
+    const rail=root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!;
+    const toggle=root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!;toggle.focus();expect(document.activeElement).toBe(toggle);
+    media.matches=true;change();fixture.detectChanges();await vi.waitFor(()=>expect(document.activeElement).toBe(rail));
+    rail.click();fixture.detectChanges();root.querySelector<HTMLButtonElement>('button[aria-label="Search conversations"]')!.click();fixture.detectChanges();
+    const input=root.querySelector<HTMLInputElement>('chat-history-search-palette input')!;input.focus();expect(document.activeElement).toBe(input);
+    media.matches=false;change();fixture.detectChanges();await vi.waitFor(()=>expect(document.activeElement).toBe(rail));
+    root.remove();
+  });
+  it('does not steal focus that remains valid during a breakpoint change', async () => {
+    let change!:()=>void;const media={matches:false,addEventListener:(_:string,fn:()=>void)=>{change=fn;},removeEventListener:()=>{},addListener:()=>{},removeListener:()=>{}};
+    vi.stubGlobal('matchMedia',()=>media);
+    const {fixture,root}=await setup();document.body.appendChild(root);
+    const textarea=root.querySelector<HTMLTextAreaElement>('chat-input textarea')!; vi.spyOn(textarea,'getClientRects').mockReturnValue([{width:100,height:30}] as unknown as DOMRectList); textarea.focus();expect(document.activeElement).toBe(textarea);
+    media.matches=true;change();fixture.detectChanges();await new Promise(resolve=>setTimeout(resolve,30));
+    expect(document.activeElement).toBe(textarea);root.remove();
+  });
+  it('moves focus from the mobile opener when it becomes unavailable on desktop', async () => {
+    let change!:()=>void;const media={matches:true,addEventListener:(_:string,fn:()=>void)=>{change=fn;},removeEventListener:()=>{},addListener:()=>{},removeListener:()=>{}};
+    vi.stubGlobal('matchMedia',()=>media);const {fixture,root}=await setup();document.body.appendChild(root);
+    const open=root.querySelector<HTMLButtonElement>('button[aria-label="開啟導覽"]')!;open.style.display='block';open.focus();expect(document.activeElement).toBe(open);
+    const rail=root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!;
+    open.style.removeProperty('display'); media.matches=false;change();fixture.detectChanges();await vi.waitFor(()=>expect(document.activeElement).toBe(rail));root.remove();
+  });
+  it('does not override a new focus chosen before breakpoint recovery runs', async () => {
+    let change!:()=>void;const media={matches:false,addEventListener:(_:string,fn:()=>void)=>{change=fn;},removeEventListener:()=>{},addListener:()=>{},removeListener:()=>{}};
+    vi.stubGlobal('matchMedia',()=>media);const {fixture,root}=await setup();document.body.appendChild(root);
+    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.focus();
+    media.matches=true;change();fixture.detectChanges();const textarea=root.querySelector<HTMLTextAreaElement>('chat-input textarea')!;textarea.focus();
+    await new Promise(resolve=>setTimeout(resolve,30));expect(document.activeElement).toBe(textarea);root.remove();
+  });
+  it('moves initial drawer host focus to a usable control when returning to desktop', async () => {
+    let change!:()=>void;const media={matches:true,addEventListener:(_:string,fn:()=>void)=>{change=fn;},removeEventListener:()=>{},addListener:()=>{},removeListener:()=>{}};
+    vi.stubGlobal('matchMedia',()=>media);const {fixture,root}=await setup();document.body.appendChild(root);
+    const rail=root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!;rail.click();fixture.detectChanges();
+    const dialog=root.querySelector<HTMLElement>('[role="dialog"][aria-label="側欄導覽"]')!;dialog.focus();expect(document.activeElement).toBe(dialog);
+    media.matches=false;change();fixture.detectChanges();await vi.waitFor(()=>expect(document.activeElement).toBe(rail));root.remove();
+  });
+  it('does not move initial body focus on a breakpoint change', async () => {
+    let change!:()=>void;const media={matches:false,addEventListener:(_:string,fn:()=>void)=>{change=fn;},removeEventListener:()=>{},addListener:()=>{},removeListener:()=>{}};
+    vi.stubGlobal('matchMedia',()=>media);const {fixture,root}=await setup();document.body.appendChild(root);
+    expect(document.activeElement).toBe(document.body);media.matches=true;change();fixture.detectChanges();
+    await new Promise(resolve=>setTimeout(resolve,30));expect(document.activeElement).toBe(document.body);root.remove();
   });
   it('renders native window and composer with the general chat title', async () => {
     const {root} = await setup();

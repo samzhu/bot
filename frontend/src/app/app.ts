@@ -53,7 +53,7 @@ export interface GraphQLMessageView {
     ChatSurfaceComponent,
     UsageComponent
   ],
-  host: { '(window:keydown)': 'onShortcut($event)' },
+  host: { '(window:keydown)': 'onShortcut($event)', '(focusin)': 'rememberShellFocus($event)' },
   templateUrl: './app.html',
   styleUrl: './app.css'
 })
@@ -65,6 +65,29 @@ export class App implements OnInit {
   readonly navigation = viewChild(ChatNavigationComponent);
   readonly navigationLayout = signal<ChatSidenavMode>('expanded');
   readonly contextOpen = signal(true);
+  // Responsive CSS can blur a control to BODY before the media-change callback runs.
+  // Keep the last shell focus only to recover a now-invalid control without stealing new focus.
+  private lastShellFocus: HTMLElement | null = null;
+  rememberShellFocus(event: FocusEvent): void {
+    if (event.target instanceof HTMLElement) this.lastShellFocus = event.target;
+  }
+  onLayoutModeChanged(mode: ChatSidenavMode): void {
+    const previous = this.navigationLayout();
+    const focused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const active = focused === document.body ? this.lastShellFocus : focused;
+    const wasModalHost = active?.matches('[role="dialog"][aria-label="側欄導覽"]') ?? false;
+    this.navigationLayout.set(mode);
+    if (previous === mode || !active || (!this.lastShellFocus && focused === document.body)) return;
+    requestAnimationFrame(() => {
+      if (this.navigationLayout() !== mode || (document.activeElement !== active && document.activeElement !== document.body)) return;
+      const rects = Array.from(active.getClientRects());
+      const invalid = !active.isConnected || !!active.closest('[hidden], [inert]') ||
+        getComputedStyle(active).display === 'none' || !rects.some(rect => rect.width > 0 && rect.height > 0);
+      if (invalid || wasModalHost) {
+        document.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-pressed="true"]:not([disabled])')?.focus();
+      }
+    });
+  }
   toggleContext(event: Event): void {
     if (this.contextOpen() && document.getElementById('navigation-context')?.contains(document.activeElement)) {
       (event.currentTarget as HTMLElement).focus();
@@ -85,8 +108,11 @@ export class App implements OnInit {
       this.contextOpen.update(open => !open);
     }
   }
-  selectFeature(view: 'chat' | 'bots' | 'usage'): void {
-    if (view !== 'usage') this.contextOpen.set(true);
+  selectFeature(view: 'chat' | 'bots' | 'usage', event: Event): void {
+    if (view !== 'usage') {
+      if (this.navigationLayout() === 'drawer') this.navigation()?.openNavigation(event.currentTarget as HTMLElement);
+      else this.contextOpen.set(true);
+    }
     this.currentView.set(view);
   }
   readonly chatTransport = new ChatAgUiTransport();
