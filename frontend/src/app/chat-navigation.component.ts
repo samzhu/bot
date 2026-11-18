@@ -23,6 +23,7 @@ export class ChatNavigationComponent implements OnInit {
   readonly workspaceError = input<string | null>(null);
   readonly workspaceSelected = output<string>();
   readonly workspaceRetry = output<void>();
+  readonly workspaceRecoveryRequested = output<void>();
   setWorkspace(id: string | null): void { this.search.setWorkspace(id); this.conversationError.set(false); this.conversationLoading.set(false); }
   readonly activeConversationId = input<string | null>(null);
   readonly initializing = input(false);
@@ -32,6 +33,7 @@ export class ChatNavigationComponent implements OnInit {
   readonly peekSearchStarted = output<void>();
   readonly peekClosed = output<void>();
   readonly peekPinned = output<void>();
+  readonly contextToggle = output<Event>();
   readonly conversationSelected = output<string>();
   readonly botSelected = output<BotView>();
   readonly newChatRequested = output<void>();
@@ -103,6 +105,16 @@ export class ChatNavigationComponent implements OnInit {
         }
         const workspace = scope.querySelector<HTMLElement>('[data-scope-workspace]')!;
         workspace.textContent = name; workspace.title = name;
+        let recovery = dialog.querySelector<HTMLButtonElement>('[data-workspace-recovery]');
+        if (!this.workspaceId()) {
+          if (!recovery) {
+            recovery = document.createElement('button');
+            recovery.type = 'button'; recovery.setAttribute('data-workspace-recovery', '');
+            recovery.setAttribute('aria-label', '前往工作區設定'); recovery.textContent = '前往工作區選取或重試';
+            recovery.addEventListener('click', () => { this.search.closeSearch(); this.workspaceRecoveryRequested.emit(); });
+            scope.append(recovery);
+          }
+        } else recovery?.remove();
         });
         onCleanup(() => clearTimeout(timer));
       }
@@ -129,7 +141,9 @@ export class ChatNavigationComponent implements OnInit {
     if (!open) { this.search.closeSearch(); setTimeout(() => this.drawerTrigger?.focus()); }
   }
   openSearch(trigger?: HTMLElement): void {
-    this.searchTrigger = this.peek() ? this.peekReturnTarget() : trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    this.searchTrigger = trigger ?? document.querySelector<HTMLElement>('nav[aria-label="主要功能"] button[aria-label="搜尋對話"]');
+    // Transfer the modal boundary before the palette opens, without restoring drawer focus.
+    if (this.layoutMode() === 'drawer') this.navigationOpen.set(false);
     // The SDK palette uses a separate fixed layer; dismiss the peek before opening it.
     if (this.peek()) this.peekSearchStarted.emit();
     this.search.openSearch();
@@ -186,6 +200,8 @@ export class ChatNavigationComponent implements OnInit {
     if (this.conversations.isAnyPinPending() || this.conversations.pinRefreshError() || this.conversations.isRetryingRefetch()) return null;
     return { pin: id => this.setPinned(id, true), unpin: id => this.setPinned(id, false) };
   });
+
+  showConversationLoadError(): void { this.conversationError.set(true); }
 
   async loadConversations(): Promise<void> {
     if (this.conversationLoading()) return;

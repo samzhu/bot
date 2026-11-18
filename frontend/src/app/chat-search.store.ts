@@ -30,7 +30,7 @@ export class ChatSearchStore {
     const query = value.trim() ? value : '';
     this.query.set(query); this.results.set([]); this.error.set(null); this.validationError.set(false);
     const trimmed = query.trim();
-    if (!trimmed) { this.loading.set(false); return; }
+    if (!trimmed || !this.workspaceId) { this.loading.set(false); return; }
     if (trimmed.length > 100) { this.loading.set(false); this.open.set(false); this.validationError.set(true); this.error.set('搜尋文字不可超過 100 字元。'); return; }
     this.loading.set(true);
     const generation = this.generation;
@@ -38,7 +38,7 @@ export class ChatSearchStore {
   }
   async retry(): Promise<void> {
     const trimmed = this.query().trim();
-    if (!trimmed || trimmed.length > 100 || this.loading()) return;
+    if (!trimmed || trimmed.length > 100 || this.loading() || !this.workspaceId) return;
     this.invalidate(); this.open.set(false); this.loading.set(true);
     await this.search(trimmed, this.generation, true);
   }

@@ -1,9 +1,8 @@
 <chat-sidenav-scrim [open]="layoutMode() === 'drawer' && navigationOpen()" (dismiss)="setNavigationOpen(false)" />
-<div #drawer class="drawer-focus" tabindex="-1" (keydown.escape)="peek() ? peekClosed.emit() : navigationOpen() && setNavigationOpen(false)" [attr.role]="layoutMode() === 'drawer' && navigationOpen() ? 'dialog' : null" [attr.aria-modal]="layoutMode() === 'drawer' && navigationOpen() ? 'true' : null" [attr.aria-label]="layoutMode() === 'drawer' ? '側欄導覽' : null" [attr.inert]="layoutMode() === 'drawer' && !navigationOpen() ? '' : null" [cdkTrapFocus]="layoutMode() === 'drawer' && navigationOpen() && !search.open()">
+<div #drawer class="drawer-focus" tabindex="-1" (keydown.escape)="peek() ? peekClosed.emit() : navigationOpen() && setNavigationOpen(false)" [attr.role]="layoutMode() === 'drawer' && navigationOpen() ? 'dialog' : null" [attr.aria-modal]="layoutMode() === 'drawer' && navigationOpen() ? 'true' : null" [attr.aria-label]="layoutMode() === 'drawer' ? '側欄導覽' : null" [attr.inert]="search.open() || (layoutMode() === 'drawer' && !navigationOpen()) ? '' : null" [cdkTrapFocus]="layoutMode() === 'drawer' && navigationOpen() && !search.open()">
 <div id="navigation-context" class="context-panel" [hidden]="!contextOpen() || (layoutMode() === 'drawer' && !navigationOpen())" [attr.inert]="!contextOpen() || (layoutMode() === 'drawer' && !navigationOpen()) ? '' : null">
   <div class="navigation-title"><h2>{{mode() === 'bots' ? 'Bot' : '對話'}}</h2>
-    <button type="button" aria-label="搜尋對話" title="搜尋對話" (click)="openSearch($any($event.currentTarget))"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><span class="icon-hint" aria-hidden="true">搜尋對話</span></button>
-    @if (peek()) { <button type="button" aria-label="固定展開導覽" (click)="peekPinned.emit()">固定</button> }
+    @if (layoutMode() !== 'drawer') { <button type="button" aria-label="切換側欄" title="切換側欄" aria-controls="navigation-context" [attr.aria-expanded]="contextOpen()" (click)="contextToggle.emit($event)">切換側欄</button> }
     @if (layoutMode() === 'drawer' || peek()) { <button type="button" aria-label="關閉導覽" (click)="peek() ? peekClosed.emit() : setNavigationOpen(false)">✕</button> }
   </div>
   <div class="primary-panel">
@@ -25,7 +24,6 @@
   </div>
   <div class="navigation">
   @if (mode() === 'conversations') {
-    <button class="compact-action" type="button" aria-label="重新載入對話" title="重新載入對話" [disabled]="initializing() || conversationLoading()" (click)="loadConversations()"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 11a8 8 0 1 0-2 6M20 4v7h-7"/></svg><span class="icon-hint" aria-hidden="true">重新載入對話</span></button>
     @if (conversationError()) {
       <p role="alert">對話列表載入失敗。 <button type="button" (click)="loadConversations()">重試載入</button></p>
     }

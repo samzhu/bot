@@ -114,7 +114,7 @@ export class App implements OnInit {
   toggleContext(event: Event): void {
     if (this.peekOpen()) { this.pinPeek(); return; }
     if (this.contextOpen() && document.getElementById('navigation-context')?.contains(document.activeElement)) {
-      (event.currentTarget as HTMLElement).focus();
+      document.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-pressed="true"]')?.focus();
     }
     this.contextOpen.update(open => !open);
   }
@@ -131,10 +131,15 @@ export class App implements OnInit {
       event.preventDefault();
       if (this.peekOpen()) { this.pinPeek(); return; }
       if (this.contextOpen() && document.getElementById('navigation-context')?.contains(document.activeElement)) {
-        document.querySelector<HTMLButtonElement>('main button[aria-controls="navigation-context"]:not([hidden] *)')?.focus();
+        document.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-pressed="true"]')?.focus();
       }
       this.contextOpen.update(open => !open);
     }
+  }
+  recoverWorkspace(): void {
+    this.currentView.set('chat');
+    if (this.navigationLayout() === 'drawer') this.navigation()?.openNavigation();
+    else { this.contextOpen.set(true); this.closePeek(); }
   }
   selectFeature(view: 'chat' | 'bots' | 'usage', event: Event): void {
     if (view === 'usage') this.closePeek();
@@ -371,7 +376,8 @@ export class App implements OnInit {
       await this.loadBots();
       const initialDraft = this.chatSession();
       const initialDraftVersion = initialDraft.draftVersion();
-      await this.loadConversations();
+      try { await this.loadConversations(); }
+      catch { if (this.workspaces.selectedId() === workspaceId) this.navigation()?.showConversationLoadError(); return; }
       if (this.selectionGeneration !== initialGeneration || this.workspaces.selectedId() !== workspaceId ||
           initialDraftVersion !== 0 || initialDraft.draftVersion() !== initialDraftVersion) return;
 
@@ -504,14 +510,17 @@ export class App implements OnInit {
     await this.newConversation();
     if (wasUsage) this.currentView.set('usage');
     try { await this.conversationStore.loadConversations(false); }
-    catch { if (this.workspaces.selectedId() === id) this.streamError.set('工作區對話載入失敗，請重試。'); }
+    catch { if (this.workspaces.selectedId() === id) this.navigation()?.showConversationLoadError(); }
   }
   async retryWorkspaces(): Promise<void> {
     await this.workspaces.load();
     const id = this.workspaces.selectedId();
     if (!id) return;
     this.conversationStore.setWorkspace(id); this.navigation()?.setWorkspace(id);
-    await this.loadBots(); await this.loadConversations(); await this.newConversation();
+    await this.loadBots();
+    try { await this.loadConversations(); }
+    catch { if (this.workspaces.selectedId() === id) this.navigation()?.showConversationLoadError(); return; }
+    await this.newConversation();
   }
 
   async selectConversation(id: string): Promise<void> {
