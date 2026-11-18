@@ -177,7 +177,7 @@ describe('ChatNavigationComponent', () => {
     const fixture = TestBed.createComponent(ChatNavigationComponent); const selected: string[] = [];
     fixture.componentInstance.conversationSelected.subscribe(id => selected.push(id));
     fixture.detectChanges();
-    (fixture.nativeElement.querySelector('[aria-label="Search conversations"]') as HTMLButtonElement).click(); fixture.detectChanges();
+    (fixture.nativeElement.querySelector('button[aria-label="搜尋對話"]') as HTMLButtonElement).click(); fixture.detectChanges();
     const input = fixture.nativeElement.querySelector('[role="combobox"]') as HTMLInputElement;
     expect(input.placeholder).toContain('最多20筆');
     input.value = '   '; input.dispatchEvent(new Event('input')); fixture.detectChanges();
@@ -220,7 +220,7 @@ describe('ChatNavigationComponent', () => {
       return { ok: true, json: async () => ({ data: { conversations: [] } }) };
     });
     const fixture = TestBed.createComponent(ChatNavigationComponent); fixture.detectChanges();
-    (fixture.nativeElement.querySelector('[aria-label="Search conversations"]') as HTMLButtonElement).click(); fixture.detectChanges();
+    (fixture.nativeElement.querySelector('button[aria-label="搜尋對話"]') as HTMLButtonElement).click(); fixture.detectChanges();
     const input = fixture.nativeElement.querySelector('[role="combobox"]') as HTMLInputElement;
     input.value = 'query'; input.dispatchEvent(new Event('input')); fixture.detectChanges();
     await new Promise(resolve => setTimeout(resolve, 300)); await settle(fixture);
@@ -236,7 +236,7 @@ describe('ChatNavigationComponent', () => {
     const trigger = document.createElement('button'); document.body.appendChild(trigger); trigger.focus();
     const fixture = TestBed.createComponent(ChatNavigationComponent); document.body.appendChild(fixture.nativeElement);
     fixture.detectChanges();
-    const button = fixture.nativeElement.querySelector('[aria-label="Search conversations"]') as HTMLButtonElement;
+    const button = fixture.nativeElement.querySelector('button[aria-label="搜尋對話"]') as HTMLButtonElement;
     button.focus(); button.click(); fixture.detectChanges(); await Promise.resolve();
     const dialog = fixture.nativeElement.querySelector('[role="dialog"]') as HTMLElement;
     const input = dialog.querySelector('input')!; const close = dialog.querySelector('[aria-label="Close"]') as HTMLButtonElement;
@@ -251,7 +251,7 @@ describe('ChatNavigationComponent', () => {
   });
   it('edits an overlong query outside the closed palette and only reopens after a successful retry', async () => {
     const fixture = TestBed.createComponent(ChatNavigationComponent); fixture.detectChanges();
-    (fixture.nativeElement.querySelector('[aria-label="Search conversations"]') as HTMLButtonElement).click(); fixture.detectChanges();
+    (fixture.nativeElement.querySelector('button[aria-label="搜尋對話"]') as HTMLButtonElement).click(); fixture.detectChanges();
     const input = fixture.nativeElement.querySelector('[role="combobox"]') as HTMLInputElement;
     input.value = 'x'.repeat(101); input.dispatchEvent(new Event('input')); fixture.detectChanges();
     const editor = fixture.nativeElement.querySelector('.search-alert input') as HTMLInputElement;
@@ -269,7 +269,7 @@ describe('ChatNavigationComponent', () => {
     fetchMock.mockRejectedValue(new Error('offline'));
     const fixture = TestBed.createComponent(ChatNavigationComponent); const component = fixture.componentInstance;
     fixture.detectChanges(); component.setLayoutMode('drawer'); component.openNavigation(); fixture.detectChanges();
-    (fixture.nativeElement.querySelector('[aria-label="Search conversations"]') as HTMLButtonElement).click(); fixture.detectChanges();
+    (fixture.nativeElement.querySelector('button[aria-label="搜尋對話"]') as HTMLButtonElement).click(); fixture.detectChanges();
     const input = fixture.nativeElement.querySelector('[role="combobox"]') as HTMLInputElement;
     input.value = 'query'; input.dispatchEvent(new Event('input')); fixture.detectChanges();
     await new Promise(resolve => setTimeout(resolve, 300)); await settle(fixture);
@@ -284,9 +284,9 @@ describe('ChatNavigationComponent', () => {
     fixture.componentRef.setInput('workspaceId', 'w1');
     fixture.detectChanges(); await settle(fixture);
     const root = fixture.nativeElement as HTMLElement;
-    expect(root.querySelector('label[for="workspace-select"]')).not.toBeNull();
-    expect(root.querySelector('select#workspace-select')).not.toBeNull();
-    expect(root.querySelector('[aria-label="Search conversations"]')).not.toBeNull();
-    expect(root.textContent).toContain('新對話');
+    expect(root.querySelector('.workspace-label')?.textContent).toContain('目前工作區：Personal');
+    expect(root.querySelector('select#workspace-select')).toBeNull();
+    expect(root.querySelector('button[aria-label="搜尋對話"]')).not.toBeNull();
+    expect(root.querySelector('button[aria-label="新對話"]')).not.toBeNull();
   });
 });

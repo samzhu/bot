@@ -18,6 +18,7 @@ import { ConversationListStore, ConversationView } from './conversation-list-sto
 export class ChatNavigationComponent implements OnInit {
   readonly workspaces = input<Workspace[]>([]);
   readonly workspaceId = input<string | null>(null);
+  readonly workspaceName = computed(() => this.workspaces().find(workspace => workspace.id === this.workspaceId())?.name ?? '');
   readonly workspaceLoading = input(false);
   readonly workspaceError = input<string | null>(null);
   readonly workspaceSelected = output<string>();
@@ -41,6 +42,7 @@ export class ChatNavigationComponent implements OnInit {
   readonly search = inject(ChatSearchStore);
   readonly layoutMode = signal<ChatSidenavMode>('expanded');
   readonly navigationOpen = signal(false);
+  private readonly host = inject(ElementRef<HTMLElement>);
   private readonly drawer = viewChild<ElementRef<HTMLElement>>('drawer');
   private readonly searchAlert = viewChild<ElementRef<HTMLElement>>('searchAlert');
   private readonly palette = viewChild(ChatHistorySearchPaletteComponent);
@@ -73,6 +75,38 @@ export class ChatNavigationComponent implements OnInit {
     effect(() => {
       if (this.mode() === 'bots') untracked(() => { if (!this.botsLoaded && !this.botsLoading()) this.refreshBots(); });
     });
+    effect(onCleanup => {
+      const open = this.search.open();
+      const name = this.workspaceName();
+      if (open) {
+        const timer = setTimeout(() => {
+        // The 0.3.7 palette has no scope slot or dialog-label input. Put an app-owned, bounded
+        // description in its public dialog role so it flows with the input at every viewport size.
+        if (!this.search.open() || this.workspaceName() !== name) return;
+        const dialog: HTMLElement | null = this.host.nativeElement.querySelector('chat-history-search-palette [role="dialog"]');
+        if (!dialog) return;
+        dialog.setAttribute('aria-label', `${name}：搜尋對話標題`);
+        let scope = dialog.querySelector<HTMLElement>('[data-search-scope]');
+        if (!scope) {
+          scope = document.createElement('p');
+          scope.setAttribute('data-search-scope', '');
+          scope.style.cssText = 'display:flex;align-items:center;gap:.25rem;flex:none;min-width:0;box-sizing:border-box;margin:0;padding:.5rem 1rem;color:var(--tplane-chat-text-muted);font-size:var(--tplane-chat-font-size-sm,.875rem)';
+          const workspace = document.createElement('span');
+          workspace.setAttribute('data-scope-workspace', ''); workspace.tabIndex = 0;
+          workspace.style.cssText = 'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+          // A focused long name can be scrolled horizontally without expanding over search results.
+          workspace.addEventListener('focus', () => { workspace.style.textOverflow = 'clip'; workspace.style.overflowX = 'auto'; });
+          workspace.addEventListener('blur', () => { workspace.style.overflowX = 'hidden'; workspace.style.textOverflow = 'ellipsis'; });
+          const description = document.createElement('span');
+          description.textContent = '：搜尋對話標題（最多20筆）'; description.style.cssText = 'flex:none;white-space:nowrap';
+          scope.append(workspace, description); dialog.prepend(scope);
+        }
+        const workspace = scope.querySelector<HTMLElement>('[data-scope-workspace]')!;
+        workspace.textContent = name; workspace.title = name;
+        });
+        onCleanup(() => clearTimeout(timer));
+      }
+    });
     effect(() => {
       if (this.search.error()) {
         // The palette and drawer must both be closed before an external retry can receive focus.
@@ -94,8 +128,8 @@ export class ChatNavigationComponent implements OnInit {
     this.navigationOpen.set(open);
     if (!open) { this.search.closeSearch(); setTimeout(() => this.drawerTrigger?.focus()); }
   }
-  openSearch(): void {
-    this.searchTrigger = this.peek() ? this.peekReturnTarget() : document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  openSearch(trigger?: HTMLElement): void {
+    this.searchTrigger = this.peek() ? this.peekReturnTarget() : trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     // The SDK palette uses a separate fixed layer; dismiss the peek before opening it.
     if (this.peek()) this.peekSearchStarted.emit();
     this.search.openSearch();

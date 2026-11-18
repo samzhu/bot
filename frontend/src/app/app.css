@@ -40,3 +40,11 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* Keep the shared navigation out of the flex flow while peeking. */
 app-chat-navigation.peek { position: absolute; z-index: 10; left: 60px; top: 0; background: var(--tplane-chat-bg); box-shadow: var(--tplane-chat-shadow-md, 0 4px 16px #0003); }
+
+/* Explicit pixel minima remain usable when the root font size changes. */
+.header button[aria-label="切換側欄"], .header button[aria-label="搜尋對話"], .main-area button.mobile-navigation { min-width: 44px; min-height: 44px; padding: 0; flex: none; }
+.header button svg { width: 24px; height: 24px; vertical-align: middle; }
+
+.header button { position: relative; }
+.header .icon-hint { display: none; position: absolute; z-index: 30; top: calc(100% + .25rem); left: 0; white-space: nowrap; padding: .35rem .5rem; border-radius: .25rem; background: var(--tplane-chat-text); color: var(--tplane-chat-bg); pointer-events: none; }
+.header button:hover .icon-hint, .header button:focus-visible .icon-hint { display: block; }

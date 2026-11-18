@@ -216,8 +216,8 @@ describe('App ThreadPlane public behavior', () => {
   it('returns focus to the header toggle when collapsing a focused context', async () => {
     const {fixture, root} = await setup();
     const toggle = root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!;
-    const select = root.querySelector<HTMLSelectElement>('#workspace-select')!;
-    document.body.appendChild(root); select.focus(); expect(document.activeElement).toBe(select);
+    const action = root.querySelector<HTMLButtonElement>('#navigation-context button[aria-label="搜尋對話"]')!;
+    document.body.appendChild(root); action.focus(); expect(document.activeElement).toBe(action);
     toggle.click(); fixture.detectChanges();
     expect(document.activeElement).toBe(toggle);
   });
@@ -509,6 +509,102 @@ describe('App ThreadPlane public behavior', () => {
     expect(requests).toHaveLength(before);
     root.remove();
   });
+  it('opens workspace title search from the collapsed main header without changing the draft', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture, root} = await setup(); document.body.appendChild(root);
+    const raw = '  draft\nnext line  '; input(root, raw); fixture.detectChanges();
+    const surface = root.querySelector('app-chat-surface');
+    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    const trigger = root.querySelector<HTMLButtonElement>('main button[aria-label="搜尋對話"]');
+    expect(trigger).not.toBeNull();
+    const before = requests.length;
+    trigger!.click(); fixture.detectChanges();
+    const palette = root.querySelector<HTMLElement>('chat-history-search-palette [role="dialog"]')!;
+    expect(palette).toBeTruthy();
+    await vi.waitFor(() => expect(palette.getAttribute('aria-label')).toContain('Personal'));
+    const hint = palette.querySelector<HTMLElement>('[data-search-scope]')!;
+    expect(hint).not.toBeNull();
+    expect(hint.textContent).toContain('Personal');
+    expect(hint.textContent).toContain('搜尋對話標題');
+    const searchInput = root.querySelector<HTMLInputElement>('chat-history-search-palette [role="dialog"] input')!;
+    expect(searchInput.placeholder).toContain('Personal');
+    searchInput.value = 'example'; searchInput.dispatchEvent(new Event('input', {bubbles:true}));
+    await vi.waitFor(() => expect(requests.some(request => request.variables?.search === 'example' && request.variables?.workspaceId === 'personal' && request.variables?.limit === 20)).toBe(true));
+    expect(root.querySelector('app-chat-surface')).toBe(surface);
+    expect(root.querySelector<HTMLTextAreaElement>('chat-input textarea')!.value).toBe(raw);
+    expect(requests).toHaveLength(before + 1); root.remove();
+  });
+  it('accepts a 100-character workspace title query from the search control', async () => {
+    const {fixture, root} = await setup();
+    root.querySelector<HTMLButtonElement>('#navigation-context button[aria-label="搜尋對話"]')!.click(); fixture.detectChanges();
+    const field = root.querySelector<HTMLInputElement>('chat-history-search-palette [role="dialog"] input')!;
+    const query = 'a'.repeat(100); field.value = query; field.dispatchEvent(new Event('input',{bubbles:true})); fixture.detectChanges();
+    await vi.waitFor(() => expect(requests.some(request => request.variables?.search === query && request.variables?.workspaceId === 'personal')).toBe(true));
+    expect(root.querySelector('chat-history-search-palette [role="dialog"]')).not.toBeNull();
+  });
+  it('keeps one current scope when search is closed and reopened quickly', async () => {
+    const {fixture, root} = await setup(); document.body.appendChild(root);
+    const trigger = root.querySelector<HTMLButtonElement>('#navigation-context button[aria-label="搜尋對話"]')!;
+    trigger.click(); fixture.detectChanges();
+    const field = root.querySelector<HTMLInputElement>('chat-history-search-palette [role="dialog"] input')!;
+    field.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true})); fixture.detectChanges();
+    trigger.click(); fixture.detectChanges();
+    await vi.waitFor(() => expect(root.querySelectorAll('[role="dialog"] [data-search-scope]').length).toBe(1));
+    expect(root.querySelector('[role="dialog"] [data-search-scope]')?.textContent).toContain('Personal');
+    fixture.destroy(); await new Promise(resolve => setTimeout(resolve, 20)); root.remove();
+  });
+  it('can destroy the app immediately after opening search', async () => {
+    const {fixture, root} = await setup(); document.body.appendChild(root);
+    root.querySelector<HTMLButtonElement>('#navigation-context button[aria-label="搜尋對話"]')!.click(); fixture.detectChanges();
+    fixture.destroy(); root.remove(); await new Promise(resolve => setTimeout(resolve, 20));
+  });
+  it('returns focus to the collapsed main search control after pointer activation', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture, root} = await setup(); document.body.appendChild(root);
+    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    const trigger = root.querySelector<HTMLButtonElement>('main button[aria-label="搜尋對話"]')!;
+    root.querySelector<HTMLTextAreaElement>('chat-input textarea')!.focus();
+    trigger.click(); fixture.detectChanges();
+    const field = root.querySelector<HTMLInputElement>('chat-history-search-palette [role="dialog"] input')!;
+    field.focus(); field.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true})); fixture.detectChanges();
+    await vi.waitFor(() => expect(document.activeElement).toBe(trigger)); root.remove();
+  });
+  it('offers one named search control in the visible sidebar and returns focus after pointer activation', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture, root} = await setup(); document.body.appendChild(root);
+    const search = root.querySelector<HTMLButtonElement>('#navigation-context button[aria-label="搜尋對話"]');
+    expect(search).not.toBeNull();
+    expect(root.querySelector('main button[aria-label="搜尋對話"]')).toBeNull();
+    root.querySelector<HTMLTextAreaElement>('chat-input textarea')!.focus();
+    search!.click(); fixture.detectChanges();
+    const field = root.querySelector<HTMLInputElement>('chat-history-search-palette [role="dialog"] input')!;
+    field.focus(); field.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true})); fixture.detectChanges();
+    await vi.waitFor(() => expect(document.activeElement).toBe(search)); root.remove();
+  });
+  it('shows the only workspace by name in the sidebar without a redundant selector', async () => {
+    const {root} = await setup();
+    const sidebar = root.querySelector<HTMLElement>('#navigation-context')!;
+    expect(sidebar.textContent).toContain('Personal');
+    expect(sidebar.querySelector('select#workspace-select')).toBeNull();
+  });
+  it('keeps a workspace selector when more than one workspace is available', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.query?.includes('Workspaces')) return Response.json({data:{workspaces:[{id:'personal',name:'Personal',role:'MANAGER',personal:true},{id:'other',name:'Other',role:'MEMBER',personal:false}]}});
+      if (body.query?.includes('defaultLocalBot')) return Response.json({data:{defaultLocalBot:local,bots:[]}});
+      if (body.query?.includes('conversations(')) return Response.json({data:{conversations:[]}});
+      return Response.json({data:{}});
+    }));
+    const {root} = await setup();
+    const select = root.querySelector<HTMLSelectElement>('#workspace-select');
+    expect(select).not.toBeNull();
+    expect(Array.from(select!.options).map(option => option.textContent)).toEqual(['Personal', 'Other']);
+  });
+  it('keeps named new conversation and reload controls available in the compact sidebar', async () => {
+    const {root} = await setup();
+    expect(root.querySelector('#navigation-context button[aria-label="新對話"]')).not.toBeNull();
+    expect(root.querySelector('#navigation-context button[aria-label="重新載入對話"]')).not.toBeNull();
+  });
   it('peeks from the collapsed desktop rail without changing the draft or docking preference', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup();
@@ -576,7 +672,7 @@ describe('App ThreadPlane public behavior', () => {
     root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
     const rail = root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!;
     rail.focus(); rail.click(); fixture.detectChanges();
-    root.querySelector<HTMLButtonElement>('button[aria-label="Search conversations"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button[aria-label="搜尋對話"]')!.click(); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
     const dialog = root.querySelector<HTMLElement>('chat-history-search-palette [role="dialog"]')!;
     expect(dialog).toBeTruthy();
@@ -588,7 +684,7 @@ describe('App ThreadPlane public behavior', () => {
     const {fixture, root} = await setup();
     root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!.click(); fixture.detectChanges();
-    const button = Array.from(root.querySelectorAll<HTMLButtonElement>('#navigation-context button')).find(b => b.textContent?.includes('新對話'))!;
+    const button = root.querySelector<HTMLButtonElement>('#navigation-context button[aria-label="新對話"]')!;
     button.click(); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
   });
@@ -685,7 +781,7 @@ describe('App ThreadPlane public behavior', () => {
     root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
     const rail = root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!;
     rail.focus(); rail.click(); fixture.detectChanges();
-    root.querySelector<HTMLButtonElement>('button[aria-label="Search conversations"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button[aria-label="搜尋對話"]')!.click(); fixture.detectChanges();
     const field = root.querySelector<HTMLInputElement>('chat-history-search-palette [role="dialog"] input')!;
     field.focus(); field.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true})); fixture.detectChanges();
     const textarea = root.querySelector<HTMLTextAreaElement>('chat-input textarea')!; textarea.focus();
@@ -697,7 +793,7 @@ describe('App ThreadPlane public behavior', () => {
     root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
     const rail = root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!;
     rail.focus(); rail.click(); fixture.detectChanges();
-    root.querySelector<HTMLButtonElement>('button[aria-label="Search conversations"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button[aria-label="搜尋對話"]')!.click(); fixture.detectChanges();
     rail.style.display = 'none';
     const field = root.querySelector<HTMLInputElement>('chat-history-search-palette [role="dialog"] input')!;
     field.focus(); field.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true})); fixture.detectChanges();
@@ -731,7 +827,7 @@ describe('App ThreadPlane public behavior', () => {
     vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup(); document.body.appendChild(root);
     root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!.click(); fixture.detectChanges();
-    const search = root.querySelector<HTMLButtonElement>('button[aria-label="Search conversations"]')!;
+    const search = root.querySelector<HTMLButtonElement>('button[aria-label="搜尋對話"]')!;
     search.focus(); search.click(); fixture.detectChanges();
     const palette = root.querySelector<HTMLElement>('chat-history-search-palette [role="dialog"]')!;
     expect(palette).toBeTruthy();
@@ -772,7 +868,7 @@ describe('App ThreadPlane public behavior', () => {
     }));
     const trigger = root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!;
     trigger.focus(); trigger.click(); fixture.detectChanges();
-    Array.from(root.querySelectorAll('button')).find(button => button.textContent?.includes('重新載入對話'))!.click();
+    root.querySelector<HTMLButtonElement>('button[aria-label="重新載入對話"]')!.click();
     await vi.waitFor(() => { fixture.detectChanges(); expect(root.textContent).toContain('selected'); });
     Array.from(root.querySelectorAll<HTMLButtonElement>('chat-thread-list button')).find(button => button.textContent?.includes('selected'))!.click(); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
@@ -784,7 +880,7 @@ describe('App ThreadPlane public behavior', () => {
     vi.stubGlobal('matchMedia', () => media);
     const {fixture, root} = await setup();
     root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!.click(); fixture.detectChanges();
-    root.querySelector<HTMLButtonElement>('button[aria-label="Search conversations"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button[aria-label="搜尋對話"]')!.click(); fixture.detectChanges();
     expect(root.querySelector('chat-history-search-palette [role="dialog"]')).toBeTruthy();
     media.matches = false; change(); fixture.detectChanges();
     expect(root.querySelector('chat-history-search-palette [role="dialog"]')).toBeNull();
@@ -883,7 +979,7 @@ describe('App ThreadPlane public behavior', () => {
     const rail=root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!;
     const toggle=root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!;toggle.focus();expect(document.activeElement).toBe(toggle);
     media.matches=true;change();fixture.detectChanges();await vi.waitFor(()=>expect(document.activeElement).toBe(rail));
-    rail.click();fixture.detectChanges();root.querySelector<HTMLButtonElement>('button[aria-label="Search conversations"]')!.click();fixture.detectChanges();
+    rail.click();fixture.detectChanges();root.querySelector<HTMLButtonElement>('button[aria-label="搜尋對話"]')!.click();fixture.detectChanges();
     const input=root.querySelector<HTMLInputElement>('chat-history-search-palette input')!;input.focus();expect(document.activeElement).toBe(input);
     media.matches=false;change();fixture.detectChanges();await vi.waitFor(()=>expect(document.activeElement).toBe(rail));
     root.remove();
