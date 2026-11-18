@@ -6,27 +6,28 @@ usage() {
 Usage: ./dev.sh [--mock | --real-ai]
 
 Without arguments: choose 1 (Mock AI) or 2 (Real AI).
---mock: local profile. --real-ai: local,real-ai profile.
+--mock: local,mock-ai profiles. --real-ai: local,real-ai profiles.
 Requires Java 25, Node 26, npm dependencies, and a running Docker engine.
+BACKEND_STARTUP_TIMEOUT: backend readiness timeout in seconds (default 900).
 Press Ctrl+C to stop both servers.
 EOF
 }
 
 if (( $# > 1 )); then usage >&2; exit 1; fi
-profiles=local
+profiles=local,mock-ai
 case "${1:-}" in
   --help|-h) usage; exit 0 ;;
-  --mock) profiles=local ;;
+  --mock) profiles=local,mock-ai ;;
   --real-ai) profiles=local,real-ai ;;
   '')
-    printf '選擇 AI 模式：\n  1. Mock AI（本機假模型）\n  2. Real AI（Gemini）\n'
+    printf '選擇 AI 模式：\n  1. local + mock-ai（本機假模型）\n  2. local + real-ai（Gemini）\n'
     while :; do
       if ! read -r -p '請輸入 1 或 2（Enter 預設 1）：' choice; then
         printf '\n未取得選擇，請使用 --mock 或 --real-ai。\n' >&2
         exit 1
       fi
       case "$choice" in
-        1|'') profiles=local; break ;;
+        1|'') profiles=local,mock-ai; break ;;
         2) profiles=local,real-ai; break ;;
         *) printf '請輸入 1 或 2。\n' >&2 ;;
       esac
@@ -36,6 +37,10 @@ case "${1:-}" in
 esac
 
 root_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+backend_startup_timeout=${BACKEND_STARTUP_TIMEOUT:-900}
+case "$backend_startup_timeout" in
+  ''|*[!0-9]*|0) printf 'BACKEND_STARTUP_TIMEOUT must be a positive integer.\n' >&2; exit 1 ;;
+esac
 backend_pid=''
 frontend_pid=''
 
@@ -116,7 +121,8 @@ printf 'Starting backend (profiles: %s)...\n' "$profiles"
     "--args=--spring.profiles.active=$profiles --server.address=127.0.0.1 --server.port=8080"
 ) </dev/null &
 backend_pid=$!
-wait_for http://127.0.0.1:8080/actuator/health 180
+# First startup can include Gradle dependencies and Docker image downloads.
+wait_for http://127.0.0.1:8080/actuator/health "$backend_startup_timeout"
 
 printf 'Backend ready. Starting frontend...\n'
 (

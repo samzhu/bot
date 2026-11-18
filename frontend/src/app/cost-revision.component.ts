@@ -14,8 +14,6 @@ const amountPattern='(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,12})?';
       @if (workspaceId && manager) {
         @if(isControlledTransport()){<p class="fixture-notice"><strong>受控假資料預覽</strong>：使用本機 controlled transport，不呼叫模型或真實後端。</p>}
         <button type="button" data-action="refresh" [disabled]="store.loading()" (click)="store.refresh()">重新載入預覽</button>
-        <label class="simulation-filter" for="simulation-filter"><input id="simulation-filter" name="simulation" type="checkbox" aria-describedby="simulation-filter-hint" [checked]="store.simulation()" (change)="store.setSimulation(($any($event.target)).checked)">僅看模擬資料</label>
-        <p id="simulation-filter-hint">真實與模擬 attempt 分開查詢；切換會清除目前列表、明細、修訂與分頁游標。</p>
         @if (store.loading()) { <p>載入待確認項目…</p> }
         @if (store.error()) { <p role="alert">{{store.error()}} <button type="button" [disabled]="store.loading()" (click)="store.refresh()">重試</button></p> }
         @if(store.cursorNotice()){<p role="status">{{store.cursorNotice()}}</p>}
@@ -38,7 +36,7 @@ const amountPattern='(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,12})?';
           <search aria-label="以 attempt ID 查詢修訂歷史">
             <form id="attempt-lookup-form" method="get" action="" aria-labelledby="attempt-lookup-heading" (submit)="submitLookup($event,lookupForm)" #lookupForm>
               <label for="attempt-lookup-id">Attempt ID</label>
-              <p id="attempt-lookup-id-hint">只會顯示目前工作區且符合真實／模擬分區的 attempt；查詢會重新向伺服器驗權。</p>
+              <p id="attempt-lookup-id-hint">只會顯示目前工作區的 attempt；查詢會重新向伺服器驗權。</p>
               <input id="attempt-lookup-id" name="attemptId" type="search" required maxlength="200" autocomplete="off" autocapitalize="none" spellcheck="false" [disabled]="store.lookupLoading()" [attr.aria-describedby]="'attempt-lookup-id-hint'+(store.lookupError() ? ' attempt-lookup-error' : '')" [attr.aria-invalid]="store.lookupError() ? 'true' : 'false'" [value]="lookupValue()" (input)="lookupInput($event)">
               @if(store.lookupError()){<p id="attempt-lookup-error" #lookupErrorSummary role="alert" tabindex="-1">{{store.lookupError()}}</p>}
               <button type="submit" [disabled]="store.lookupLoading()">{{store.lookupLoading()?'查詢中…':'查詢修訂歷史'}}</button>
@@ -146,12 +144,11 @@ const amountPattern='(?:0|[1-9][0-9]{0,17})(?:\\.[0-9]{1,12})?';
       @else { <p>請先選擇可管理的工作區。</p> }
     </section>
   `,
-  styles:[`:host{display:block;flex:1 1 auto;max-height:calc(100dvh - 9rem);min-height:0;min-width:0;overflow:auto}.revision-host{padding:1rem;min-width:0}.table-scroll{max-inline-size:100%;overflow:auto;margin-block:1rem}table{border-collapse:collapse}caption{text-align:start;font-weight:700;padding:.5rem}th,td{padding:.5rem;border:1px solid #777;text-align:start;vertical-align:top;white-space:nowrap}small,p{max-width:75ch}label{display:block;font-weight:600;margin-block:.75rem .25rem}.simulation-filter{display:flex;align-items:center;gap:.5rem}.simulation-filter input{display:inline-block}input,select,textarea{max-width:100%;padding:.5rem}textarea{min-width:min(30rem,100%);min-height:5rem}button{margin:.4rem;padding:.45rem .7rem}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:24rem;overflow:auto}.fixture-notice{border-inline-start:.3rem solid #725b00;padding:.6rem;background:#fff8d6}input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-visible,.revision-host:focus-visible,.table-scroll:focus-visible{outline:3px solid #005fcc;outline-offset:2px}.visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}[aria-invalid="true"]{border:2px solid #b00020}`]
+  styles:[`:host{display:block;flex:1 1 auto;max-height:calc(100dvh - 9rem);min-height:0;min-width:0;overflow:auto}.revision-host{padding:1rem;min-width:0}.table-scroll{max-inline-size:100%;overflow:auto;margin-block:1rem}table{border-collapse:collapse}caption{text-align:start;font-weight:700;padding:.5rem}th,td{padding:.5rem;border:1px solid #777;text-align:start;vertical-align:top;white-space:nowrap}small,p{max-width:75ch}label{display:block;font-weight:600;margin-block:.75rem .25rem}input,select,textarea{max-width:100%;padding:.5rem}textarea{min-width:min(30rem,100%);min-height:5rem}button{margin:.4rem;padding:.45rem .7rem}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:24rem;overflow:auto}.fixture-notice{border-inline-start:.3rem solid #725b00;padding:.6rem;background:#fff8d6}input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-visible,.revision-host:focus-visible,.table-scroll:focus-visible{outline:3px solid #005fcc;outline-offset:2px}.visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}[aria-invalid="true"]{border:2px solid #b00020}`]
 })
 export class CostRevisionComponent implements OnChanges,OnDestroy {
   @Input() workspaceId:string|null=null;
   @Input() manager=false;
-  @Input() initialSimulation=false;
   @Input() transport:CostRevisionTransport=GRAPHQL_COST_REVISION_TRANSPORT;
   readonly store=new CostRevisionStore(GRAPHQL_COST_REVISION_TRANSPORT);
   @ViewChild('mutationErrorSummary') private mutationErrorSummary?:ElementRef<HTMLElement>;
@@ -162,7 +159,7 @@ export class CostRevisionComponent implements OnChanges,OnDestroy {
   private reconcileTouched=new Set<string>();
   lookupInput(event:Event):void{this.lookupValue.set((event.target as HTMLInputElement).value);this.store.lookupError.set(null);}
   async submitLookup(event:Event,form:HTMLFormElement):Promise<void>{event.preventDefault();const id=this.lookupValue().trim();if(!id){this.store.lookupError.set('請輸入 attempt ID。');form.querySelector<HTMLInputElement>('#attempt-lookup-id')?.focus();return;}const invalid=form.querySelector<HTMLElement>(':invalid');if(invalid){invalid.focus();form.reportValidity();return;}await this.store.lookupById(id);if(this.store.lookupError())queueMicrotask(()=>this.lookupErrorSummary?.nativeElement.focus());}
-  ngOnChanges(changes:SimpleChanges):void{if(changes['initialSimulation'])void this.store.setSimulation(this.initialSimulation);if(changes['transport'])this.store.setTransport(this.transport);if(changes['workspaceId']||changes['manager']||changes['transport'])void this.store.setScope(this.workspaceId,this.manager);}
+  ngOnChanges(changes:SimpleChanges):void{if(changes['transport'])this.store.setTransport(this.transport);if(changes['workspaceId']||changes['manager']||changes['transport'])void this.store.setScope(this.workspaceId,this.manager);}
   ngOnDestroy():void{this.store.dispose();}
   manualInput(field:'amount'|'evidenceReference'|'reason',event:Event):void{const input=event.target as HTMLInputElement|HTMLTextAreaElement;input.setCustomValidity('');this.fieldAnnouncement.set('');this.store.updateManual(field,input.value);}
   blurManual(field:string,event:Event):void{this.manualTouched.add(field);const input=event.target as HTMLInputElement|HTMLTextAreaElement;input.setCustomValidity('');const message=this.manualError(field);this.fieldAnnouncement.set(message?`錯誤：${message}`:'');}

@@ -5,7 +5,7 @@ import { ChatSurfaceComponent } from './chat-surface.component';
 import { signal } from '@angular/core';
 
 describe('ChatSurfaceComponent', () => {
-  it.each([['MONTH_CAP','預算'],['MONTH_UNKNOWN','費用']])('shows a safe budget denial for %s', async (reason, expected) => {
+  it.each([['MONTH_CAP','預算'],['MONTH_UNKNOWN','費用'],['WEEK_CAP','週額度'],['WEEK_UNKNOWN','週費用']])('shows a safe budget denial for %s', async (reason, expected) => {
     const fixture = TestBed.createComponent(ChatSurfaceComponent);
     fixture.componentRef.setInput('agent', mockAgent());
     fixture.componentRef.setInput('runFailed', true);
@@ -13,6 +13,10 @@ describe('ChatSurfaceComponent', () => {
     fixture.detectChanges(); await fixture.whenStable(); fixture.detectChanges();
     expect(fixture.nativeElement.textContent).toContain(expected);
     expect(fixture.nativeElement.textContent).not.toContain('untrusted server text');
+  });
+  it.each(['WEEK_CAP','WEEK_UNKNOWN'])('explains incomplete response and preserved draft for %s',async reason=>{
+    const f=TestBed.createComponent(ChatSurfaceComponent);f.componentRef.setInput('agent',mockAgent());f.componentRef.setInput('runFailed',true);f.componentRef.setInput('runDenialReason',reason);f.detectChanges();await f.whenStable();f.detectChanges();
+    expect(f.nativeElement.textContent).toContain('回覆未完成');expect(f.nativeElement.textContent).toContain('原稿已保留');
   });
   it('shows cancellation even when no assistant message was produced', async () => {
     const fixture = TestBed.createComponent(ChatSurfaceComponent);

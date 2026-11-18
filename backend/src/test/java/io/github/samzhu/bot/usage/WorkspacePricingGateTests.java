@@ -48,6 +48,7 @@ class WorkspacePricingGateTests {
     }
     @Autowired WorkspaceAdmission admission;
     @Autowired WorkspaceMonthlyBudgetOperations budgets;
+    @Autowired io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations weekly;
     @Autowired WorkspaceOperations workspaces;
     @Autowired ConversationOperations conversations;
     @Autowired UsageLedger ledger;
@@ -95,6 +96,8 @@ class WorkspacePricingGateTests {
             var result=budgets.read(new WorkspaceMonthlyBudgetOperations.ReadCommand(scope,actor)).toCompletableFuture().join();
             assertFalse(result.terminalEffectiveUnknown(),"published trusted current must clear unknown in the same lane");
             assertEquals(new BigDecimal("0.001620000000"),result.knownSubtotalUsd());
+            var weeklyRead=new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Read(workspace,actor,WorkspaceAdmission.Partition.SIMULATION,actor,true);
+            assertEquals(new BigDecimal("0.001620000000"),weekly.read(weeklyRead).toCompletableFuture().join().knownSubtotalUsd());
             String current=jdbc.queryForObject("select estimate_id from usage_cost_current where attempt_id=?",String.class,attempt);
             String version=jdbc.queryForObject("select projection_version::text from provider_attempt where id=?",String.class,attempt);
             var manual=revisions.manual(new io.github.samzhu.bot.usage.UsageCostRevisionOperations.ManualCommand(workspace,attempt,current,version,
@@ -103,12 +106,21 @@ class WorkspacePricingGateTests {
             var after=budgets.read(new WorkspaceMonthlyBudgetOperations.ReadCommand(scope,actor)).toCompletableFuture().join();
             assertTrue(after.terminalEffectiveUnknown(),"manual declaration is not trusted complete pricing");
             assertNull(after.knownSubtotalUsd());
+            assertEquals(1,weekly.read(weeklyRead).toCompletableFuture().join().terminalUnknownCount());
+            weekly.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,actor,WorkspaceAdmission.Partition.SIMULATION,actor,true,"100","0","manual-weekly")).toCompletableFuture().join();
+            budgets.configure(new WorkspaceMonthlyBudgetOperations.ConfigureCommand(scope,actor,false,new BigDecimal("100"),1)).toCompletableFuture().join();
+            var next=new WorkspaceAdmission.Register(workspace,"weekly-resume-"+UUID.randomUUID(),actor,conversation.id(),WorkspaceAdmission.Partition.SIMULATION);
+            assertEquals(WorkspaceAdmission.Reason.WEEK_UNKNOWN,assertInstanceOf(WorkspaceAdmission.RegisterResult.Denied.class,admission.register(next).toCompletableFuture().join()).reason());
             var reconciled=revisions.reconcile(new io.github.samzhu.bot.usage.UsageCostRevisionOperations.ReconcileCommand(
                     workspace,attempt,manual.revision().id(),version,"reconcile-key",catalog,"fixture evidence","fixture reason"));
             assertEquals("APPLIED",reconciled.outcome());
             var recovered=budgets.read(new WorkspaceMonthlyBudgetOperations.ReadCommand(scope,actor)).toCompletableFuture().join();
             assertFalse(recovered.terminalEffectiveUnknown());
             assertEquals(new BigDecimal("0.001620000000"),recovered.knownSubtotalUsd());
+            var weeklyRecovered=weekly.read(weeklyRead).toCompletableFuture().join();
+            assertEquals(0,weeklyRecovered.terminalUnknownCount());
+            assertEquals(new BigDecimal("0.001620000000"),weeklyRecovered.knownSubtotalUsd());
+            assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(next).toCompletableFuture().join());
         } finally { SCHEDULER_RELEASE.countDown(); }
     }
 

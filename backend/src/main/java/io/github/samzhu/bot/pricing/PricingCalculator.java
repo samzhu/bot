@@ -65,6 +65,7 @@ public final class PricingCalculator {
         var shortTtl = fixtureTtl ? c.count(raw, "input_tokens_details", "cache_write", "30m") : null;
         var longTtl = fixtureTtl ? c.count(raw, "input_tokens_details", "cache_write", "12h") : null;
         var output = c.count(raw, "output_tokens");
+        // Reasoning is an output subcount; billing it again would double-charge its parent.
         var reasoning = c.optionalCount(raw, "output_tokens_details", "reasoning_tokens");
         if (input != null && read != null && write != null) {
             var ordinary = input.subtract(read).subtract(write);
@@ -83,6 +84,7 @@ public final class PricingCalculator {
         var input = c.count(raw, "input_tokens");
         var read = c.count(raw, "cache_read_input_tokens");
         var write = c.count(raw, "cache_creation_input_tokens");
+        // Cache creation TTL children partition the reported parent; do not charge both levels.
         var shortTtl = c.count(raw, "cache_creation", "ephemeral_5m_input_tokens");
         var longTtl = c.count(raw, "cache_creation", "ephemeral_1h_input_tokens");
         var output = c.count(raw, "output_tokens");
@@ -96,6 +98,7 @@ public final class PricingCalculator {
         var output = c.count(raw, "candidatesTokenCount");
         var thoughts = c.count(raw, "thoughtsTokenCount");
         var tool = c.count(raw, "toolUsePromptTokenCount");
+        // Gemini cached content is already included in prompt; preserve raw and price the disjoint parts.
         if (prompt != null && cached != null) {
             var ordinary = prompt.subtract(cached);
             if (ordinary.signum() < 0) c.reasons.add(Reason.INVALID_USAGE);

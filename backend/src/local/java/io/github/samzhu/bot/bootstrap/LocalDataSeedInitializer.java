@@ -12,6 +12,7 @@ import org.springframework.ai.session.SessionEvent;
 import org.springframework.ai.session.SessionService;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Profile;
 import org.springframework.core.annotation.Order;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -29,7 +30,8 @@ import java.util.Map;
  * Idempotently populates three demonstration conversations (COMPLETED, FAILED, CANCELLED) with fixed IDs.
  */
 @Component
-@Profile("local")
+@Profile("local & mock-ai & !real-ai")
+@ConditionalOnProperty(prefix = "bot.demo-data", name = "enabled", havingValue = "true", matchIfMissing = false)
 @Order(20)
 public class LocalDataSeedInitializer implements ApplicationRunner {
 
@@ -66,13 +68,6 @@ public class LocalDataSeedInitializer implements ApplicationRunner {
     @Override
     public void run(ApplicationArguments args) {
         log.info("Starting LocalDataSeedInitializer for demonstration conversations...");
-
-        // 1. Ensure default local bot exists for local development
-        jdbcTemplate.update("""
-            INSERT INTO bot (id, name, target, system_prompt, created_at, updated_at)
-            VALUES ('bot-general', 'General Assistant', 'LOCAL', 'You are a helpful, accurate, and concise AI coding assistant.', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            ON CONFLICT (id) DO NOTHING;
-        """);
 
         // 2. Ensure demonstration GKE autonomous agent definition exists for local development simulation
         jdbcTemplate.update("""

@@ -16,6 +16,34 @@ public class WorkspaceOperationsImpl implements WorkspaceOperations {
     public WorkspaceOperationsImpl(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
+    @Override
+    @Transactional(readOnly=true)
+    public MemberPage activeMembers(String workspaceId,String actorId,Integer first,String after) {
+        if (actorId==null || !isMember(workspaceId,actorId)) throw new MemberPageFailure("WORKSPACE_ACCESS_DENIED");
+        if (!isManager(workspaceId,actorId)) throw new MemberPageFailure("WORKSPACE_MANAGER_REQUIRED");
+        int limit=first==null?20:first;
+        if(limit<1 || limit>100) throw new MemberPageFailure("INVALID_PAGE_SIZE");
+        String anchor=null;
+        if(after!=null) {
+            try {
+                var decoded=java.util.Base64.getUrlDecoder().decode(after);
+                var in=new java.io.DataInputStream(new java.io.ByteArrayInputStream(decoded));
+                String scope=in.readUTF(); anchor=in.readUTF();
+                if(!scope.equals(workspaceId) || anchor.isBlank() || in.available()!=0 || !isMember(workspaceId,anchor)) throw new IllegalArgumentException();
+            } catch(Exception ex) { throw new MemberPageFailure("INVALID_CURSOR"); }
+        }
+        var rows=jdbc.query("select user_id,role from workspace_member where workspace_id=? and active and (cast(? as varchar) is null or user_id>?) order by user_id limit ?",
+                (rs,n)->new MemberView(rs.getString(1),rs.getString(2)),workspaceId,anchor,anchor,limit+1);
+        boolean more=rows.size()>limit; var nodes=List.copyOf(rows.subList(0,Math.min(rows.size(),limit)));
+        String cursor=null;
+        if(!nodes.isEmpty()) try {
+            var bytes=new java.io.ByteArrayOutputStream(); var out=new java.io.DataOutputStream(bytes);
+            out.writeUTF(workspaceId); out.writeUTF(nodes.getLast().userId());
+            cursor=java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes.toByteArray());
+        } catch(java.io.IOException impossible) { throw new IllegalStateException(impossible); }
+        return new MemberPage(nodes,new PageInfo(more,cursor));
+    }
+    public static class MemberPageFailure extends RuntimeException { public MemberPageFailure(String code) { super(code); } }
 
     @Override
     @Transactional

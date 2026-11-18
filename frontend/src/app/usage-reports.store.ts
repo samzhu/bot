@@ -25,7 +25,7 @@ const snapshotFields = `id eventId ordinal semantic sourceLayer schemaVersion ad
 
 export class UsageReportsStore {
   readonly workspaceId = signal<string|null>(null); readonly manager = signal(false); readonly mode = signal<ReportMode>('mine');
-  readonly periodDays = signal<7|30>(7); readonly provider = signal(''); readonly model = signal(''); readonly simulation = signal(false);
+  readonly periodDays = signal<7|30>(7); readonly provider = signal(''); readonly model = signal('');
   readonly memberId = signal(''); readonly unassignedOnly = signal(false); readonly dirty = signal(false);
   readonly report = signal<UsageReport|null>(null); readonly loading = signal(false); readonly error = signal<string|null>(null);
   readonly errorCode = signal<string|null>(null); readonly hasMore = signal(false); readonly selectedAttemptId = signal<string|null>(null);
@@ -53,10 +53,9 @@ export class UsageReportsStore {
   setPeriodDays(value:7|30):void{this.periodDays.set(value);this.dirty.set(true);}
   setProvider(value:string):void{this.provider.set(value);this.dirty.set(true);}
   setModel(value:string):void{this.model.set(value);this.dirty.set(true);}
-  setSimulation(value:boolean):void{this.simulation.set(value);this.dirty.set(true);}
   setMemberId(value:string):void{this.memberId.set(value);this.dirty.set(true);}
   setUnassignedOnly(value:boolean):void{this.unassignedOnly.set(value);this.dirty.set(true);}
-  resetFilters():void{this.periodDays.set(7);this.provider.set('');this.model.set('');this.simulation.set(false);this.memberId.set('');this.unassignedOnly.set(false);this.dirty.set(false);}
+  resetFilters():void{this.periodDays.set(7);this.provider.set('');this.model.set('');this.memberId.set('');this.unassignedOnly.set(false);this.dirty.set(false);}
   async applyFilters():Promise<void>{
     this.dirty.set(false); this.clearReport(); await this.loadFirstPage();
   }
@@ -65,7 +64,7 @@ export class UsageReportsStore {
   closeDetail():void{this.clearDetail();}
   dispose():void{this.clearReport();this.workspaceId.set(null);}
 
-  private filterSnapshot():FilterSnapshot{return {periodDays:this.periodDays(),provider:this.provider().trim()||null,model:this.model().trim()||null,simulation:this.simulation(),memberId:this.mode()==='workspace'?(this.memberId().trim()||null):null,unassignedOnly:this.mode()==='workspace'&&this.unassignedOnly()};}
+  private filterSnapshot():FilterSnapshot{return {periodDays:this.periodDays(),provider:this.provider().trim()||null,model:this.model().trim()||null,simulation:false,memberId:this.mode()==='workspace'?(this.memberId().trim()||null):null,unassignedOnly:this.mode()==='workspace'&&this.unassignedOnly()};}
   private async loadFirstPage():Promise<void>{
     const workspaceId=this.workspaceId(); if(!workspaceId){this.error.set('目前沒有可讀取的工作區。');return;}
     this.cursor=null;this.hasMore.set(false);await this.fetchPage(null);

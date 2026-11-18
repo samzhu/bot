@@ -20,12 +20,13 @@ An active profile (`local` or `test`) must be explicitly supplied; the applicati
 
 | Profile | Purpose | AI Model Provider | Credentials Required |
 | :--- | :--- | :--- | :--- |
-| **`local`** (Explicit) | Local developer environment | `MockChatModel` (deterministic streaming) | None (zero credentials needed) |
+| **`local`** | Local infrastructure and loopback connection | No model selected | None |
+| **`local,mock-ai`** | Local development and demo data | `MockChatModel` (deterministic streaming) | None |
 | **`test`** | Automated testing suite | `MockChatModel` / `ControlledChatModel` | None |
 | **`local,real-ai`** | Live cloud model inference | `GoogleGenAiChatModel` (`gemini-3.8-flash`) | Yes (`backend/config/application-real-ai.yaml`) |
 
 ### Fail-Fast Guard Rails
-- **Profile Boundary**: Starting without either `local` or `test` profile immediately triggers `ProfileGuard` and aborts startup with an `IllegalStateException`.
+- **Profile Boundary**: Starting without either `local` or `test` profile immediately triggers `ProfileGuard` and aborts startup with an `IllegalStateException`. The `prod` configuration alone does not authorize deployment; production still requires an appropriate authorization strategy. `mock-ai` and `real-ai` cannot be active together.
 - **Real AI Missing Key / Model**: Activating `real-ai` without a non-blank `spring.ai.google.genai.api-key` or `spring.ai.google.genai.chat.model` fails fast at startup with clear diagnostics.
 - **Secrets Protection**: `backend/config/application-real-ai.yaml` is strictly ignored by version control (`.gitignore`).
 
@@ -58,9 +59,9 @@ No database data is deleted. Use `./dev.sh --help` for usage.
 Spring Boot automatically boots and configures the PostgreSQL container defined in `backend/compose.yaml`.
 
 ```bash
-# Terminal 1: Start backend in deterministic mock mode (requires explicit local profile)
+# Terminal 1: Start backend in deterministic mock mode
 cd backend
-./gradlew bootRun --args="--spring.profiles.active=local"
+./gradlew bootRun --args="--spring.profiles.active=local,mock-ai"
 ```
 
 To run with real Google GenAI models:
@@ -94,7 +95,7 @@ Access the UI at `http://localhost:4200`.
 ### Local Demonstration Seed & Artifact Isolation
 - **SourceSet Isolation**: Demonstration loaders and local fixtures reside in the dedicated `localDevelopment` sourceSet (`src/local/java`), included only in `bootRun` and `test` classpaths.
 - **Production Artifacts**: Neither production `bootJar` nor container images contain demo SQL, seed classes, or private configurations.
-- **Idempotence**: When booting under the `local` profile, `LocalDataSeedInitializer` automatically populates three demonstration scenarios (`COMPLETED`, `FAILED`, `CANCELLED`) with fixed IDs. Subsequent restarts detect existing data and skip initialization without modifying or duplicating records.
+- **Idempotence**: When booting with `local,mock-ai`, `LocalDataSeedInitializer` automatically populates three demonstration scenarios (`COMPLETED`, `FAILED`, `CANCELLED`) with fixed IDs. Subsequent restarts detect existing data and skip initialization without modifying or duplicating records. Real AI does not import demonstration data; existing records are not deleted. The default assistant is initialized independently after schema migration.
 
 ### Backend Test Suites
 ```bash

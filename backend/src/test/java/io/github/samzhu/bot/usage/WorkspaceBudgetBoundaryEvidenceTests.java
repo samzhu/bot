@@ -27,6 +27,7 @@ import static org.mockito.Mockito.when;
 class WorkspaceBudgetBoundaryEvidenceTests {
     @Autowired WorkspaceAdmission admission;
     @Autowired WorkspaceMonthlyBudgetOperations budgets;
+    @Autowired io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations weekly;
     @Autowired WorkspaceOperations workspaces;
     @Autowired ConversationOperations conversations;
     @Autowired UsageLedger ledger;
@@ -83,5 +84,16 @@ class WorkspaceBudgetBoundaryEvidenceTests {
         var denied=assertInstanceOf(WorkspaceAdmission.RegisterResult.Denied.class,admission.register(new WorkspaceAdmission.Register(workspace,"new-"+UUID.randomUUID(),actor,victim.registration().conversationId(),WorkspaceAdmission.Partition.SIMULATION)).toCompletableFuture().join());
         assertEquals(WorkspaceAdmission.Reason.MONTH_UNKNOWN,denied.reason());
         assertEquals(0,jdbc.queryForObject("select count(*) from workspace_admission_effect_outbox where registration_token=?",Integer.class,victim.registration().token()));
+    }
+    @Test void monthlyUnknownAndCapBothPrecedeWeeklyCap() {
+        String actor="priority-"+UUID.randomUUID(),workspace=workspaces.personal(actor).id(),model="priority-"+UUID.randomUUID();
+        var f=claim(actor,workspace,model);
+        assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),f.claim(),WorkspaceAdmission.TerminalKind.UNKNOWN)).toCompletableFuture().join());
+        weekly.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,actor,WorkspaceAdmission.Partition.SIMULATION,actor,true,"0","0","priority")).toCompletableFuture().join();
+        budgets.configure(new WorkspaceMonthlyBudgetOperations.ConfigureCommand(scope(workspace),actor,true,new BigDecimal("10"),0)).toCompletableFuture().join();
+        var req=new WorkspaceAdmission.Register(workspace,"new-"+UUID.randomUUID(),actor,f.registration().conversationId(),WorkspaceAdmission.Partition.SIMULATION);
+        assertEquals(WorkspaceAdmission.Reason.MONTH_UNKNOWN,assertInstanceOf(WorkspaceAdmission.RegisterResult.Denied.class,admission.register(req).toCompletableFuture().join()).reason());
+        budgets.configure(new WorkspaceMonthlyBudgetOperations.ConfigureCommand(scope(workspace),actor,true,BigDecimal.ZERO,1)).toCompletableFuture().join();
+        assertEquals(WorkspaceAdmission.Reason.MONTH_CAP,assertInstanceOf(WorkspaceAdmission.RegisterResult.Denied.class,admission.register(req).toCompletableFuture().join()).reason());
     }
 }

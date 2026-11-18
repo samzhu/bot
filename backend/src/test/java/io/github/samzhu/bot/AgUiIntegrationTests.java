@@ -38,6 +38,7 @@ class AgUiIntegrationTests {
  @MockitoSpyBean io.github.samzhu.bot.usage.WorkspaceAdmission admission;
  @MockitoSpyBean io.github.samzhu.bot.usage.RunAdmissionStateReader runAdmissionReader;
  @Autowired io.github.samzhu.bot.usage.WorkspaceMonthlyBudgetOperations budgets;
+ @Autowired io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations weeklyBudgets;
  @Autowired io.github.samzhu.bot.usage.BudgetCancellationSink budgetSink;
  @Autowired java.time.Clock usageClock;
  @MockitoSpyBean RunRegistry registry;
@@ -60,6 +61,102 @@ class AgUiIntegrationTests {
    Thread.yield();
   }
   assertEquals(expected,actual,"attempt must settle through the authoritative recovery path");
+ }
+ @Test void weeklyDenialAfterRegisterEmitsReasonAndDoesNotCallProvider() throws Exception {
+  var c=conversation(); var run=UUID.randomUUID().toString();
+  String workspace=jdbc.queryForObject("select workspace_id from conversation where id=?",String.class,c);
+  doAnswer(call -> {
+   io.github.samzhu.bot.usage.WorkspaceAdmission.Dispatch d=call.getArgument(0);
+   if(run.equals(d.registration().runId())) {
+    var r=d.registration();
+    var current=weeklyBudgets.read(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Read(r.workspaceId(),r.actorId(),r.partition(),r.actorId(),true)).toCompletableFuture().join();
+    weeklyBudgets.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(r.workspaceId(),r.actorId(),r.partition(),r.actorId(),true,"0",Long.toString(current.configVersion()),"sse-"+run)).toCompletableFuture().join();
+   }
+   return call.callRealMethod();
+  }).when(admission).dispatch(any());
+  try {
+   var response=post("/api/ag-ui",input(c,run,"weekly denial"));
+   assertEquals(200,response.statusCode()); assertTrue(response.body().contains("WEEK_CAP"),response.body());
+   awaitAttemptOutcome(run,"NOT_DISPATCHED"); assertEquals(0,model().getRecordedPrompts().size());
+   var runRead=json.readTree(post("/graphql",json.writeValueAsString(Map.of("query","{ run(id:\""+run+"\") { status errorMessage } }"))).body()).path("data").path("run");
+   assertEquals("FAILED",runRead.path("status").asText()); assertEquals("WEEK_CAP",runRead.path("errorMessage").asText());
+   assertEquals("WEEK_CAP",jdbc.queryForObject("select f.terminal_reason from workspace_admission_finalization f join provider_attempt a on a.id=f.attempt_id where a.run_id=?",String.class,run));
+  } finally {
+   reset(admission);
+   var current=weeklyBudgets.read(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Read(workspace,"dev-user",io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.SIMULATION,"dev-user",true)).toCompletableFuture().join();
+   if(current.enabled()) weeklyBudgets.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,"dev-user",io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.SIMULATION,"dev-user",false,null,Long.toString(current.configVersion()),"cleanup-"+run)).toCompletableFuture().join();
+  }
+ }
+ @Test void weeklyCapBeforeRunReturnsSafe503() throws Exception {
+  String c=conversation(), run=UUID.randomUUID().toString();
+  String workspace=jdbc.queryForObject("select workspace_id from conversation where id=?",String.class,c);
+  var partition=io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.SIMULATION;
+  var old=weeklyBudgets.read(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Read(workspace,"dev-user",partition,"dev-user",true)).toCompletableFuture().join();
+  weeklyBudgets.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,"dev-user",partition,"dev-user",true,"0",Long.toString(old.configVersion()),"prestart-"+run)).toCompletableFuture().join();
+  try {
+   var response=post("/api/ag-ui",input(c,run,"weekly prestart"));
+   assertEquals(503,response.statusCode()); assertEquals("WEEK_CAP",json.readTree(response.body()).path("code").asText());
+   assertEquals(0,jdbc.queryForObject("select count(*) from chat_run where id=?",Integer.class,run));
+   assertEquals(0,model().getRecordedPrompts().size());
+  } finally {
+   var current=weeklyBudgets.read(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Read(workspace,"dev-user",partition,"dev-user",true)).toCompletableFuture().join();
+   weeklyBudgets.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,"dev-user",partition,"dev-user",false,null,Long.toString(current.configVersion()),"prestart-cleanup-"+run)).toCompletableFuture().join();
+  }
+ }
+ @Test void weeklyUnknownAfterRegisterEmitsSafeCodeAndSettlesUndispatched() throws Exception {
+  String run=UUID.randomUUID().toString(),workspace="weekly-unknown-sse-"+UUID.randomUUID();
+  jdbc.update("insert into workspace(id,name) values (?,?)",workspace,workspace);
+  jdbc.update("insert into workspace_member(workspace_id,user_id,role,active) values (?,'dev-user','MANAGER',true)",workspace);
+  var created=json.readTree(post("/graphql",json.writeValueAsString(Map.of("query","mutation { createConversation(botId:\"bot-general\",workspaceId:\""+workspace+"\") { id } }"))).body());
+  assertFalse(created.has("errors"),created.toString());
+  String c=created.path("data").path("createConversation").path("id").asText();
+  var partition=io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.SIMULATION;
+  var old=weeklyBudgets.read(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Read(workspace,"dev-user",partition,"dev-user",true)).toCompletableFuture().join();
+  weeklyBudgets.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,"dev-user",partition,"dev-user",true,"100",Long.toString(old.configVersion()),"unknown-sse-"+run)).toCompletableFuture().join();
+  String source="weekly-unknown-source-"+run;
+  var reachedDispatch=new java.util.concurrent.atomic.AtomicBoolean();
+  doAnswer(call -> {
+   io.github.samzhu.bot.usage.WorkspaceAdmission.Dispatch d=call.getArgument(0);
+   if(run.equals(d.registration().runId())) { reachedDispatch.set(true); jdbc.update("""
+    insert into provider_attempt(id,workspace_id,actor_id,provider,endpoint,model,channel,adapter_version,simulation,attempt_coverage,prepared_at,started_at,execution_outcome,usage_presence,capture_completeness,projection_state)
+    values (?,?,'dev-user','fake','test','model','fake','1',true,'UNKNOWN',?,?,'UNKNOWN','UNKNOWN','UNKNOWN','UNKNOWN')
+    """,source,workspace,java.sql.Timestamp.from(usageClock.instant()),java.sql.Timestamp.from(usageClock.instant())); }
+   return call.callRealMethod();
+  }).when(admission).dispatch(any());
+  try {
+   var response=post("/api/ag-ui",input(c,run,"weekly unknown"));
+   assertEquals(200,response.statusCode(),()->"body="+response.body()+", reachedDispatch="+reachedDispatch.get()+", weekly="+weeklyBudgets.read(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Read(workspace,"dev-user",partition,"dev-user",true)).toCompletableFuture().join());
+   assertTrue(reachedDispatch.get()); assertTrue(response.body().contains("WEEK_UNKNOWN"),response.body());
+   awaitAttemptOutcome(run,"NOT_DISPATCHED"); assertEquals(0,model().getRecordedPrompts().size());
+   var runRead=json.readTree(post("/graphql",json.writeValueAsString(Map.of("query","{ run(id:\""+run+"\") { status errorMessage } }"))).body()).path("data").path("run");
+   assertEquals("FAILED",runRead.path("status").asText()); assertEquals("WEEK_UNKNOWN",runRead.path("errorMessage").asText());
+   assertEquals("WEEK_UNKNOWN",jdbc.queryForObject("select f.terminal_reason from workspace_admission_finalization f join provider_attempt a on a.id=f.attempt_id where a.run_id=?",String.class,run));
+  } finally {
+   reset(admission);
+   jdbc.update("delete from provider_attempt where id=?",source);
+   var current=weeklyBudgets.read(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Read(workspace,"dev-user",partition,"dev-user",true)).toCompletableFuture().join();
+   weeklyBudgets.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,"dev-user",partition,"dev-user",false,null,Long.toString(current.configVersion()),"unknown-sse-cleanup-"+run)).toCompletableFuture().join();
+  }
+ }
+ @Test void weeklyUnknownBeforeRunReturnsSafe503() throws Exception {
+  String c=conversation(),run=UUID.randomUUID().toString(),workspace=jdbc.queryForObject("select workspace_id from conversation where id=?",String.class,c);
+  var partition=io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.SIMULATION;
+  var old=weeklyBudgets.read(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Read(workspace,"dev-user",partition,"dev-user",true)).toCompletableFuture().join();
+  weeklyBudgets.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,"dev-user",partition,"dev-user",true,"100",Long.toString(old.configVersion()),"unknown-prestart-"+run)).toCompletableFuture().join();
+  String source="prestart-source-"+run;
+  jdbc.update("""
+   insert into provider_attempt(id,workspace_id,actor_id,provider,endpoint,model,channel,adapter_version,simulation,attempt_coverage,prepared_at,started_at,execution_outcome,usage_presence,capture_completeness,projection_state)
+   values (?,?,'dev-user','fake','test','model','fake','1',true,'UNKNOWN',?,?,'UNKNOWN','UNKNOWN','UNKNOWN','UNKNOWN')
+   """,source,workspace,java.sql.Timestamp.from(usageClock.instant()),java.sql.Timestamp.from(usageClock.instant()));
+  try {
+   var response=post("/api/ag-ui",input(c,run,"unknown prestart"));
+   assertEquals(503,response.statusCode()); assertEquals("WEEK_UNKNOWN",json.readTree(response.body()).path("code").asText());
+   assertEquals(0,jdbc.queryForObject("select count(*) from chat_run where id=?",Integer.class,run)); assertEquals(0,model().getRecordedPrompts().size());
+  } finally {
+   jdbc.update("delete from provider_attempt where id=?",source);
+   var current=weeklyBudgets.read(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Read(workspace,"dev-user",partition,"dev-user",true)).toCompletableFuture().join();
+   weeklyBudgets.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,"dev-user",partition,"dev-user",false,null,Long.toString(current.configVersion()),"unknown-prestart-cleanup-"+run)).toCompletableFuture().join();
+  }
  }
  @Test void failedClaimWriteRecoversAbsentWithoutProviderOrSecondDispatch() throws Exception {
   var c=conversation(); var run=UUID.randomUUID().toString();

@@ -30,6 +30,7 @@ describe('usage reports', () => {
     const fixture = TestBed.createComponent(UsageReportsComponent); fixture.componentRef.setInput('workspaceId','A'); fixture.detectChanges();
     await vi.waitFor(() => expect(fixture.componentInstance.store.report()).not.toBeNull()); fixture.detectChanges();
     const el = fixture.nativeElement as HTMLElement;
+    expect(el.textContent).not.toContain('僅看模擬資料');
     expect(requests[0].query).toContain('myUsageReport');
     expect(requests[0].variables).toMatchObject({workspaceId:'A',periodDays:7,first:20,simulation:false});
     expect(el.textContent).toContain('USD 0.001620000000'); expect(el.textContent).toContain('完整總額未知');
@@ -70,7 +71,7 @@ describe('usage reports', () => {
     await vi.waitFor(() => expect(fixture.componentInstance.store.report()?.periodDays).toBe(30));
     await vi.waitFor(() => expect(fixture.componentInstance.store.loading()).toBe(false)); fixture.detectChanges();
     expect(requests[2].query).toContain('workspaceUsageReport');
-    expect(requests[2].variables).toMatchObject({workspaceId:'A',periodDays:30,memberId:'member-1',unassignedOnly:false});
+    expect(requests[2].variables).toMatchObject({workspaceId:'A',periodDays:30,memberId:'member-1',unassignedOnly:false,simulation:false});
     expect(el.textContent).not.toContain('100.00%'); expect(el.textContent).not.toContain('目前篩選範圍占比');
     expect(el.textContent).toContain('成員篩選結果只顯示絕對值');
   });

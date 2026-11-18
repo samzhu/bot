@@ -88,6 +88,9 @@ type Conversation {
 
 type Query {
   workspaceMonthlyBudget(workspaceId: ID!, simulation: Boolean!): WorkspaceMonthlyBudget!
+  memberWeeklyBudget(workspaceId: ID!, memberUserId: ID!, simulation: Boolean!): MemberWeeklyBudget!
+  myMemberWeeklyBudget(workspaceId: ID!, simulation: Boolean!): MemberWeeklyBudget!
+  workspaceActiveMembers(workspaceId: ID!, first: Int = 20, after: String): WorkspaceMemberConnection!
   workspaces: [Workspace!]!
   personalWorkspace: Workspace!
   bots(search: String, target: BotTarget, limit: Int = 20, offset: Int = 0): [Bot!]!
@@ -118,11 +121,25 @@ type WorkspaceMonthlyBudget {
 
 type Mutation {
   configureWorkspaceMonthlyBudget(input: ConfigureWorkspaceMonthlyBudgetInput!): ConfigureWorkspaceMonthlyBudgetResult!
+  configureMemberWeeklyBudget(input: ConfigureMemberWeeklyBudgetInput!): ConfigureMemberWeeklyBudgetResult!
   createConversation(botId: ID!, title: String, workspaceId: ID): Conversation!
   setConversationPinned(id: ID!, pinned: Boolean!): Conversation!
   createBot(input: CreateBotInput!): Bot!
   updateBot(input: UpdateBotInput!): Bot!
 }
+type MemberWeeklyBudget {
+  workspaceId: ID! memberUserId: ID! simulation: Boolean! periodStart: String! periodEnd: String! timezone: String!
+  enabled: Boolean! capUsd: String knownSubtotalUsd: String terminalUnknownCount: String!
+  state: MonthlyBudgetState! reason: MonthlyBudgetReason! configVersion: String!
+}
+type WorkspaceMember { userId: ID! role: String! }
+type WorkspaceMemberPageInfo { hasNextPage: Boolean! endCursor: String }
+type WorkspaceMemberConnection { nodes: [WorkspaceMember!]! pageInfo: WorkspaceMemberPageInfo! }
+input ConfigureMemberWeeklyBudgetInput {
+  workspaceId: ID! memberUserId: ID! simulation: Boolean! enabled: Boolean! capUsd: String
+  expectedConfigVersion: String! idempotencyKey: String!
+}
+type ConfigureMemberWeeklyBudgetResult { outcome: MonthlyBudgetConfigureOutcome! budget: MemberWeeklyBudget! }
 
 enum MonthlyBudgetConfigureOutcome { APPLIED REPLAYED }
 input ConfigureWorkspaceMonthlyBudgetInput {

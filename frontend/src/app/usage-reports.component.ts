@@ -32,7 +32,6 @@ import { CostExplanationComponent } from './cost-explanation.component';
             <small id="report-member-help">選填；只篩選目前工作區內的成員資料，不授予額外權限。</small>
             <label class="check"><input type="checkbox" [checked]="store.unassignedOnly()" (change)="store.setUnassignedOnly($any($event.target).checked)">僅看未歸屬用量</label>
           }
-          <label class="check"><input type="checkbox" [checked]="store.simulation()" (change)="store.setSimulation($any($event.target).checked)">僅看模擬資料</label>
           <button type="submit" [disabled]="store.loading()">套用篩選</button>
         </fieldset>
       </form>

@@ -102,7 +102,7 @@ public class AgUiController {
     private static String safeUnavailableCode(String reason) {
         if (reason == null) return "SERVICE_UNAVAILABLE";
         return switch (reason) {
-            case "MONTH_CAP", "MONTH_UNKNOWN", "GKE_AGENT_NOT_CONNECTED", "RECOVERY_REQUIRED",
+            case "MONTH_CAP", "MONTH_UNKNOWN", "WEEK_CAP", "WEEK_UNKNOWN", "GKE_AGENT_NOT_CONNECTED", "RECOVERY_REQUIRED",
                     "OVERLOADED", "ADMISSION_UNAVAILABLE" -> reason;
             default -> "SERVICE_UNAVAILABLE";
         };

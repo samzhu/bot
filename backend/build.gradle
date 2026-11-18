@@ -69,6 +69,7 @@ dependencies {
 	// implementation 'org.springframework.ai:spring-ai-starter-model-chat-memory-repository-jdbc'
 	implementation 'org.springframework.ai:spring-ai-session-jdbc'
 	implementation 'org.springframework.ai:spring-ai-client-chat'
+	implementation 'org.springframework.ai:spring-ai-openai'
 	// implementation 'org.springframework.ai:spring-ai-starter-model-google-genai'
 	implementation 'org.springframework.ai:spring-ai-google-genai'
 	// implementation 'org.springframework.ai:spring-ai-starter-model-google-genai-embedding'

@@ -35,6 +35,10 @@ public class ProfileGuard implements ApplicationListener<ApplicationEnvironmentP
     private void validate(Environment env) {
         String[] activeProfiles = env.getActiveProfiles();
 
+        if (env.matchesProfiles("mock-ai & real-ai")) {
+            throw new IllegalStateException("Conflicting AI profiles: mock-ai and real-ai cannot be active together.");
+        }
+
         boolean allowed = Arrays.stream(activeProfiles)
                 .anyMatch(ALLOWED_PROFILES::contains);
 

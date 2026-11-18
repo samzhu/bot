@@ -9,7 +9,7 @@ import org.springframework.stereotype.Component;
 import java.util.Optional;
 
 @Component
-@Profile("(local | test) & !real-ai")
+@Profile("(mock-ai | test) & !real-ai")
 public class FakeUsageCaptureAdapter implements UsageCaptureAdapter {
     @Override
     public UsageLedger.Dispatch dispatch(String run, String workspace, String actor) {

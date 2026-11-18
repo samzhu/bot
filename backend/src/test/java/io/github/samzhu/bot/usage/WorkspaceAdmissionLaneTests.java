@@ -31,6 +31,92 @@ class WorkspaceAdmissionLaneTests {
     @Autowired JdbcTemplate jdbc;
     @Autowired DataSource dataSource;
     record Fixture(WorkspaceAdmission.Registration registration,String attempt) {}
+    @Autowired io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations weekly;
+    @Test void weeklyCapDeniesLaterDispatchWithoutCancellingRegistration() {
+        String actor="weekly-user-"+UUID.randomUUID(),workspace=workspaces.personal(actor).id();
+        var f=fixture(actor,workspace);
+        weekly.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,actor,WorkspaceAdmission.Partition.REAL,actor,true,"0","0","weekly-key")).toCompletableFuture().join();
+        var decision=assertInstanceOf(WorkspaceAdmission.Decision.Denied.class,admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt())).toCompletableFuture().join());
+        assertEquals("WEEK_CAP",decision.reason().name());
+        assertNull(jdbc.queryForObject("select started_at from provider_attempt where id=?",java.sql.Timestamp.class,f.attempt()));
+        assertEquals(0,jdbc.queryForObject("select count(*) from workspace_admission_effect_outbox where registration_token=?",Integer.class,f.registration().token()));
+    }
+    @Test void terminalUnknownBlocksOnlyItsMemberWithWeeklyLimit() {
+        String actor="weekly-unknown-"+UUID.randomUUID(),workspace=workspaces.personal(actor).id();
+        var f=fixture(actor,workspace);
+        var allowed=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt())).toCompletableFuture().join());
+        assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),allowed.claim(),WorkspaceAdmission.TerminalKind.UNKNOWN)).toCompletableFuture().join());
+        weekly.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,actor,WorkspaceAdmission.Partition.REAL,actor,true,"10","0","unknown")).toCompletableFuture().join();
+        var denied=assertInstanceOf(WorkspaceAdmission.RegisterResult.Denied.class,admission.register(new WorkspaceAdmission.Register(workspace,UUID.randomUUID().toString(),actor,f.registration().conversationId(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join());
+        assertEquals("WEEK_UNKNOWN",denied.reason().name());
+    }
+    @Test void weeklyCapDoesNotCancelClaimedAttemptButRejectsNextAttempt() {
+        String actor="weekly-next-"+UUID.randomUUID(),workspace=workspaces.personal(actor).id();
+        var f=fixture(actor,workspace);
+        assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt())).toCompletableFuture().join());
+        weekly.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,actor,WorkspaceAdmission.Partition.REAL,actor,true,"0","0","next-attempt")).toCompletableFuture().join();
+        String next=ledger.begin(new UsageLedger.Dispatch(f.registration().runId(),workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
+        var denied=assertInstanceOf(WorkspaceAdmission.Decision.Denied.class,admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),next)).toCompletableFuture().join());
+        assertEquals("WEEK_CAP",denied.reason().name());
+        assertEquals("CLAIMED",jdbc.queryForObject("select status from workspace_admission_claim where attempt_id=?",String.class,f.attempt()));
+        assertEquals(0,jdbc.queryForObject("select count(*) from workspace_admission_effect_outbox where registration_token=?",Integer.class,f.registration().token()));
+        assertNull(jdbc.queryForObject("select started_at from provider_attempt where id=?",java.sql.Timestamp.class,next));
+    }
+    @Test void weeklyQueryDatabaseFailureNeverDispatches() {
+        String actor="weekly-db-failure-"+UUID.randomUUID(),workspace=workspaces.personal(actor).id();
+        var f=fixture(actor,workspace);
+        jdbc.execute("alter table member_weekly_budget rename to member_weekly_budget_injected_failure");
+        try {
+            var decision=admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt())).toCompletableFuture().join();
+            assertInstanceOf(WorkspaceAdmission.Decision.Denied.class,decision);
+            assertEquals("RECOVERY_REQUIRED",((WorkspaceAdmission.Decision.Denied)decision).reason().name());
+            assertNull(jdbc.queryForObject("select started_at from provider_attempt where id=?",java.sql.Timestamp.class,f.attempt()));
+        } finally { jdbc.execute("alter table member_weekly_budget_injected_failure rename to member_weekly_budget"); }
+    }
+    @Test void queuedConfigurationCommitsBeforeQueuedDispatchInSameLane() throws Exception {
+        String actor="weekly-lane-"+UUID.randomUUID(),workspace=workspaces.personal(actor).id();
+        var f=fixture(actor,workspace);
+        weekly.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,actor,WorkspaceAdmission.Partition.REAL,actor,false,null,"0","init")).toCompletableFuture().join();
+        try(var connection=dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try(var statement=connection.prepareStatement("select config_version from member_weekly_budget where workspace_id=? and member_user_id=? and partition='REAL' for update")) {
+                statement.setString(1,workspace); statement.setString(2,actor); statement.executeQuery().close();
+            }
+            var config=weekly.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,actor,WorkspaceAdmission.Partition.REAL,actor,true,"0","1","queued")).toCompletableFuture();
+            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5); boolean waiting=false;
+            while(System.nanoTime()<deadline) {
+                waiting=Boolean.TRUE.equals(jdbc.queryForObject("select exists(select 1 from pg_stat_activity where wait_event_type='Lock' and query like 'update member_weekly_budget set enabled%')",Boolean.class));
+                if(waiting) break; Thread.yield();
+            }
+            assertTrue(waiting,"configuration must reach the database lock before dispatch is queued");
+            var dispatch=admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt())).toCompletableFuture();
+            connection.commit();
+            assertEquals("APPLIED",config.get(5,TimeUnit.SECONDS).outcome());
+            assertEquals("WEEK_CAP",assertInstanceOf(WorkspaceAdmission.Decision.Denied.class,dispatch.get(5,TimeUnit.SECONDS)).reason().name());
+        }
+    }
+    @Test void queuedDispatchCommitsBeforeQueuedConfigurationInSameLane() throws Exception {
+        String actor="weekly-lane-first-"+UUID.randomUUID(),workspace=workspaces.personal(actor).id();
+        var f=fixture(actor,workspace);
+        try(var connection=dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try(var statement=connection.prepareStatement("select id from provider_attempt where id=? for update")) {
+                statement.setString(1,f.attempt()); statement.executeQuery().close();
+            }
+            var dispatch=admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt())).toCompletableFuture();
+            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5); boolean waiting=false;
+            while(System.nanoTime()<deadline) {
+                waiting=Boolean.TRUE.equals(jdbc.queryForObject("select exists(select 1 from pg_stat_activity where wait_event_type='Lock' and query like 'select run_id,workspace_id,actor_id,simulation,started_at,execution_outcome from provider_attempt%')",Boolean.class));
+                if(waiting) break; Thread.yield();
+            }
+            assertTrue(waiting,"dispatch must reach the database lock before configuration is queued");
+            var config=weekly.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,actor,WorkspaceAdmission.Partition.REAL,actor,true,"0","0","queued-after-claim")).toCompletableFuture();
+            connection.commit();
+            assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,dispatch.get(5,TimeUnit.SECONDS));
+            assertEquals("APPLIED",config.get(5,TimeUnit.SECONDS).outcome());
+            assertEquals(0,jdbc.queryForObject("select count(*) from workspace_admission_effect_outbox where registration_token=?",Integer.class,f.registration().token()));
+        }
+    }
     Fixture fixture(String actor,String workspace) {
         String bot="lane-bot-"+UUID.randomUUID(),run="lane-run-"+UUID.randomUUID();
         jdbc.update("insert into bot(id,name,target) values (?,?,'LOCAL')",bot,bot);

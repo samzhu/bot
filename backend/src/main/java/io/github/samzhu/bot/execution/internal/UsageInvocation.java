@@ -95,7 +95,7 @@ public class UsageInvocation {
                             }
                             return prepareDispatch(attempt, handle).flatMapMany(decision -> {
                                 if (decision==DispatchResolution.BUDGET_PENDING) return awaitDurableTerminal(handle).thenMany(Flux.empty());
-                                if (decision!=DispatchResolution.READY) return settlement(attempt).thenMany(Flux.error(new IllegalStateException("Run ended before dispatch")));
+                                if (decision!=DispatchResolution.READY) return settlement(attempt).thenMany(Flux.error(new IllegalStateException(dispatchError(decision))));
                                 return Flux.defer(() -> {
                                     if (handle.cancellationRequested()) return Flux.error(new IllegalStateException("Run cancelled before provider invocation"));
                                     return model.stream(prompt);
@@ -138,7 +138,7 @@ public class UsageInvocation {
                             }
                             return prepareDispatch(attempt, handle).flatMap(decision -> {
                                 if (decision==DispatchResolution.BUDGET_PENDING) return awaitDurableTerminal(handle).then(Mono.empty());
-                                if (decision!=DispatchResolution.READY) return settlement(attempt).then(Mono.error(new IllegalStateException("Run ended before dispatch")));
+                                if (decision!=DispatchResolution.READY) return settlement(attempt).then(Mono.error(new IllegalStateException(dispatchError(decision))));
                                 return reactor.core.publisher.Mono.fromCallable(
                                             () -> {
                                                     if (handle.cancellationRequested()) throw new IllegalStateException("Run cancelled before provider invocation");
@@ -219,7 +219,10 @@ public class UsageInvocation {
         }
     }
 
-    private enum DispatchResolution { READY, STOPPED, BUDGET_PENDING }
+    private enum DispatchResolution { READY, STOPPED, BUDGET_PENDING, WEEK_CAP, WEEK_UNKNOWN }
+    private String dispatchError(DispatchResolution resolution) {
+        return resolution==DispatchResolution.WEEK_CAP || resolution==DispatchResolution.WEEK_UNKNOWN ? resolution.name() : "Run ended before dispatch";
+    }
 
     private Mono<Void> awaitDurableTerminal(RunHandle handle) {
         // Cancellation of this subscriber must not cancel the shared terminal observation.
@@ -290,10 +293,12 @@ public class UsageInvocation {
                             return;
                         }
                         attempt.claim().set(ClaimState.DENIED);
+                        var weeklyReason = denied.reason()==WorkspaceAdmission.Reason.WEEK_CAP ? WorkspaceAdmission.TerminalReason.WEEK_CAP
+                                : denied.reason()==WorkspaceAdmission.Reason.WEEK_UNKNOWN ? WorkspaceAdmission.TerminalReason.WEEK_UNKNOWN : null;
                         finalizeAttempt(attempt, WorkspaceAdmission.TerminalKind.NOT_DISPATCHED,
                                 denied.reason() == WorkspaceAdmission.Reason.UNAUTHORIZED ? WorkspaceAdmission.TerminalReason.WORKSPACE_ACCESS_DENIED
-                                        : denied.reason() == WorkspaceAdmission.Reason.CANCELLED ? WorkspaceAdmission.TerminalReason.RUN_TERMINATED_BEFORE_DISPATCH : null);
-                        if (!cancelled.get()) sink.success(DispatchResolution.STOPPED);
+                                        : denied.reason() == WorkspaceAdmission.Reason.CANCELLED ? WorkspaceAdmission.TerminalReason.RUN_TERMINATED_BEFORE_DISPATCH : weeklyReason);
+                        if (!cancelled.get()) sink.success(weeklyReason==null?DispatchResolution.STOPPED:DispatchResolution.valueOf(weeklyReason.name()));
                         return;
                     }
                     var allowed = (WorkspaceAdmission.Decision.Allowed) decision;

@@ -2,6 +2,7 @@ package io.github.samzhu.bot.bootstrap;
 
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Profile;
 import org.springframework.core.annotation.Order;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -10,7 +11,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /** Local-only synthetic usage; the values are examples, not tokenizer or provider measurements. */
 @Component
-@Profile("local")
+@Profile("local & mock-ai & !real-ai")
+@ConditionalOnProperty(prefix = "bot.demo-data", name = "enabled", havingValue = "true", matchIfMissing = false)
 @Order(30)
 public class LocalUsageSeedInitializer implements ApplicationRunner {
     private final JdbcTemplate jdbc;

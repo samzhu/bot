@@ -574,7 +574,10 @@ public class RunHandle {
                         "outcome", Map.of("type", "cancelled"));
                 emitter.send(SseEmitter.event().data(AGUI_SERIALIZER.serialize(cancelled)));
             } else {
-                sendAgUi(new RunErrorEvent("Execution failed"));
+                String reason=result.errorMessage();
+                if ("WEEK_CAP".equals(reason) || "WEEK_UNKNOWN".equals(reason))
+                    sendAgUi(new RunErrorEvent("Execution failed",reason,null,null));
+                else sendAgUi(new RunErrorEvent("Execution failed"));
             }
             emitter.complete();
         } catch (Exception ex) {

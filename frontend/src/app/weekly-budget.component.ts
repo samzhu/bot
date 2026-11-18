@@ -1,0 +1,43 @@
+import { Component, ElementRef, Input, OnChanges, OnDestroy, ViewChild, signal, output, inject } from '@angular/core';
+import { GraphQLWeeklyBudgetTransport, WeeklyBudgetStore, WeeklyBudgetTransport, WeeklyBudgetPendingOwner } from './weekly-budget.store';
+@Component({selector:'app-weekly-budget', standalone:true, template:`
+<section><h2>成員週額度</h2>
+@if(manager && !memberUserId){<label for="weekly-member">選擇成員</label><select id="weekly-member" [disabled]="store?.saving()" (change)="selectMember($any($event.target).value)"><option value="">請選擇成員</option>@for(m of members();track m.userId){<option [value]="m.userId">{{m.userId}}（{{m.role}}）</option>}</select>@if(membersMore()){<button type="button" [disabled]="membersLoading()" (click)="loadMembers(true)">載入更多成員</button>}@if(membersError()){<p role="alert">{{membersError()}}</p><button type="button" (click)="loadMembers(false)">重試成員清單</button>}}
+<fieldset><legend>資料分區</legend><label><input type="radio" name="weekly-partition" value="real" [checked]="!simulation()" [disabled]="store?.saving()" (change)="partition(false)">真實</label><label><input type="radio" name="weekly-partition" value="simulation" [checked]="simulation()" [disabled]="store?.saving()" (change)="partition(true)">模擬</label></fieldset>
+@if(accessError()){<p role="alert">{{accessError()}}</p><button type="button" (click)="load()">重新讀取週額度</button>}
+@if(!accessError() && store?.error()){<p #errorSummary tabindex="-1" role="alert">{{store?.error()}}</p>@if(!store?.budget() && ready()){<button type="button" (click)="load()">重新讀取週額度</button>}}
+@if(ready() && !accessError() && store?.budget(); as b){<p>成員：{{b.memberUserId}}；{{b.simulation ? '模擬' : '真實'}}</p><p>{{b.timezone}}：{{b.periodStart}} 至 {{b.periodEnd}}（不含結束時間）</p>
+<dl><dt>上限</dt><dd>{{b.capUsd ?? '未設定'}} USD</dd><dt>已知小計</dt><dd>{{b.knownSubtotalUsd === null ? '未知' : b.knownSubtotalUsd + ' USD'}}</dd><dt>終態未知費用</dt><dd>{{b.terminalUnknownCount}}</dd><dt>狀態</dt><dd>{{stateText(b.state)}}（{{b.reason}}）</dd></dl>
+@if(b.state==='BLOCKED_CAP'){<p>週額度已達上限，新工作受限；週限不額外取消進行中的工作。</p>}
+@if(b.state==='BLOCKED_RECOVERY'){<p>狀態尚未確認，新工作暫時受限。</p>}
+@if(b.state==='BLOCKED_UNKNOWN'){<p>本週費用待確認，請聯絡工作區管理者處理。 @if(manager){<button type="button" (click)="reviewCosts.emit(b.simulation)">前往費用修訂</button>}</p>}
+@if(manager && selectedMember()){<form (submit)="submit($event)" novalidate aria-label="設定成員週額度">
+<label><input type="checkbox" [disabled]="store?.saving() || store?.retryable()" [checked]="enabled()" (change)="enabled.set($any($event.target).checked)">啟用週額度</label>
+<label for="weekly-cap">每週上限（USD）</label><p id="weekly-help">啟用時必填，非負數，最多 18 位整數與 12 位小數。</p>
+<input #capInput [disabled]="store?.saving() || store?.retryable()" id="weekly-cap" name="cap" type="text" inputmode="decimal" [required]="enabled()" pattern="[0-9]+([.][0-9]+)?" [value]="cap()" [attr.aria-invalid]="invalid() ? 'true' : null" [attr.aria-describedby]="invalid() ? 'weekly-help weekly-error' : 'weekly-help'" (input)="cap.set($any($event.target).value); invalid.set(false)" (blur)="validate()">
+@if(invalid()){<p id="weekly-error">請輸入有效的非負 USD 金額。</p>}@if(store?.conflict()){<p>伺服器目前版本：{{b.configVersion}}；草稿已保留。</p><button type="button" (click)="store?.refreshConflict()">重新讀取目前版本</button><button type="button" (click)="store?.adopt()">確認採用目前版本</button>}
+<button type="submit" [disabled]="store?.saving() || store?.conflict() || store?.retryable()">儲存</button>
+@if(store?.retryable()){<p role="alert">儲存結果未知。</p><button type="button" [disabled]="store?.saving()" (click)="retry()">以相同命令重試</button>}</form>}}
+</section>`, styles:[`section{min-width:0} select,input{font:inherit;max-inline-size:100%;box-sizing:border-box} select{display:block} form{display:grid;gap:.5rem;max-inline-size:32rem} form input[type=text]{inline-size:100%} p,dd{overflow-wrap:anywhere}`]})
+export class WeeklyBudgetComponent implements OnChanges, OnDestroy {
+ @Input() memberUserId:string|null=null; @Input() workspaceId:string|null=null; @Input() manager=false; @Input() transport:WeeklyBudgetTransport|null=null;
+ @ViewChild('capInput') capInput?:ElementRef<HTMLInputElement>; @ViewChild('errorSummary') errorSummary?:ElementRef<HTMLElement>;
+ readonly reviewCosts=output<boolean>();
+ readonly selectedMember=signal<string|null>(null); readonly members=signal<{userId:string;role:string}[]>([]); readonly membersMore=signal(false); readonly membersLoading=signal(false); readonly membersError=signal(''); private memberCursor:string|null=null; private directoryGeneration=0;
+ readonly accessError=signal(''); readonly ready=signal(false); readonly simulation=signal(false);
+ readonly cap=signal(''); readonly enabled=signal(false); readonly invalid=signal(false);
+ private readonly pendingOwner=inject(WeeklyBudgetPendingOwner); private loadGeneration=0;
+ store:WeeklyBudgetStore|null=null;
+ ngOnChanges(){this.selectedMember.set(this.memberUserId);this.directoryGeneration++;this.membersLoading.set(false);this.membersError.set('');this.members.set([]);this.membersMore.set(false);this.memberCursor=null;if(this.manager && !this.memberUserId && this.workspaceId)void this.loadMembers(false);void this.load();}
+ async loadMembers(more:boolean){const workspace=this.workspaceId, g=this.directoryGeneration, api=this.transport ?? new GraphQLWeeklyBudgetTransport();if(!workspace||!api.members||this.membersLoading())return;this.membersLoading.set(true);this.membersError.set('');try{const page=await api.members(workspace,more?this.memberCursor:null);if(g!==this.directoryGeneration)return;this.members.set(more?[...this.members(),...page.nodes]:page.nodes);this.memberCursor=page.pageInfo.endCursor;this.membersMore.set(page.pageInfo.hasNextPage);}catch(e){if(g===this.directoryGeneration){const code=(e as {code?:string})?.code;if(code==='WORKSPACE_ACCESS_DENIED'||code==='WORKSPACE_MANAGER_REQUIRED'){this.members.set([]);this.membersMore.set(false);this.selectedMember.set(null);this.store=null;this.membersError.set('存取權已變更。');}else this.membersError.set('無法讀取成員清單，請重試。');}}finally{if(g===this.directoryGeneration)this.membersLoading.set(false);}}
+ selectMember(value:string){this.selectedMember.set(value||null);void this.load();}
+ async load(){const generation=++this.loadGeneration;this.ready.set(false);this.accessError.set('');const workspace=this.workspaceId;const member=this.manager ? this.selectedMember() : null;if(!workspace || (this.manager && !member)){this.store=null;this.ready.set(true);return;}const {store,retained}=this.pendingOwner.acquire(this.transport,workspace,member,this.simulation());this.store=store;if(!retained)await store.setScope(workspace,member,this.simulation());else {try{const verified=await store.verifyScope(workspace,member,this.simulation());if(this.store===store && generation===this.loadGeneration && !store.restoreVerifiedBudget(verified)){this.accessError.set('存取權已變更，請重新讀取。');this.ready.set(true);return;}}catch(e){if(this.store===store && generation===this.loadGeneration){const code=(e as {code?:string})?.code;this.accessError.set(['WORKSPACE_ACCESS_DENIED','WORKSPACE_MANAGER_REQUIRED','MEMBER_ACCESS_DENIED'].includes(code??'')?'存取權已變更。':'無法確認存取，請重試。');this.ready.set(true);}return;}}if(this.store===store && generation===this.loadGeneration){const pending=store.pendingCommand();const b=store.budget();if(pending){this.cap.set(pending.capUsd??'');this.enabled.set(pending.enabled);}else if(b){this.cap.set(b.capUsd??'');this.enabled.set(b.enabled);}this.ready.set(true);}}
+
+ partition(value:boolean){this.simulation.set(value);void this.load();}
+ ngOnDestroy(){this.directoryGeneration++;this.loadGeneration++;this.store=null;}
+ stateText(s:string){return ({DISABLED:'已停用',OPEN:'可執行',BLOCKED_CAP:'已達上限',BLOCKED_UNKNOWN:'費用待確認',BLOCKED_RECOVERY:'等待狀態恢復'} as Record<string,string>)[s] ?? '狀態未知';}
+ validate(){const v=this.cap();const valid=!(this.enabled()&&!v) && (!v || (/^\d+(?:\.\d+)?$/.test(v)&&v.split('.')[0].replace(/^0+/,'').length<=18&&(v.split('.')[1]?.length??0)<=12));this.invalid.set(!valid);return valid;}
+ async submit(event:Event){event.preventDefault();if(!this.validate()){this.capInput?.nativeElement.focus();return;}const store=this.store;await store?.submit(this.enabled(),this.cap()||null);if(this.store!==store)return;this.syncSaved();if(this.store?.error())setTimeout(()=>this.errorSummary?.nativeElement.focus());}
+ async retry(){const store=this.store;await store?.retry();if(this.store!==store)return;this.syncSaved();if(this.store?.error())setTimeout(()=>this.errorSummary?.nativeElement.focus());}
+ private syncSaved(){const b=this.store?.budget();if(b && !this.store?.retryable() && !this.store?.conflict() && !this.store?.error()){this.cap.set(b.capUsd??'');this.enabled.set(b.enabled);}}
+}

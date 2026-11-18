@@ -68,7 +68,7 @@ export class ChatSurfaceComponent {
     ...this.agent(),
     error: computed(() => this.runUnknown()
       ? new AgentError({ kind: 'interrupted', message: '連線中斷，執行結果尚未確認。', retryable: false, recovery: 'check', detail: '可查詢原執行狀態。' })
-      : this.runFailed() ? new AgentError({ kind: 'server', message: this.runDenialReason() === 'MONTH_CAP' ? '工作區月預算已達上限，無法開始新工作；草稿已保留。' : this.runDenialReason() === 'MONTH_UNKNOWN' ? '工作區費用待確認，無法開始新工作；草稿已保留。' : '執行失敗，草稿已保留。', retryable: false }) : undefined),
+      : this.runFailed() ? new AgentError({ kind: 'server', message: this.runDenialReason() === 'MONTH_CAP' ? '工作區月預算已達上限，無法開始新工作；草稿已保留。' : this.runDenialReason() === 'MONTH_UNKNOWN' ? '工作區費用待確認，無法開始新工作；草稿已保留。' : this.runDenialReason() === 'WEEK_CAP' ? '成員週額度已達上限，回覆未完成；原稿已保留。' : this.runDenialReason() === 'WEEK_UNKNOWN' ? '本週費用待確認，回覆未完成；原稿已保留，請聯絡工作區管理者。' : '執行失敗，草稿已保留。', retryable: false }) : undefined),
     checkStatus: async () => { this.checkStatusRequested.emit(); }
   }));
   readonly composerAgent = computed<Agent>(() => ({

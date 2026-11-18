@@ -177,6 +177,60 @@ describe('ChatAgUiTransport', () => {
       expect(transport.agent('A').messages().filter(m => m.role === 'user').length).toBe(expected === 'REJECTED' ? 0 : 1);
     }
   });
+  it('preserves the draft for an explicit prestart weekly cap denial', async () => {
+    const transport = new ChatAgUiTransport(vi.fn(async () => Response.json({code:'WEEK_CAP'}, {status:503})));
+    const registry = new ChatSessionRegistry(transport, () => 'weekly-run');
+    registry.edit('conversation:A', '  weekly draft  ');
+    await registry.submit('conversation:A');
+    expect(registry.session('conversation:A').result()).toMatchObject({status:'REJECTED',reason:'WEEK_CAP'});
+    expect(registry.session('conversation:A').draft()).toBe('  weekly draft  ');
+    expect(transport.agent('A').messages().filter(m => m.role === 'user')).toEqual([]);
+  });
+  it.each(['WEEK_CAP','WEEK_UNKNOWN'] as const)('keeps started messages, partial output and raw draft for %s', async reason => {
+    const transport = new ChatAgUiTransport(vi.fn(async () => {
+      const events = [{type:'RUN_STARTED',threadId:'A',runId:'weekly-run'}, {type:'TEXT_MESSAGE_START',messageId:'assistant',role:'assistant'}, {type:'TEXT_MESSAGE_CONTENT',messageId:'assistant',delta:'partial'}, {type:'RUN_ERROR',message:'unsafe server text',code:reason}];
+      return new Response(events.map(e => `data: ${JSON.stringify(e)}\n\n`).join(''), {headers:{'Content-Type':'text/event-stream'}});
+    }));
+    const registry = new ChatSessionRegistry(transport, () => 'weekly-run');
+    registry.edit('conversation:A', '  original  \n');
+    await registry.submit('conversation:A');
+    expect(registry.session('conversation:A').result()).toMatchObject({status:'FAILED',reason});
+    expect(registry.session('conversation:A').draft()).toBe('  original  \n');
+    expect(transport.agent('A').messages().some(m => m.role === 'user')).toBe(true);
+    expect(registry.session('conversation:A').partial()).toBe('partial');
+  });
+  it.each(['WEEK_CAP','WEEK_UNKNOWN'] as const)('reconciles a lost started terminal %s and restores the raw draft', async reason => {
+    let statusAvailable=false;
+    const fetcher=vi.fn(async (url:string|URL|Request,init?:RequestInit)=>{
+      if(url==='/graphql') {
+        const query=JSON.parse(String(init?.body)).query as string;
+        return Response.json({data:{run:statusAvailable?{id:'weekly-run',status:'FAILED',...(query.includes('errorMessage')?{errorMessage:reason}:{})}:{id:'weekly-run',status:'RUNNING',errorMessage:null},conversation:{...historyIdentity,messages:statusAvailable?[{id:'db-user',runId:'weekly-run',role:'USER',content:'submitted',createdAt:'2026-11-16T00:00:00Z'}]:[],runs:[]}}});
+      }
+      return new Response(`data: ${JSON.stringify({type:'RUN_STARTED',threadId:'A',runId:'weekly-run'})}\n\n`,{headers:{'Content-Type':'text/event-stream'}});
+    });
+    const transport=new ChatAgUiTransport(fetcher); const registry=new ChatSessionRegistry(transport,()=> 'weekly-run');
+    registry.edit('conversation:A','  submitted  '); await registry.submit('conversation:A');
+    expect(registry.session('conversation:A').result()?.status).toBe('UNKNOWN');
+    statusAvailable=true; await registry.reconcile('conversation:A');
+    expect(registry.session('conversation:A').result()).toEqual({status:'FAILED',reason});
+    expect(registry.session('conversation:A').draft()).toBe('  submitted  ');
+    expect(transport.agent('A').messages().map(m=>m.id)).toContain('db-user');
+  });
+  it.each(['WEEK_CAP','WEEK_UNKNOWN'] as const)('does not overwrite a new draft after started %s',async reason=>{
+    let finish!:(v:Uint8Array)=>void;const encoder=new TextEncoder();
+    const stream=new ReadableStream<Uint8Array>({start(c){c.enqueue(encoder.encode(`data: ${JSON.stringify({type:'RUN_STARTED',threadId:'A',runId:'weekly-run'})}\n\n`));finish=chunk=>{c.enqueue(chunk);c.close();};}});
+    const transport=new ChatAgUiTransport(vi.fn(async()=>new Response(stream,{headers:{'Content-Type':'text/event-stream'}})));
+    const registry=new ChatSessionRegistry(transport,()=> 'weekly-run');registry.edit('conversation:A','old raw');const pending=registry.submit('conversation:A');
+    await vi.waitFor(()=>expect(finish).toBeDefined());registry.edit('conversation:A','new draft');
+    finish(encoder.encode(`data: ${JSON.stringify({type:'RUN_ERROR',message:'safe',code:reason})}\n\n`));await pending;
+    expect(registry.session('conversation:A').result()).toEqual({status:'FAILED',reason});expect(registry.session('conversation:A').draft()).toBe('new draft');
+    expect(transport.agent('A').messages().some(m=>m.role==='user')).toBe(true);
+  });
+  it.each(['WEEK_CAP extra','week_cap','private provider message',null])('does not expose or infer an unrecognized persisted error %s',async message=>{
+    const fetcher=vi.fn(async()=>Response.json({data:{run:{id:'r',status:'FAILED',errorMessage:message},conversation:{...historyIdentity,messages:[],runs:[]}}}));
+    const transport=new ChatAgUiTransport(fetcher);
+    expect(await transport.reconcile('A','r')).toEqual({status:'FAILED'});
+  });
   it('treats a monthly cap denial as a definite rejection without retaining an optimistic message', async () => {
     const fetcher = vi.fn(async () => Response.json({code:'MONTH_CAP', message:'untrusted server text'}, {status:503}));
     const transport = new ChatAgUiTransport(fetcher);

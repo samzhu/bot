@@ -7,7 +7,7 @@ import java.util.concurrent.CompletionStage;
 /** Typed usage boundary for durable registration, publication, per-attempt claims and cancellation. */
 public interface WorkspaceAdmission {
     enum Partition { REAL, SIMULATION }
-    enum Reason { MONTH_CAP, MONTH_UNKNOWN, UNAUTHORIZED, CANCELLED, OVERLOADED, RECOVERY_REQUIRED }
+    enum Reason { MONTH_CAP, MONTH_UNKNOWN, WEEK_CAP, WEEK_UNKNOWN, UNAUTHORIZED, CANCELLED, OVERLOADED, RECOVERY_REQUIRED }
     enum RegistrationState { REGISTERED, PUBLISHED, CANCEL_REQUESTED, TERMINAL }
 
     record Register(String workspaceId, String runId, String actorId, String conversationId,
@@ -44,7 +44,7 @@ public interface WorkspaceAdmission {
     record CancelResult(CancelStatus status, List<ClaimFence> claimedTargets,
                         List<PendingFence> pendingTargets) {}
     enum TerminalKind { SUCCEEDED, FAILED, CANCELLED, UNKNOWN, NOT_DISPATCHED }
-    enum TerminalReason { CAPTURE_FAILED, ADMISSION_RECOVERY, PROMPT_CONTEXT_UNAVAILABLE, WORKSPACE_ACCESS_DENIED, RUN_TERMINATED_BEFORE_DISPATCH, PROVIDER_STREAM_ERROR, BUDGET_CANCELLATION_SUPERSEDED }
+    enum TerminalReason { CAPTURE_FAILED, ADMISSION_RECOVERY, PROMPT_CONTEXT_UNAVAILABLE, WORKSPACE_ACCESS_DENIED, RUN_TERMINATED_BEFORE_DISPATCH, PROVIDER_STREAM_ERROR, BUDGET_CANCELLATION_SUPERSEDED, WEEK_CAP, WEEK_UNKNOWN }
     enum FinalizationResult { SETTLED, RECOVERY_REQUIRED }
     enum TerminalRunCompletion { COMPLETED, ALREADY_COMPLETED, NOT_FOUND, RETRY, UNKNOWN }
     enum RecoveryReadiness { READY, RETRY, FAILED }

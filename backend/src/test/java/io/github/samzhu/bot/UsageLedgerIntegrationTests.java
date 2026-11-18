@@ -944,6 +944,39 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
                         Integer.class));
     }
 
+    @Autowired io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations weeklyBudgets;
+    @Test
+    void weeklyCapBetweenTwoRealInvocationSeamsRejectsSecondWithoutCancellingFirst() throws Exception {
+        String suffix=UUID.randomUUID().toString();
+        String workspace="weekly-invocation-"+suffix, bot="weekly-invocation-bot-"+suffix, run="weekly-invocation-run-"+suffix;
+        jdbc.update("insert into workspace(id,name) values (?,?)",workspace,workspace);
+        jdbc.update("insert into workspace_member(workspace_id,user_id,role,active) values (?,'dev-user','MANAGER',true)",workspace);
+        jdbc.update("insert into bot(id,name,target) values (?,?,'LOCAL')",bot,bot);
+        String conversation=graph("mutation { createConversation(botId:\""+bot+"\",workspaceId:\""+workspace+"\") { id } }").path("data").path("createConversation").path("id").asText();
+        jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'synthetic','RUNNING')",run,conversation,run);
+        var handle=new io.github.samzhu.bot.execution.internal.RunHandle(run,conversation,"dev-user",new org.springframework.web.servlet.mvc.method.annotation.SseEmitter(),runRegistry,org.mockito.Mockito.mock(io.github.samzhu.bot.execution.internal.RunHandle.TerminalCallback.class));
+        var calls=new java.util.concurrent.atomic.AtomicInteger();
+        ChatModel fake=new ChatModel() {
+            @Override public ChatResponse call(Prompt p) { throw new AssertionError("unexpected sync call"); }
+            @Override public Flux<ChatResponse> stream(Prompt p) { calls.incrementAndGet(); return Flux.just(new ChatResponse(List.of(new Generation(new AssistantMessage("ok"))),ChatResponseMetadata.builder().usage(new DefaultUsage(0,0,0,"{}" )).build())); }
+        };
+        var metadata=invocation.dispatchMetadata(run,workspace,"dev-user");
+        var partition=metadata.simulation()?io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.SIMULATION:io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.REAL;
+        var registered=assertInstanceOf(io.github.samzhu.bot.usage.WorkspaceAdmission.RegisterResult.Registered.class,admission.register(new io.github.samzhu.bot.usage.WorkspaceAdmission.Register(workspace,run,"dev-user",conversation,partition)).toCompletableFuture().join());
+        var registration=registered.registration();
+        assertInstanceOf(io.github.samzhu.bot.usage.WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
+        handle.setAdmissionRegistration(registration);
+        var first=invocation.begin(metadata,registration);
+        assertEquals(1,invocation.stream(fake,new Prompt("one"),first,conversation,workspace,"dev-user",handle).collectList().block().size());
+        weeklyBudgets.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,"dev-user",partition,"dev-user",true,"0","0","between")).toCompletableFuture().join();
+        var second=invocation.begin(metadata,registration);
+        var error=assertThrows(RuntimeException.class,()->invocation.stream(fake,new Prompt("two"),second,conversation,workspace,"dev-user",handle).collectList().block());
+        assertTrue(error.getMessage().contains("WEEK_CAP")); assertEquals(1,calls.get());
+        assertEquals("SUCCEEDED",jdbc.queryForObject("select execution_outcome from provider_attempt where id=?",String.class,first.id()));
+        assertEquals("NOT_DISPATCHED",jdbc.queryForObject("select execution_outcome from provider_attempt where id=?",String.class,second.id()));
+        assertEquals("RUNNING",jdbc.queryForObject("select status from chat_run where id=?",String.class,run));
+        assertEquals(0,jdbc.queryForObject("select count(*) from workspace_admission_effect_outbox where registration_token=?",Integer.class,registration.token()));
+    }
     @Test
     void twoFakeInvocationsOnOneRunEachPersistBeforeDispatch() throws Exception {
         jdbc.update(

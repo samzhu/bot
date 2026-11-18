@@ -156,7 +156,7 @@ export class ChatAgUiTransport implements ChatSessionTransport {
       }
       if (event.type === 'TEXT_MESSAGE_CONTENT' && typeof event['delta'] === 'string') onDelta(event['delta']);
       if (event.type === 'RUN_FINISHED') terminal = { status: (event['outcome'] as { type?: string } | undefined)?.type === 'cancelled' ? 'CANCELLED' : 'COMPLETED' };
-      if (event.type === 'RUN_ERROR') terminal = { status: 'FAILED' };
+      if (event.type === 'RUN_ERROR') terminal = event['code'] === 'WEEK_CAP' || event['code'] === 'WEEK_UNKNOWN' ? { status: 'FAILED', reason: event['code'] } : { status: 'FAILED' };
     });
     const rejected = (reason?: BudgetDenialReason): RunResult => {
       const id = entry.userByRun.get(runId);
@@ -167,7 +167,7 @@ export class ChatAgUiTransport implements ChatSessionTransport {
       return reason ? { status: 'REJECTED', reason } : { status: 'REJECTED' };
     };
     const responseResult = (): RunResult | null => {
-      if (entry.httpStatus === 503 && (entry.conflictCode === 'MONTH_CAP' || entry.conflictCode === 'MONTH_UNKNOWN')) return rejected(entry.conflictCode);
+      if (entry.httpStatus === 503 && (entry.conflictCode === 'MONTH_CAP' || entry.conflictCode === 'MONTH_UNKNOWN' || entry.conflictCode === 'WEEK_CAP' || entry.conflictCode === 'WEEK_UNKNOWN')) return rejected(entry.conflictCode);
       if ((entry.httpStatus === 404 && entry.conflictCode === 'CONVERSATION_ACCESS_DENIED') ||
           (entry.httpStatus === 409 && entry.conflictCode === 'RUN_CONFLICT') ||
           (entry.httpStatus === 400 && entry.conflictCode === 'INVALID_AG_UI_INPUT') ||
@@ -183,7 +183,7 @@ export class ChatAgUiTransport implements ChatSessionTransport {
     } finally { subscription.unsubscribe(); }
   }
   async reconcile(conversationId: string, runId: string): Promise<RunResult> {
-    const data = await this.graphql(`query ReconcileRun($id: ID!, $conversationId: ID!) { run(id: $id) { id status } conversation(id: $conversationId) { messages(limit: 20, offset: 0) { id runId role content interrupted createdAt } runs(limit: 50, offset: 0) { id status } } }`, { id: runId, conversationId });
+    const data = await this.graphql(`query ReconcileRun($id: ID!, $conversationId: ID!) { run(id: $id) { id status errorMessage } conversation(id: $conversationId) { messages(limit: 20, offset: 0) { id runId role content interrupted createdAt } runs(limit: 50, offset: 0) { id status } } }`, { id: runId, conversationId });
     const status = data?.run?.status;
     if ((status === 'COMPLETED' || status === 'FAILED' || status === 'CANCELLED') && !Array.isArray(data?.conversation?.messages)) return { status: 'UNKNOWN' };
     if ((status === 'COMPLETED' || status === 'FAILED' || status === 'CANCELLED') && Array.isArray(data?.conversation?.messages)) {
@@ -192,6 +192,8 @@ export class ChatAgUiTransport implements ChatSessionTransport {
       this.mergeHistory(conversationId, data.conversation.messages.map((row: {runId: string}) => ({...row, runStatus: statuses.get(row.runId)})));
       this.entry(conversationId).authoritativeRuns.update(ids => new Set([...ids, runId]));
     }
+    const reason = data?.run?.errorMessage;
+    if (status === 'FAILED' && (reason === 'WEEK_CAP' || reason === 'WEEK_UNKNOWN')) return { status, reason };
     return { status: status === 'COMPLETED' || status === 'FAILED' || status === 'CANCELLED' ? status : 'UNKNOWN' };
   }
   async cancel(_conversationId: string, runId: string): Promise<RunResult> {

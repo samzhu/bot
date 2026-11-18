@@ -31,6 +31,7 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
     private final Clock clock;
     private final WorkspaceLane lane;
     private final BudgetProjection projection;
+    private final WeeklyBudgetQuery weeklyBudgets;
     private final RunAdmissionStateReader runStateReader;
     private final StartupRecoveryState startupState;
     private final java.util.concurrent.ThreadPoolExecutor startupVerifier = new java.util.concurrent.ThreadPoolExecutor(1,1,0,
@@ -48,7 +49,8 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
     public DefaultWorkspaceAdmission(ConversationOperations conversations, WorkspaceOperations workspaces,
             JdbcTemplate jdbc, org.springframework.transaction.PlatformTransactionManager manager,
             Clock clock, WorkspaceLane lane, io.github.samzhu.bot.usage.internal.pricing.CatalogActivation catalog, BudgetProjection projection,
-            RunAdmissionStateReader runStateReader, StartupRecoveryState startupState) {
+            RunAdmissionStateReader runStateReader, StartupRecoveryState startupState,
+            WeeklyBudgetQuery weeklyBudgets) {
         this.conversations = conversations;
         this.workspaces = workspaces;
         this.jdbc = jdbc;
@@ -61,6 +63,7 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
         this.catalog = catalog;
         this.runStateReader = runStateReader;
         this.startupState = startupState;
+        this.weeklyBudgets = weeklyBudgets;
     }
 
     @Override public CompletionStage<PromptFailurePage> scanSettledPromptFailures(String afterExclusive, String upperInclusive, int limit) {
@@ -214,7 +217,8 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
             if (recoveryScopes.contains(scopeKey(command.workspaceId(),command.partition())) || hasPendingRecovery(command.workspaceId(),command.partition()))
                 return new RegisterResult.Denied(Reason.RECOVERY_REQUIRED);
             RegisterResult result = transactions.execute(status -> {
-                var period = YearMonth.from(clock.instant().atZone(ZONE));
+                var sampledAt = clock.instant();
+                var period = YearMonth.from(sampledAt.atZone(ZONE));
                 jdbc.update("insert into workspace_monthly_budget(workspace_id,partition) values (?,?) on conflict do nothing",command.workspaceId(),command.partition().name());
                 jdbc.update("insert into workspace_monthly_budget_period(workspace_id,partition,period_start) values (?,?,?) on conflict do nothing",command.workspaceId(),command.partition().name(),period.atDay(1));
                 var policy=jdbc.queryForMap("""
@@ -228,6 +232,9 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
                     if (cap.signum()==0 || (known!=null && known.compareTo(cap)>=0)) return new RegisterResult.Denied(Reason.MONTH_CAP);
                     if ((boolean)policy.get("terminal_effective_unknown")) return new RegisterResult.Denied(Reason.MONTH_UNKNOWN);
                 }
+                var weekly=weeklyBudgets.select(command.workspaceId(),command.actorId(),command.partition(),sampledAt);
+                var weeklyReason=weeklyReason(weekly);
+                if (weeklyReason!=null) return new RegisterResult.Denied(weeklyReason);
                 var registration = new Registration(UUID.randomUUID().toString(), command.workspaceId(),
                         command.runId(), command.actorId(), command.conversationId(), command.partition());
                 int inserted = jdbc.update("""
@@ -391,6 +398,9 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
                 if (cap.signum()==0 || (known!=null && known.compareTo(cap)>=0)) return resolveDenied(command,Reason.MONTH_CAP);
                 if ((boolean)budget.get("terminal_effective_unknown")) return resolveDenied(command,Reason.MONTH_UNKNOWN);
             }
+            var weekly=weeklyBudgets.select(r.workspaceId(),r.actorId(),r.partition(),sampled.startedAt());
+            var weeklyReason=weeklyReason(weekly);
+            if (weeklyReason!=null) return resolveDenied(command,weeklyReason);
             int changed=jdbc.update("update provider_attempt set started_at=?,catalog_marker=?,catalog_revision_id=?,projection_version=projection_version+1 where id=? and started_at is null and execution_outcome='IN_PROGRESS'",
                     java.sql.Timestamp.from(sampled.startedAt()),sampled.revisionId()==null?"NO_CATALOG":"CAPTURED",sampled.revisionId(),command.attemptId());
             if (changed!=1) throw new IllegalStateException("attempt claim changed");
@@ -409,6 +419,12 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
             recoveryScopes.add(scopeKey(r.workspaceId(),r.partition()));
             return new Decision.Denied(Reason.RECOVERY_REQUIRED);
         });
+    }
+
+    private Reason weeklyReason(io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Budget budget) {
+        if (!budget.enabled()) return null;
+        if (budget.capUsd().signum()==0 || (budget.knownSubtotalUsd()!=null && budget.knownSubtotalUsd().compareTo(budget.capUsd())>=0)) return Reason.WEEK_CAP;
+        return budget.terminalUnknownCount()>0 ? Reason.WEEK_UNKNOWN : null;
     }
     @Override public CompletionStage<ClaimInspection> inspectClaim(Registration registration,String attemptId) {
         if (!valid(registration) || blank(attemptId)) return CompletableFuture.completedFuture(new ClaimInspection.Unknown());
@@ -580,7 +596,7 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
         if (command.reason()==null) return true;
         return switch (command.reason()) {
             case CAPTURE_FAILED, ADMISSION_RECOVERY -> command.kind()==TerminalKind.UNKNOWN;
-            case PROMPT_CONTEXT_UNAVAILABLE, WORKSPACE_ACCESS_DENIED, RUN_TERMINATED_BEFORE_DISPATCH, BUDGET_CANCELLATION_SUPERSEDED -> command.kind()==TerminalKind.NOT_DISPATCHED;
+            case PROMPT_CONTEXT_UNAVAILABLE, WORKSPACE_ACCESS_DENIED, RUN_TERMINATED_BEFORE_DISPATCH, BUDGET_CANCELLATION_SUPERSEDED, WEEK_CAP, WEEK_UNKNOWN -> command.kind()==TerminalKind.NOT_DISPATCHED;
             case PROVIDER_STREAM_ERROR -> command.kind()==TerminalKind.FAILED;
         };
     }

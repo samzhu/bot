@@ -24,7 +24,7 @@ import java.util.Map;
  */
 @RestController
 @RequestMapping("/api/internal/verification")
-@Profile("local")
+@Profile("local & mock-ai & !real-ai")
 public class MockVerificationController {
 
     private final ObjectProvider<ChatModel> chatModelProvider;
@@ -37,7 +37,7 @@ public class MockVerificationController {
 
     @GetMapping(value = "/status", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> getStatus() {
-        if (environment.matchesProfiles("real-ai")) {
+        if (!environment.matchesProfiles("local & mock-ai & !real-ai")) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
         }
         ChatModel chatModel = chatModelProvider.getIfAvailable();

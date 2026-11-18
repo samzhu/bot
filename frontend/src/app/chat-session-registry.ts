@@ -1,6 +1,6 @@
 import { signal, WritableSignal } from '@angular/core';
 
-export type BudgetDenialReason = 'MONTH_CAP' | 'MONTH_UNKNOWN';
+export type BudgetDenialReason = 'MONTH_CAP' | 'MONTH_UNKNOWN' | 'WEEK_CAP' | 'WEEK_UNKNOWN';
 export type RunResult = { status: 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'REJECTED' | 'DUPLICATE' | 'UNKNOWN'; reason?: BudgetDenialReason };
 export interface ChatSessionTransport {
   createConversation(botId: string, workspaceId?: string): Promise<string>;

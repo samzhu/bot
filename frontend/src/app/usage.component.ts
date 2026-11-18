@@ -5,14 +5,15 @@ import { CostExplanationComponent } from './cost-explanation.component';
 import { UsageReportsComponent } from './usage-reports.component';
 import { CostRevisionComponent } from './cost-revision.component';
 import { MonthlyBudgetComponent } from './monthly-budget.component';
+import { WeeklyBudgetComponent } from './weekly-budget.component';
 
 @Component({
-  selector: 'app-usage', standalone: true, imports: [UsageOverviewComponent, CostExplanationComponent, UsageReportsComponent, CostRevisionComponent, MonthlyBudgetComponent],
+  selector: 'app-usage', standalone: true, imports: [UsageOverviewComponent, CostExplanationComponent, UsageReportsComponent, CostRevisionComponent, MonthlyBudgetComponent, WeeklyBudgetComponent],
   template: `
     <section class="usage" role="region" tabindex="0" aria-label="個人用量內容，可垂直捲動">
       <button type="button" (click)="back.emit()">返回對話</button>
       <h1>個人用量</h1>
-      <nav aria-label="用量頁面" class="overview-nav">
+      <nav aria-label="用量頁面" class="usage-nav overview-nav">
         <button type="button" [attr.aria-pressed]="activeTab()==='overview'" (click)="activeTab.set('overview')">概況</button>
         <button type="button" [attr.aria-pressed]="activeTab()==='attempts'" (click)="showAttempts()">逐次用量</button>
         @if(workspaceId){<button type="button" [attr.aria-pressed]="activeTab()==='budget'" (click)="activeTab.set('budget')">工作區月預算</button>}
@@ -27,8 +28,10 @@ import { MonthlyBudgetComponent } from './monthly-budget.component';
         <app-usage-reports [workspaceId]="workspaceId" [manager]="manager" />
       } @else if(activeTab()==='budget' && workspaceId) {
         <app-monthly-budget [workspaceId]="workspaceId" [manager]="manager" (reviewCosts)="openCostRevisions($event)" />
+      } @else if(activeTab()==='weekly' && workspaceId) {
+        <app-weekly-budget [workspaceId]="workspaceId" [manager]="manager" (reviewCosts)="openCostRevisions($event)" />
       } @else if(activeTab()==='revisions' && manager) {
-        <app-cost-revision [workspaceId]="workspaceId" [manager]="manager" [initialSimulation]="revisionSimulation()" />
+        <app-cost-revision [workspaceId]="workspaceId" [manager]="manager" />
       } @else {
       @if (store.loading()) { <p role="status">載入用量中…</p> }
       @if (store.error()) { <p role="alert">{{store.error()}} <button type="button" (click)="store.retry()">重試</button></p> }
@@ -77,15 +80,14 @@ import { MonthlyBudgetComponent } from './monthly-budget.component';
       }
     </section>
   `,
-  styles: [`:host{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;min-width:0;overflow:hidden}.usage{flex:1 1 auto;min-height:0;min-width:0;padding:1rem;overflow:auto}.table-scroll{overflow:auto;max-inline-size:100%;container-type:inline-size}table{border-collapse:separate;border-spacing:0}th,td{padding:.5rem;text-align:start;vertical-align:top;white-space:nowrap}thead th{position:sticky;inset-block-start:0;background:Canvas}tbody th{position:sticky;inset-inline-start:0;background:Canvas}@container (max-width:600px){tbody th{position:static}}small{display:block;white-space:normal}pre{white-space:pre-wrap;overflow-wrap:anywhere}.overview-nav{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem}.overview-nav .more{position:relative}.overview-nav summary{cursor:pointer}.overview-nav .more[open]{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}`]
+  styles: [`:host{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;min-width:0;overflow:hidden}.usage{flex:1 1 auto;min-height:0;min-width:0;padding:1rem;overflow:auto}.usage-nav{display:flex;flex:none;gap:.5rem;overflow-x:auto;white-space:nowrap;max-inline-size:100%}.usage-nav button{flex:none}.table-scroll{overflow:auto;max-inline-size:100%;container-type:inline-size}table{border-collapse:separate;border-spacing:0}th,td{padding:.5rem;text-align:start;vertical-align:top;white-space:nowrap}thead th{position:sticky;inset-block-start:0;background:Canvas}tbody th{position:sticky;inset-inline-start:0;background:Canvas}@container (max-width:600px){tbody th{position:static}}small{display:block;white-space:normal}pre{white-space:pre-wrap;overflow-wrap:anywhere}.overview-nav{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem}.overview-nav .more{position:relative}.overview-nav summary{cursor:pointer}.overview-nav .more[open]{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}`]
 })
 export class UsageComponent implements OnChanges, OnDestroy {
   @Input() workspaceId: string | null = null;
   @Input() manager = false;
-  readonly activeTab=signal<'overview'|'attempts'|'reports'|'revisions'|'budget'>('overview');
-  readonly revisionSimulation=signal(false);
+  readonly activeTab=signal<'overview'|'attempts'|'reports'|'revisions'|'budget'|'weekly'>('overview');
   showAttempts():void { this.activeTab.set('attempts'); void this.store.retry(); }
-  openCostRevisions(simulation:boolean):void { this.revisionSimulation.set(simulation); this.activeTab.set('revisions'); }
+  openCostRevisions(_simulation:boolean):void { this.activeTab.set('revisions'); }
   readonly back = output<void>(); readonly store = new UsageStore();
   ngOnChanges(): void { void this.store.setWorkspace(this.workspaceId); }
   ngOnDestroy(): void { void this.store.setWorkspace(null); }
