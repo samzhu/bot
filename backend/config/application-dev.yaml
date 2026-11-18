@@ -1,0 +1,8 @@
+logging:
+  level:
+    io.github.samzhu.bot: INFO
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
