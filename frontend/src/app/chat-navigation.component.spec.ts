@@ -284,9 +284,12 @@ describe('ChatNavigationComponent', () => {
     fixture.componentRef.setInput('workspaceId', 'w1');
     fixture.detectChanges(); await settle(fixture);
     const root = fixture.nativeElement as HTMLElement;
+    expect(root.querySelector('.workspace-label')).toBeNull();
+    expect(root.querySelector('button[aria-label="新對話"]')).not.toBeNull();
+    fixture.componentRef.setInput('workspacePanelOpen', true); fixture.detectChanges();
     expect(root.querySelector('.workspace-label')?.textContent).toContain('目前工作區：Personal');
     expect(root.querySelector('select#workspace-select')).toBeNull();
     expect(root.querySelector('button[aria-label="搜尋對話"]')).toBeNull();
-    expect(root.querySelector('button[aria-label="新對話"]')).not.toBeNull();
+    expect(root.querySelector('button[aria-label="新對話"]')).toBeNull();
   });
 });

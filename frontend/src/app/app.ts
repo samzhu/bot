@@ -65,6 +65,7 @@ export class App implements OnInit {
   readonly navigation = viewChild(ChatNavigationComponent);
   readonly navigationLayout = signal<ChatSidenavMode>('expanded');
   readonly contextOpen = signal(true);
+  readonly workspacePanelOpen = signal(false);
   readonly peekOpen = signal(false);
   peekTrigger: HTMLElement | null = null;
   pinPeek(): void {
@@ -78,6 +79,7 @@ export class App implements OnInit {
   }
   closePeek(restoreFocus = false): void {
     const active = document.activeElement;
+    if (this.peekOpen() && this.workspacePanelOpen()) this.workspacePanelOpen.set(false);
     this.peekOpen.set(false);
     if (restoreFocus) setTimeout(() => {
       if (document.activeElement === active || document.activeElement === document.body) this.peekTrigger?.focus();
@@ -95,7 +97,7 @@ export class App implements OnInit {
     const active = focused === document.body ? this.lastShellFocus : focused;
     const wasModalHost = active?.matches('[role="dialog"][aria-label="側欄導覽"]') ?? false;
     this.navigationLayout.set(mode);
-    if (previous !== mode) this.closePeek();
+    if (previous !== mode) { this.workspacePanelOpen.set(false); this.closePeek(); }
     if (previous === mode || !active || (!this.lastShellFocus && focused === document.body)) return;
     requestAnimationFrame(() => {
       if (this.navigationLayout() !== mode || (document.activeElement !== active && document.activeElement !== document.body)) return;
@@ -136,12 +138,48 @@ export class App implements OnInit {
       this.contextOpen.update(open => !open);
     }
   }
+  cancelWorkspacePanel(restoreFocus = false): void {
+    const active = document.activeElement;
+    this.workspacePanelOpen.set(false); this.closePeek();
+    if (restoreFocus) setTimeout(() => {
+      if (document.activeElement === active || document.activeElement === document.body) {
+        document.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="工作區"]')?.focus();
+      }
+    });
+  }
+  toggleWorkspacePanel(trigger: HTMLElement): void {
+    if (this.workspacePanelOpen()) {
+      this.workspacePanelOpen.set(false);
+      this.closePeek();
+      if (this.navigationLayout() === 'drawer') this.navigation()?.setNavigationOpen(false);
+      return;
+    }
+    this.workspacePanelOpen.set(true);
+    if (this.navigationLayout() === 'drawer') this.navigation()?.openNavigation(trigger);
+    else if (!this.contextOpen()) { this.peekTrigger = trigger; this.peekOpen.set(true); }
+  }
+  chooseWorkspace(id: string): void {
+    if (id === this.workspaces.selectedId()) {
+      this.cancelWorkspacePanel(true);
+      if (this.navigationLayout() === 'drawer') this.navigation()?.setNavigationOpen(false);
+      return;
+    }
+    if (!this.workspaces.workspaces().some(item => item.id === id)) return;
+    const active = document.activeElement;
+    this.workspacePanelOpen.set(false); this.closePeek(); this.navigation()?.closeForWorkspaceSelection();
+    void this.selectWorkspace(id);
+    setTimeout(() => {
+      if (document.activeElement === active || document.activeElement === document.body) {
+        document.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="工作區"]')?.focus();
+      }
+    });
+  }
   recoverWorkspace(): void {
-    this.currentView.set('chat');
-    if (this.navigationLayout() === 'drawer') this.navigation()?.openNavigation();
-    else { this.contextOpen.set(true); this.closePeek(); }
+    const folder = document.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="工作區"]');
+    if (folder && !this.workspacePanelOpen()) this.toggleWorkspacePanel(folder);
   }
   selectFeature(view: 'chat' | 'bots' | 'usage', event: Event): void {
+    this.workspacePanelOpen.set(false);
     if (view === 'usage') this.closePeek();
     if (view !== 'usage') {
       if (this.navigationLayout() === 'drawer') this.navigation()?.openNavigation(event.currentTarget as HTMLElement);
@@ -520,7 +558,9 @@ export class App implements OnInit {
     await this.loadBots();
     try { await this.loadConversations(); }
     catch { if (this.workspaces.selectedId() === id) this.navigation()?.showConversationLoadError(); return; }
+    const wasUsage = this.currentView() === 'usage';
     await this.newConversation();
+    if (wasUsage) this.currentView.set('usage');
   }
 
   async selectConversation(id: string): Promise<void> {

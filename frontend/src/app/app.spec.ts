@@ -156,7 +156,10 @@ describe('App ThreadPlane public behavior', () => {
       return Response.json({data:{}});
     }));
     const {fixture, root} = await setup();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
     Array.from(root.querySelectorAll<HTMLButtonElement>('#navigation-context button')).find(button => button.textContent?.trim() === '重試')!.click();
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.textContent).toContain('Personal'); });
+    root.querySelector<HTMLButtonElement>('button[aria-label="關閉工作區選取"]')!.click(); fixture.detectChanges();
     await vi.waitFor(() => { fixture.detectChanges(); expect(root.textContent).toContain('對話列表載入失敗'); });
     listFails = false;
     Array.from(root.querySelectorAll<HTMLButtonElement>('#navigation-context button')).find(button => button.textContent?.includes('重試載入'))!.click();
@@ -175,6 +178,7 @@ describe('App ThreadPlane public behavior', () => {
       return Response.json({data:{}});
     }));
     const {fixture, root} = await setup();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
     const select = root.querySelector<HTMLSelectElement>('#workspace-select')!;
     select.value = 'other'; select.dispatchEvent(new Event('change')); fixture.detectChanges();
     await vi.waitFor(() => { fixture.detectChanges(); expect(root.textContent).toContain('對話列表載入失敗'); });
@@ -250,7 +254,8 @@ describe('App ThreadPlane public behavior', () => {
     await vi.waitFor(() => expect(root.querySelector('button[aria-label="前往工作區設定"]')).not.toBeNull());
     expect(root.querySelector('app-usage')).not.toBeNull();
     root.querySelector<HTMLButtonElement>('button[aria-label="前往工作區設定"]')!.click(); fixture.detectChanges();
-    expect(root.querySelector('app-usage')).toBeNull();
+    expect(root.querySelector('app-usage')).not.toBeNull();
+    expect(root.querySelector('[aria-label="工作區選取"]')).not.toBeNull();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
   });
   it('does not search without a workspace', async () => {
@@ -279,6 +284,352 @@ describe('App ThreadPlane public behavior', () => {
     const {root} = await setup();
     expect(root.querySelectorAll('button[aria-label="搜尋對話"]')).toHaveLength(1);
     expect(root.querySelector('nav[aria-label="主要功能"] button[aria-label="搜尋對話"]')).not.toBeNull();
+  });
+  it('keeps usage visible when Workspace loading is retried successfully', async () => {
+    let workspaceAttempts = 0;
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}')); requests.push(body);
+      if (body.query?.includes('Workspaces')) {
+        if (++workspaceAttempts === 1) throw new Error('offline');
+        return Response.json({data:{workspaces:[{id:'personal',name:'Personal',role:'MANAGER',personal:true}]}});
+      }
+      if (body.query?.includes('defaultLocalBot')) return Response.json({data:{defaultLocalBot:local,bots:[]}});
+      if (body.query?.includes('conversations(')) return Response.json({data:{conversations:[]}});
+      return Response.json({data:{}});
+    }));
+    const {fixture,root} = await setup();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="個人用量"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
+    Array.from(root.querySelectorAll<HTMLButtonElement>('[aria-label="工作區選取"] button')).find(button => button.textContent?.trim() === '重試')!.click();
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.querySelector('[aria-label="工作區選取"]')?.textContent).toContain('Personal'); });
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.querySelector('app-usage')).not.toBeNull(); });
+  });
+  it('shows Workspace loading then the empty state in the chooser', async () => {
+    const pending = deferred<Response>();
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.query?.includes('Workspaces')) return pending.promise;
+      return Response.json({data:{}});
+    }));
+    const fixture = TestBed.createComponent(App); fixture.detectChanges(); const root = fixture.nativeElement as HTMLElement;
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
+    expect(root.querySelector('[aria-label="工作區選取"]')?.textContent).toContain('載入工作區中');
+    pending.resolve(Response.json({data:{workspaces:[]}}));
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.querySelector('[aria-label="工作區選取"]')?.textContent).toContain('沒有可存取'); });
+  });
+  it('keeps Workspace expanded semantics accurate across desktop to mobile resize', async () => {
+    let change!: () => void; const media = {matches:false, addEventListener:(_:string, fn:()=>void)=>{change=fn;}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}};
+    vi.stubGlobal('matchMedia', () => media);
+    const {fixture,root} = await setup(); const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
+    folder.click(); fixture.detectChanges(); media.matches = true; change(); fixture.detectChanges();
+    expect(folder.getAttribute('aria-expanded')).toBe('false');
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
+    folder.click(); fixture.detectChanges(); expect(root.querySelector('[role="dialog"][aria-label="側欄導覽"]')).not.toBeNull();
+  });
+  it('cancels a Workspace peek when clicking outside', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture,root} = await setup(); document.body.appendChild(root);
+    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
+    folder.click(); fixture.detectChanges(); root.querySelector<HTMLElement>('main')!.click(); fixture.detectChanges();
+    expect(folder.getAttribute('aria-expanded')).toBe('false');
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true); root.remove();
+  });
+  it('cancels a Workspace peek with Escape and can reopen it', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture,root} = await setup();
+    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
+    folder.click(); fixture.detectChanges();
+    window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true})); fixture.detectChanges();
+    expect(folder.getAttribute('aria-expanded')).toBe('false');
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
+    folder.click(); fixture.detectChanges(); expect(root.querySelector('[aria-label="工作區選取"]')).not.toBeNull();
+  });
+  it('opens and cancels Workspace without replacing Bot management or making requests', async () => {
+    const {fixture,root} = await setup();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="Bot"]')!.click(); fixture.detectChanges();
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.querySelector('[data-testid="bot-item-a"]')).not.toBeNull(); });
+    const bot = root.querySelector('app-bot-manager'); const surface = root.querySelector('app-chat-surface');
+    const before = requests.length; const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
+    folder.click(); fixture.detectChanges(); folder.click(); fixture.detectChanges();
+    expect(root.querySelector('app-bot-manager')).toBe(bot); expect(root.querySelector('app-chat-surface')).toBe(surface);
+    expect(requests).toHaveLength(before);
+  });
+  it('does not steal newer focus after choosing a Workspace on mobile', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.query?.includes('Workspaces')) return Response.json({data:{workspaces:[{id:'personal',name:'Personal',role:'MANAGER',personal:true},{id:'other',name:'Other',role:'MEMBER',personal:false}]}});
+      if (body.query?.includes('defaultLocalBot')) return Response.json({data:{defaultLocalBot:local,bots:[]}});
+      if (body.query?.includes('conversations(')) return Response.json({data:{conversations:[]}});
+      return Response.json({data:{}});
+    }));
+    const {fixture,root} = await setup(); document.body.appendChild(root);
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
+    const select = root.querySelector<HTMLSelectElement>('#workspace-select')!;
+    select.focus(); select.value = 'other'; select.dispatchEvent(new Event('change')); fixture.detectChanges();
+    const target = root.querySelector<HTMLButtonElement>('nav button[aria-label="Bot"]')!; target.focus();
+    await new Promise(resolve => setTimeout(resolve, 20)); expect(document.activeElement).toBe(target); root.remove();
+  });
+  it('does not steal focus moved after choosing a Workspace', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.query?.includes('Workspaces')) return Response.json({data:{workspaces:[{id:'personal',name:'Personal',role:'MANAGER',personal:true},{id:'other',name:'Other',role:'MEMBER',personal:false}]}});
+      if (body.query?.includes('defaultLocalBot')) return Response.json({data:{defaultLocalBot:local,bots:[]}});
+      if (body.query?.includes('conversations(')) return Response.json({data:{conversations:[]}});
+      return Response.json({data:{}});
+    }));
+    const {fixture,root} = await setup(); document.body.appendChild(root);
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
+    const select = root.querySelector<HTMLSelectElement>('#workspace-select')!;
+    select.focus(); select.value = 'other'; select.dispatchEvent(new Event('change')); fixture.detectChanges();
+    const target = root.querySelector<HTMLButtonElement>('nav button[aria-label="Bot"]')!; target.focus();
+    await new Promise(resolve => setTimeout(resolve, 20)); expect(document.activeElement).toBe(target); root.remove();
+  });
+  it('closes the mobile chooser after selecting a different Workspace and returns focus to folder', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}')); requests.push(body);
+      if (body.query?.includes('Workspaces')) return Response.json({data:{workspaces:[{id:'personal',name:'Personal',role:'MANAGER',personal:true},{id:'other',name:'Other',role:'MEMBER',personal:false}]}});
+      if (body.query?.includes('defaultLocalBot')) return Response.json({data:{defaultLocalBot:local,bots:[]}});
+      if (body.query?.includes('conversations(')) return Response.json({data:{conversations:[]}});
+      return Response.json({data:{}});
+    }));
+    const {fixture,root} = await setup(); document.body.appendChild(root);
+    const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
+    folder.click(); fixture.detectChanges();
+    const select = root.querySelector<HTMLSelectElement>('#workspace-select')!;
+    select.focus(); select.value = 'other'; select.dispatchEvent(new Event('change')); fixture.detectChanges();
+    expect(root.querySelector('[role="dialog"][aria-label="側欄導覽"]')).toBeNull();
+    expect(root.querySelector('nav')!.hasAttribute('inert')).toBe(false);
+    expect(root.querySelector('main')!.hasAttribute('inert')).toBe(false);
+    await vi.waitFor(() => expect(document.activeElement).toBe(folder)); root.remove();
+  });
+  it('switches from the Workspace panel to the selected feature context', async () => {
+    const {fixture,root} = await setup();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="Bot"]')!.click(); fixture.detectChanges();
+    expect(root.querySelector('[aria-label="工作區選取"]')).toBeNull();
+    expect(root.querySelector('[aria-label="Bot 清單"]')).not.toBeNull();
+    expect(root.querySelector('nav button[aria-label="工作區"]')!.getAttribute('aria-expanded')).toBe('false');
+  });
+  it('hands a mobile Workspace drawer to search and clears the chooser state', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture,root} = await setup();
+    const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
+    folder.click(); fixture.detectChanges();
+    window.dispatchEvent(new KeyboardEvent('keydown',{key:'k',ctrlKey:true,bubbles:true,cancelable:true})); fixture.detectChanges();
+    expect(root.querySelector('chat-history-search-palette [role="dialog"]')).not.toBeNull();
+    expect(root.querySelector('[role="dialog"][aria-label="側欄導覽"]')).toBeNull();
+    expect(folder.getAttribute('aria-expanded')).toBe('false');
+  });
+  it('closes the Workspace chooser using mobile navigation close', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture,root} = await setup();
+    const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
+    folder.click(); fixture.detectChanges();
+    expect(root.querySelector('[role="dialog"][aria-label="側欄導覽"]')).not.toBeNull();
+    root.querySelector<HTMLButtonElement>('button[aria-label="關閉導覽"]')!.click(); fixture.detectChanges();
+    expect(root.querySelector('[role="dialog"][aria-label="側欄導覽"]')).toBeNull();
+    expect(folder.getAttribute('aria-expanded')).toBe('false');
+    folder.click(); fixture.detectChanges();
+    expect(root.querySelector('[aria-label="工作區選取"]')).not.toBeNull();
+  });
+  it('does not display a delayed search result after changing Workspace through the chooser', async () => {
+    const pending = deferred<Response>();
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}')); requests.push(body);
+      if (body.query?.includes('Workspaces')) return Response.json({data:{workspaces:[{id:'personal',name:'Personal',role:'MANAGER',personal:true},{id:'other',name:'Other',role:'MEMBER',personal:false}]}});
+      if (body.query?.includes('defaultLocalBot')) return Response.json({data:{defaultLocalBot:local,bots:[]}});
+      if (body.query?.includes('SearchConversations')) return pending.promise;
+      if (body.query?.includes('conversations(')) return Response.json({data:{conversations:[]}});
+      return Response.json({data:{}});
+    }));
+    const {fixture,root} = await setup();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="搜尋對話"]')!.click(); fixture.detectChanges();
+    const field = root.querySelector<HTMLInputElement>('chat-history-search-palette input')!;
+    field.value = 'old'; field.dispatchEvent(new Event('input',{bubbles:true}));
+    await vi.waitFor(() => expect(requests.some(request => request.query?.includes('SearchConversations'))).toBe(true));
+    field.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true})); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
+    const select = root.querySelector<HTMLSelectElement>('#workspace-select')!;
+    select.value = 'other'; select.dispatchEvent(new Event('change')); fixture.detectChanges();
+    pending.resolve(Response.json({data:{conversations:[{id:'old-id',title:'old result'}]}}));
+    await new Promise(resolve => setTimeout(resolve, 30)); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="搜尋對話"]')!.click(); fixture.detectChanges();
+    expect(root.textContent).not.toContain('old result');
+    expect(root.querySelector<HTMLInputElement>('chat-history-search-palette input')!.value).toBe('');
+  });
+  it('restores the pinned preference when the current Workspace is reselected', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}')); requests.push(body);
+      if (body.query?.includes('Workspaces')) return Response.json({data:{workspaces:[{id:'personal',name:'Personal',role:'MANAGER',personal:true},{id:'other',name:'Other',role:'MEMBER',personal:false}]}});
+      if (body.query?.includes('defaultLocalBot')) return Response.json({data:{defaultLocalBot:local,bots:[]}});
+      if (body.query?.includes('conversations(')) return Response.json({data:{conversations:[]}});
+      return Response.json({data:{}});
+    }));
+    const {fixture,root} = await setup();
+    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('#navigation-context button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    const before = requests.length; const select = root.querySelector<HTMLSelectElement>('#workspace-select')!;
+    select.value = 'personal'; select.dispatchEvent(new Event('change')); fixture.detectChanges();
+    expect(root.querySelector('[aria-label="工作區選取"]')).toBeNull();
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
+    expect(requests).toHaveLength(before);
+  });
+  it('keeps the Workspace chooser while pinning a peek and restores the new preference', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture,root} = await setup();
+    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('#navigation-context button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    expect(root.querySelector('[aria-label="工作區選取"]')).not.toBeNull();
+    expect(root.querySelector('app-chat-navigation')!.classList.contains('peek')).toBe(false);
+    root.querySelector<HTMLButtonElement>('button[aria-label="關閉工作區選取"]')!.click(); fixture.detectChanges();
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
+    expect(root.querySelector('[aria-label="近期對話"]')).not.toBeNull();
+  });
+  it('returns focus to the folder after cancelling the docked Workspace chooser', async () => {
+    const {fixture,root} = await setup(); document.body.appendChild(root);
+    const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
+    folder.click(); fixture.detectChanges();
+    const close = root.querySelector<HTMLButtonElement>('button[aria-label="關閉工作區選取"]')!;
+    close.focus(); close.click(); fixture.detectChanges();
+    await vi.waitFor(() => expect(document.activeElement).toBe(folder)); root.remove();
+  });
+  it('can cancel a docked Workspace chooser with a named close control', async () => {
+    const {fixture,root} = await setup();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
+    const close = root.querySelector<HTMLButtonElement>('#navigation-context button[aria-label="關閉工作區選取"]');
+    expect(close).not.toBeNull(); close!.click(); fixture.detectChanges();
+    expect(root.querySelector('[aria-label="工作區選取"]')).toBeNull();
+    expect(root.querySelector('[aria-label="近期對話"]')).not.toBeNull();
+  });
+  it('keeps usage as the main view after choosing another Workspace', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}')); requests.push(body);
+      if (body.query?.includes('Workspaces')) return Response.json({data:{workspaces:[{id:'personal',name:'Personal',role:'MANAGER',personal:true},{id:'other',name:'Other',role:'MEMBER',personal:false}]}});
+      if (body.query?.includes('defaultLocalBot')) return Response.json({data:{defaultLocalBot:local,bots:[]}});
+      if (body.query?.includes('conversations(')) return Response.json({data:{conversations:[]}});
+      return Response.json({data:{}});
+    }));
+    const {fixture,root} = await setup();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="個人用量"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
+    const select = root.querySelector<HTMLSelectElement>('#workspace-select')!;
+    select.value = 'other'; select.dispatchEvent(new Event('change')); fixture.detectChanges();
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.querySelector('app-usage')).not.toBeNull(); expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true); });
+    expect(requests.some(request => request.variables?.workspaceId === 'other')).toBe(true);
+  });
+  it('keeps the chooser open for an invalid Workspace selection', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}')); requests.push(body);
+      if (body.query?.includes('Workspaces')) return Response.json({data:{workspaces:[{id:'personal',name:'Personal',role:'MANAGER',personal:true},{id:'other',name:'Other',role:'MEMBER',personal:false}]}});
+      if (body.query?.includes('defaultLocalBot')) return Response.json({data:{defaultLocalBot:local,bots:[]}});
+      if (body.query?.includes('conversations(')) return Response.json({data:{conversations:[]}});
+      return Response.json({data:{}});
+    }));
+    const {fixture,root} = await setup();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
+    const before = requests.length; const select = root.querySelector<HTMLSelectElement>('#workspace-select')!;
+    const invalid = document.createElement('option'); invalid.value = 'invalid'; select.appendChild(invalid);
+    select.value = 'invalid'; select.dispatchEvent(new Event('change')); fixture.detectChanges();
+    expect(root.querySelector('[aria-label="工作區選取"]')).not.toBeNull();
+    expect(requests).toHaveLength(before); expect(root.textContent).toContain('Personal');
+  });
+  it('selects another Workspace and closes the chooser with the new scope', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}')); requests.push(body);
+      if (body.query?.includes('Workspaces')) return Response.json({data:{workspaces:[{id:'personal',name:'Personal',role:'MANAGER',personal:true},{id:'other',name:'Other',role:'MEMBER',personal:false}]}});
+      if (body.query?.includes('defaultLocalBot')) return Response.json({data:{defaultLocalBot:local,bots:[]}});
+      if (body.query?.includes('conversations(')) return Response.json({data:{conversations:[]}});
+      return Response.json({data:{}});
+    }));
+    const {fixture,root} = await setup();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
+    const select = root.querySelector<HTMLSelectElement>('#workspace-select')!;
+    select.value = 'other'; select.dispatchEvent(new Event('change')); fixture.detectChanges();
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.querySelector('[aria-label="工作區選取"]')).toBeNull(); });
+    expect(root.textContent).toContain('Other');
+    await vi.waitFor(() => expect(requests.some(request => request.variables?.workspaceId === 'other')).toBe(true));
+  });
+  it('allows a user to confirm the current Workspace without resetting chat', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}')); requests.push(body);
+      if (body.query?.includes('Workspaces')) return Response.json({data:{workspaces:[{id:'personal',name:'Personal',role:'MANAGER',personal:true},{id:'other',name:'Other',role:'MEMBER',personal:false}]}});
+      if (body.query?.includes('defaultLocalBot')) return Response.json({data:{defaultLocalBot:local,bots:[]}});
+      if (body.query?.includes('conversations(')) return Response.json({data:{conversations:[]}});
+      return Response.json({data:{}});
+    }));
+    const {fixture,root} = await setup(); document.body.appendChild(root); const raw = input(root, ' raw '); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
+    const before = requests.length;
+    const confirm = Array.from(root.querySelectorAll<HTMLButtonElement>('[aria-label="工作區選取"] button')).find(button => button.textContent?.includes('目前工作區'));
+    expect(confirm).toBeTruthy(); confirm!.focus(); confirm!.click(); fixture.detectChanges();
+    expect(root.querySelector('[aria-label="工作區選取"]')).toBeNull(); expect(raw.value).toBe(' raw '); expect(requests).toHaveLength(before);
+    await vi.waitFor(() => expect(document.activeElement).toBe(root.querySelector('nav button[aria-label="工作區"]'))); root.remove();
+  });
+  it('closes the chooser without resetting the current Workspace when reselected', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}')); requests.push(body);
+      if (body.query?.includes('Workspaces')) return Response.json({data:{workspaces:[{id:'personal',name:'Personal',role:'MANAGER',personal:true},{id:'other',name:'Other',role:'MEMBER',personal:false}]}});
+      if (body.query?.includes('defaultLocalBot')) return Response.json({data:{defaultLocalBot:local,bots:[]}});
+      if (body.query?.includes('conversations(')) return Response.json({data:{conversations:[]}});
+      return Response.json({data:{}});
+    }));
+    const {fixture,root} = await setup(); const raw = input(root, ' raw '); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
+    const before = requests.length; const select = root.querySelector<HTMLSelectElement>('#workspace-select')!;
+    select.value = 'personal'; select.dispatchEvent(new Event('change')); fixture.detectChanges();
+    expect(root.querySelector('[aria-label="工作區選取"]')).toBeNull();
+    expect(raw.value).toBe(' raw '); expect(requests).toHaveLength(before);
+  });
+  it('opens and cancels Workspace from usage without replacing usage', async () => {
+    const {fixture,root} = await setup();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="個人用量"]')!.click(); fixture.detectChanges();
+    const usage = root.querySelector('app-usage'); const before = requests.length;
+    const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
+    folder.click(); fixture.detectChanges();
+    expect(root.querySelector('[aria-label="工作區選取"]')).not.toBeNull();
+    expect(root.querySelector('app-usage')).toBe(usage);
+    folder.click(); fixture.detectChanges();
+    expect(root.querySelector('app-usage')).toBe(usage);
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
+    expect(requests).toHaveLength(before);
+  });
+  it('opens Workspace as a peek from collapsed navigation and restores it on cancel', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture,root} = await setup();
+    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
+    folder.click(); fixture.detectChanges();
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
+    expect(root.querySelector('app-chat-navigation')!.classList.contains('peek')).toBe(true);
+    folder.click(); fixture.detectChanges();
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
+  });
+  it('opens and cancels the Workspace panel without changing the chat draft', async () => {
+    const {fixture, root} = await setup();
+    const raw = '  raw\n draft  '; const textarea = input(root, raw); fixture.detectChanges();
+    const surface = root.querySelector('app-chat-surface'); const before = requests.length;
+    const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
+    folder.click(); fixture.detectChanges();
+    expect(folder.getAttribute('aria-expanded')).toBe('true');
+    expect(root.querySelector('[aria-label="工作區選取"]')).not.toBeNull();
+    expect(root.querySelector('app-chat-surface')).toBe(surface); expect(textarea.value).toBe(raw);
+    folder.click(); fixture.detectChanges();
+    expect(folder.getAttribute('aria-expanded')).toBe('false');
+    expect(root.querySelector('[aria-label="工作區選取"]')).toBeNull();
+    expect(root.querySelector('app-chat-surface')).toBe(surface); expect(textarea.value).toBe(raw);
+    expect(requests).toHaveLength(before);
+  });
+  it('offers Workspace as the first feature rail control', async () => {
+    const {root} = await setup();
+    const buttons = root.querySelectorAll<HTMLButtonElement>('nav[aria-label="主要功能"] > button');
+    expect(buttons[0]?.getAttribute('aria-label')).toBe('工作區');
+    expect(buttons[0]?.getAttribute('aria-expanded')).toBe('false');
   });
   it('opens rail search without changing the workspace or raw draft', async () => {
     const {fixture, root} = await setup();
@@ -737,8 +1088,9 @@ describe('App ThreadPlane public behavior', () => {
     field.focus(); field.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true})); fixture.detectChanges();
     await vi.waitFor(() => expect(document.activeElement).toBe(search)); root.remove();
   });
-  it('shows the only workspace by name in the sidebar without a redundant selector', async () => {
-    const {root} = await setup();
+  it('shows the only workspace by name in the chooser without a redundant selector', async () => {
+    const {fixture,root} = await setup();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
     const sidebar = root.querySelector<HTMLElement>('#navigation-context')!;
     expect(sidebar.textContent).toContain('Personal');
     expect(sidebar.querySelector('select#workspace-select')).toBeNull();
@@ -751,7 +1103,8 @@ describe('App ThreadPlane public behavior', () => {
       if (body.query?.includes('conversations(')) return Response.json({data:{conversations:[]}});
       return Response.json({data:{}});
     }));
-    const {root} = await setup();
+    const {fixture,root} = await setup();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
     const select = root.querySelector<HTMLSelectElement>('#workspace-select');
     expect(select).not.toBeNull();
     expect(Array.from(select!.options).map(option => option.textContent)).toEqual(['Personal', 'Other']);

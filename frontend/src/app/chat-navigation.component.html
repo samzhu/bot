@@ -1,11 +1,13 @@
 <chat-sidenav-scrim [open]="layoutMode() === 'drawer' && navigationOpen()" (dismiss)="setNavigationOpen(false)" />
 <div #drawer class="drawer-focus" tabindex="-1" (keydown.escape)="peek() ? peekClosed.emit() : navigationOpen() && setNavigationOpen(false)" [attr.role]="layoutMode() === 'drawer' && navigationOpen() ? 'dialog' : null" [attr.aria-modal]="layoutMode() === 'drawer' && navigationOpen() ? 'true' : null" [attr.aria-label]="layoutMode() === 'drawer' ? '側欄導覽' : null" [attr.inert]="search.open() || (layoutMode() === 'drawer' && !navigationOpen()) ? '' : null" [cdkTrapFocus]="layoutMode() === 'drawer' && navigationOpen() && !search.open()">
 <div id="navigation-context" class="context-panel" [hidden]="!contextOpen() || (layoutMode() === 'drawer' && !navigationOpen())" [attr.inert]="!contextOpen() || (layoutMode() === 'drawer' && !navigationOpen()) ? '' : null">
-  <div class="navigation-title"><h2>{{mode() === 'bots' ? 'Bot' : '對話'}}</h2>
+  <div class="navigation-title"><h2>{{workspacePanelOpen() ? '工作區' : mode() === 'bots' ? 'Bot' : '對話'}}</h2>
+    @if (workspacePanelOpen() && layoutMode() !== 'drawer') { <button type="button" aria-label="關閉工作區選取" (click)="workspaceCancelled.emit()">關閉</button> }
     @if (layoutMode() !== 'drawer') { <button type="button" aria-label="切換側欄" title="切換側欄" aria-controls="navigation-context" [attr.aria-expanded]="contextOpen()" (click)="contextToggle.emit($event)">切換側欄</button> }
     @if (layoutMode() === 'drawer' || peek()) { <button type="button" aria-label="關閉導覽" (click)="peek() ? peekClosed.emit() : setNavigationOpen(false)">✕</button> }
   </div>
-  <div class="primary-panel">
+  @if (workspacePanelOpen()) {
+  <section class="primary-panel" aria-label="工作區選取">
   @if (!workspaceLoading() && !workspaceError() && workspaces().length === 1) {
     <span class="workspace-label" tabindex="0" [title]="workspaceName()"><span class="visually-hidden">目前工作區：</span>{{ workspaceName() }}</span>
   } @else if (workspaces().length > 1) {
@@ -13,11 +15,15 @@
     <select id="workspace-select" [value]="workspaceId() ?? ''" [disabled]="workspaceLoading()" (change)="workspaceSelected.emit($any($event.target).value)">
       @for (workspace of workspaces(); track workspace.id) { <option [value]="workspace.id">{{workspace.name}}</option> }
     </select>
+    <button type="button" (click)="workspaceSelected.emit(workspaceId()!)">使用目前工作區</button>
   }
   @if (workspaceLoading()) { <p role="status">載入工作區中…</p> }
   @if (workspaceError()) { <p role="alert">{{workspaceError()}} <button type="button" (click)="workspaceRetry.emit()">重試</button></p> }
   @else if (!workspaceLoading() && !workspaces().length) { <p>目前沒有可存取的工作區。</p> }
 
+  </section>
+  } @else {
+  <div class="primary-panel">
   @if (initializing()) { <p role="status">載入中…</p> }
   <button class="compact-action" type="button" aria-label="新對話" title="新對話" [disabled]="initializing()" (click)="newChat()"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v16M4 12h16"/></svg><span class="icon-hint" aria-hidden="true">新對話</span></button>
 
@@ -73,6 +79,7 @@
     </section>
   }
   </div>
+  }
 </div>
 </div>
 @if (search.error()) {

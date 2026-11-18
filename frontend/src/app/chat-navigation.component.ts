@@ -24,10 +24,13 @@ export class ChatNavigationComponent implements OnInit {
   readonly workspaceSelected = output<string>();
   readonly workspaceRetry = output<void>();
   readonly workspaceRecoveryRequested = output<void>();
+  readonly workspaceClosed = output<void>();
+  readonly workspaceCancelled = output<void>();
   setWorkspace(id: string | null): void { this.search.setWorkspace(id); this.conversationError.set(false); this.conversationLoading.set(false); }
   readonly activeConversationId = input<string | null>(null);
   readonly initializing = input(false);
   readonly contextOpen = input(true);
+  readonly workspacePanelOpen = input(false);
   readonly peek = input(false);
   readonly peekReturnTarget = input<HTMLElement | null>(null);
   readonly peekSearchStarted = output<void>();
@@ -130,6 +133,8 @@ export class ChatNavigationComponent implements OnInit {
 
   ngOnInit(): void { this.layoutModeChanged.emit(this.layoutMode()); }
 
+  closeForWorkspaceSelection(): void { this.navigationOpen.set(false); this.search.closeSearch(); }
+
   openNavigation(trigger?: HTMLElement): void {
     this.drawerTrigger = trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     this.navigationOpen.set(true);
@@ -138,12 +143,15 @@ export class ChatNavigationComponent implements OnInit {
   setLayoutMode(mode: ChatSidenavMode): void { this.layoutMode.set(mode); this.layoutModeChanged.emit(mode); }
   setNavigationOpen(open: boolean): void {
     this.navigationOpen.set(open);
-    if (!open) { this.search.closeSearch(); setTimeout(() => this.drawerTrigger?.focus()); }
+    if (!open) { if (this.workspacePanelOpen()) this.workspaceClosed.emit(); this.search.closeSearch(); setTimeout(() => this.drawerTrigger?.focus()); }
   }
   openSearch(trigger?: HTMLElement): void {
     this.searchTrigger = trigger ?? document.querySelector<HTMLElement>('nav[aria-label="主要功能"] button[aria-label="搜尋對話"]');
     // Transfer the modal boundary before the palette opens, without restoring drawer focus.
-    if (this.layoutMode() === 'drawer') this.navigationOpen.set(false);
+    if (this.layoutMode() === 'drawer') {
+      if (this.workspacePanelOpen()) this.workspaceClosed.emit();
+      this.navigationOpen.set(false);
+    }
     // The SDK palette uses a separate fixed layer; dismiss the peek before opening it.
     if (this.peek()) this.peekSearchStarted.emit();
     this.search.openSearch();
