@@ -394,14 +394,23 @@ describe('App ThreadPlane public behavior', () => {
     expect(root.querySelector('app-chat-navigation')!.classList.contains('peek')).toBe(false);
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
   });
-  it('offers only pin and close controls for a Workspace peek', async () => {
+  it('offers a named pin without a close control for a Workspace peek', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture,root} = await setup();
     root.querySelector<HTMLButtonElement>('button[aria-label="收合側欄"]')!.click(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
     expect(root.querySelector('button[aria-label="固定側欄"]')).not.toBeNull();
-    expect(root.querySelectorAll('button[aria-label="關閉側欄"]')).toHaveLength(1);
+    expect(root.querySelectorAll('button[aria-label="關閉側欄"]')).toHaveLength(0);
     expect(root.querySelector('button[aria-label="關閉工作區選取"]')).toBeNull();
+  });
+  it.each(['對話', 'Bot'])('offers only the named pin for the %s peek', async (name) => {
+    vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture,root} = await setup();
+    root.querySelector<HTMLButtonElement>('button[aria-label="收合側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>(`nav button[aria-label="${name}"]`)!.click(); fixture.detectChanges();
+    expect(root.querySelector('button[aria-label="固定側欄"]')).not.toBeNull();
+    expect(root.querySelector('button[aria-label="關閉側欄"]')).toBeNull();
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
   });
   it('cancels a Workspace peek when clicking outside', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
@@ -684,7 +693,7 @@ describe('App ThreadPlane public behavior', () => {
     folder.click(); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
     expect(root.querySelector('app-chat-navigation')!.classList.contains('peek')).toBe(true);
-    root.querySelector<HTMLButtonElement>('button[aria-label="關閉側欄"]')!.click(); fixture.detectChanges();
+    window.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', bubbles:true, cancelable:true})); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
   });
   it('opens and cancels the Workspace panel without changing the chat draft', async () => {
@@ -1204,19 +1213,19 @@ describe('App ThreadPlane public behavior', () => {
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
     root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!.click(); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
-    root.querySelector<HTMLButtonElement>('button[aria-label="關閉側欄"]')!.click(); fixture.detectChanges();
+    window.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', bubbles:true, cancelable:true})); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
     expect(root.querySelector('app-chat-surface')).toBe(surface);
     expect(root.querySelector<HTMLTextAreaElement>('chat-input textarea')!.value).toBe(raw);
     expect(requests).toHaveLength(before);
   });
-  it('closes the desktop peek with its close control and returns focus to the rail', async () => {
+  it('closes the desktop peek with Escape and returns focus to the rail', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup(); document.body.appendChild(root);
     root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     const rail = root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!;
     rail.focus(); rail.click(); fixture.detectChanges();
-    root.querySelector<HTMLButtonElement>('button[aria-label="關閉側欄"]')!.click(); fixture.detectChanges();
+    window.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', bubbles:true, cancelable:true})); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
     await vi.waitFor(() => expect(document.activeElement).toBe(rail));
     root.remove();
@@ -1307,7 +1316,7 @@ describe('App ThreadPlane public behavior', () => {
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
     root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!.click(); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
-    root.querySelector<HTMLButtonElement>('button[aria-label="關閉側欄"]')!.click(); fixture.detectChanges();
+    window.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', bubbles:true, cancelable:true})); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
   });
   it('clears a desktop peek across the mobile breakpoint and restores collapsed preference', async () => {
@@ -1348,8 +1357,8 @@ describe('App ThreadPlane public behavior', () => {
     const {fixture, root} = await setup(); document.body.appendChild(root);
     root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!.click(); fixture.detectChanges();
-    const close = root.querySelector<HTMLButtonElement>('button[aria-label="關閉側欄"]')!;
-    close.focus(); close.click(); fixture.detectChanges();
+    const pin = root.querySelector<HTMLButtonElement>('button[aria-label="固定側欄"]')!;
+    pin.focus(); window.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', bubbles:true, cancelable:true})); fixture.detectChanges();
     const textarea = root.querySelector<HTMLTextAreaElement>('chat-input textarea')!;
     textarea.focus(); await new Promise(resolve => setTimeout(resolve, 20));
     expect(document.activeElement).toBe(textarea); root.remove();

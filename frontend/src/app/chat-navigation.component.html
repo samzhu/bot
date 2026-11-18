@@ -12,7 +12,7 @@
         <span class="icon-hint" aria-hidden="true">{{peek() ? '固定側欄' : '收合側欄'}}</span>
       </button>
     }
-    @if (layoutMode() === 'drawer' || peek()) { <button type="button" [attr.aria-label]="peek() ? '關閉側欄' : '關閉導覽'" (click)="peek() ? peekClosed.emit() : setNavigationOpen(false)">✕<span class="icon-hint" aria-hidden="true">{{peek() ? '關閉側欄' : '關閉導覽'}}</span></button> }
+    @if (layoutMode() === 'drawer') { <button type="button" aria-label="關閉導覽" (click)="setNavigationOpen(false)">✕<span class="icon-hint" aria-hidden="true">關閉導覽</span></button> }
   </div>
   @if (workspacePanelOpen()) {
   <section class="primary-panel" aria-label="工作區選取">
