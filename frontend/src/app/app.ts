@@ -116,8 +116,10 @@ export class App implements OnInit {
   toggleContext(event: Event): void {
     if (this.peekOpen()) { this.pinPeek(); return; }
     if (this.contextOpen() && document.getElementById('navigation-context')?.contains(document.activeElement)) {
-      document.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-pressed="true"]')?.focus();
+      const selector = this.workspacePanelOpen() ? 'button[aria-label="工作區"]' : 'button[aria-pressed="true"]';
+      document.querySelector<HTMLButtonElement>(`nav[aria-label="主要功能"] ${selector}`)?.focus();
     }
+    if (this.contextOpen()) this.workspacePanelOpen.set(false);
     this.contextOpen.update(open => !open);
   }
   onShortcut(event: KeyboardEvent): void {
@@ -131,11 +133,7 @@ export class App implements OnInit {
     if (key === 'k') { event.preventDefault(); this.navigation()?.openSearch(); }
     else if (key === 'b' && this.navigationLayout() !== 'drawer' && this.currentView() !== 'usage') {
       event.preventDefault();
-      if (this.peekOpen()) { this.pinPeek(); return; }
-      if (this.contextOpen() && document.getElementById('navigation-context')?.contains(document.activeElement)) {
-        document.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-pressed="true"]')?.focus();
-      }
-      this.contextOpen.update(open => !open);
+      this.toggleContext(event);
     }
   }
   cancelWorkspacePanel(restoreFocus = false): void {
@@ -149,6 +147,7 @@ export class App implements OnInit {
   }
   toggleWorkspacePanel(trigger: HTMLElement): void {
     if (this.workspacePanelOpen()) {
+      if (this.navigationLayout() !== 'drawer') return;
       this.workspacePanelOpen.set(false);
       this.closePeek();
       if (this.navigationLayout() === 'drawer') this.navigation()?.setNavigationOpen(false);
@@ -184,9 +183,8 @@ export class App implements OnInit {
     if (view !== 'usage') {
       if (this.navigationLayout() === 'drawer') this.navigation()?.openNavigation(event.currentTarget as HTMLElement);
       else if (!this.contextOpen()) {
-        const close = this.peekOpen() && this.currentView() === view;
         this.peekTrigger = event.currentTarget as HTMLElement;
-        if (close) this.closePeek(true); else {
+        if (!this.peekOpen()) {
           this.peekOpen.set(true);
           if (event instanceof MouseEvent && event.detail === 0) setTimeout(() => {
             if (this.peekOpen() && document.activeElement === this.peekTrigger) document.querySelector<HTMLElement>('#navigation-context button:not([disabled]), #navigation-context select:not([disabled])')?.focus();

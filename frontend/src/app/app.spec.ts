@@ -159,7 +159,7 @@ describe('App ThreadPlane public behavior', () => {
     root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
     Array.from(root.querySelectorAll<HTMLButtonElement>('#navigation-context button')).find(button => button.textContent?.trim() === '重試')!.click();
     await vi.waitFor(() => { fixture.detectChanges(); expect(root.textContent).toContain('Personal'); });
-    root.querySelector<HTMLButtonElement>('button[aria-label="關閉工作區選取"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!.click(); fixture.detectChanges();
     await vi.waitFor(() => { fixture.detectChanges(); expect(root.textContent).toContain('對話列表載入失敗'); });
     listFails = false;
     Array.from(root.querySelectorAll<HTMLButtonElement>('#navigation-context button')).find(button => button.textContent?.includes('重試載入'))!.click();
@@ -274,9 +274,9 @@ describe('App ThreadPlane public behavior', () => {
   it('places the sidebar toggle in the sidebar header', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup();
-    const toggle = root.querySelector<HTMLButtonElement>('#navigation-context button[aria-label="切換側欄"]');
+    const toggle = root.querySelector<HTMLButtonElement>('#navigation-context button:is([aria-label="收合側欄"], [aria-label="固定側欄"])');
     expect(toggle).not.toBeNull();
-    expect(root.querySelector('main button[aria-label="切換側欄"]')).toBeNull();
+    expect(root.querySelector('main button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')).toBeNull();
     toggle!.click(); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
   });
@@ -326,10 +326,87 @@ describe('App ThreadPlane public behavior', () => {
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
     folder.click(); fixture.detectChanges(); expect(root.querySelector('[role="dialog"][aria-label="側欄導覽"]')).not.toBeNull();
   });
+  it('collapses a docked Workspace and reopens it with one rail click', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture,root} = await setup();
+    const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
+    folder.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button[aria-label="收合側欄"]')!.click(); fixture.detectChanges();
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
+    expect(folder.getAttribute('aria-expanded')).toBe('false');
+    folder.click(); fixture.detectChanges();
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
+    expect(root.querySelector('app-chat-navigation')!.classList.contains('peek')).toBe(true);
+    expect(folder.getAttribute('aria-expanded')).toBe('true');
+  });
+  it('collapses a docked Workspace with Ctrl+B and reopens it with one rail click', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture,root} = await setup();
+    const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
+    folder.click(); fixture.detectChanges();
+    window.dispatchEvent(new KeyboardEvent('keydown', {key:'b', ctrlKey:true, bubbles:true, cancelable:true})); fixture.detectChanges();
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
+    expect(folder.getAttribute('aria-expanded')).toBe('false');
+    folder.click(); fixture.detectChanges();
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
+    expect(folder.getAttribute('aria-expanded')).toBe('true');
+  });
+  it('keeps a Workspace peek open when its rail button is pressed again', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture,root} = await setup();
+    root.querySelector<HTMLButtonElement>('button[aria-label="收合側欄"]')!.click(); fixture.detectChanges();
+    const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
+    folder.click(); fixture.detectChanges(); folder.click(); fixture.detectChanges();
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
+    expect(folder.getAttribute('aria-expanded')).toBe('true');
+    expect(root.querySelector('app-chat-navigation')!.classList.contains('peek')).toBe(true);
+  });
+  it('switches from Workspace peek to chat without closing the panel', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture,root} = await setup();
+    root.querySelector<HTMLButtonElement>('button[aria-label="收合側欄"]')!.click(); fixture.detectChanges();
+    const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
+    const chat = root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!;
+    folder.click(); fixture.detectChanges(); chat.click(); fixture.detectChanges();
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
+    expect(root.querySelector('app-chat-navigation')!.classList.contains('peek')).toBe(true);
+    expect(folder.getAttribute('aria-expanded')).toBe('false');
+    expect(chat.getAttribute('aria-expanded')).toBe('true');
+    expect(root.querySelector('[aria-label="工作區選取"]')).toBeNull();
+  });
+  it('reports only the visible Workspace panel as expanded', async () => {
+    const {fixture,root} = await setup();
+    const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
+    const chat = root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!;
+    folder.click(); fixture.detectChanges();
+    expect(folder.getAttribute('aria-expanded')).toBe('true');
+    expect(chat.getAttribute('aria-expanded')).toBe('false');
+    expect(chat.getAttribute('aria-pressed')).toBe('true');
+  });
+  it('switches a docked Workspace panel to Bot while retaining the docked preference', async () => {
+    const {fixture,root} = await setup();
+    const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
+    const bot = root.querySelector<HTMLButtonElement>('nav button[aria-label="Bot"]')!;
+    folder.click(); fixture.detectChanges(); bot.click(); fixture.detectChanges();
+    expect(folder.getAttribute('aria-expanded')).toBe('false');
+    expect(bot.getAttribute('aria-expanded')).toBe('true');
+    expect(bot.getAttribute('aria-pressed')).toBe('true');
+    expect(root.querySelector('app-chat-navigation')!.classList.contains('peek')).toBe(false);
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
+  });
+  it('offers only pin and close controls for a Workspace peek', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture,root} = await setup();
+    root.querySelector<HTMLButtonElement>('button[aria-label="收合側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
+    expect(root.querySelector('button[aria-label="固定側欄"]')).not.toBeNull();
+    expect(root.querySelectorAll('button[aria-label="關閉側欄"]')).toHaveLength(1);
+    expect(root.querySelector('button[aria-label="關閉工作區選取"]')).toBeNull();
+  });
   it('cancels a Workspace peek when clicking outside', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture,root} = await setup(); document.body.appendChild(root);
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
     folder.click(); fixture.detectChanges(); root.querySelector<HTMLElement>('main')!.click(); fixture.detectChanges();
     expect(folder.getAttribute('aria-expanded')).toBe('false');
@@ -338,7 +415,7 @@ describe('App ThreadPlane public behavior', () => {
   it('cancels a Workspace peek with Escape and can reopen it', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture,root} = await setup();
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
     folder.click(); fixture.detectChanges();
     window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true})); fixture.detectChanges();
@@ -470,9 +547,9 @@ describe('App ThreadPlane public behavior', () => {
       return Response.json({data:{}});
     }));
     const {fixture,root} = await setup();
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
-    root.querySelector<HTMLButtonElement>('#navigation-context button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('#navigation-context button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     const before = requests.length; const select = root.querySelector<HTMLSelectElement>('#workspace-select')!;
     select.value = 'personal'; select.dispatchEvent(new Event('change')); fixture.detectChanges();
     expect(root.querySelector('[aria-label="工作區選取"]')).toBeNull();
@@ -482,27 +559,27 @@ describe('App ThreadPlane public behavior', () => {
   it('keeps the Workspace chooser while pinning a peek and restores the new preference', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture,root} = await setup();
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
-    root.querySelector<HTMLButtonElement>('#navigation-context button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('#navigation-context button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     expect(root.querySelector('[aria-label="工作區選取"]')).not.toBeNull();
     expect(root.querySelector('app-chat-navigation')!.classList.contains('peek')).toBe(false);
-    root.querySelector<HTMLButtonElement>('button[aria-label="關閉工作區選取"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!.click(); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
     expect(root.querySelector('[aria-label="近期對話"]')).not.toBeNull();
   });
-  it('returns focus to the folder after cancelling the docked Workspace chooser', async () => {
+  it('returns focus to the folder after collapsing the docked Workspace chooser', async () => {
     const {fixture,root} = await setup(); document.body.appendChild(root);
     const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
     folder.click(); fixture.detectChanges();
-    const close = root.querySelector<HTMLButtonElement>('button[aria-label="關閉工作區選取"]')!;
+    const close = root.querySelector<HTMLButtonElement>('button[aria-label="收合側欄"]')!;
     close.focus(); close.click(); fixture.detectChanges();
     await vi.waitFor(() => expect(document.activeElement).toBe(folder)); root.remove();
   });
-  it('can cancel a docked Workspace chooser with a named close control', async () => {
+  it('can leave a docked Workspace chooser using the chat rail', async () => {
     const {fixture,root} = await setup();
     root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
-    const close = root.querySelector<HTMLButtonElement>('#navigation-context button[aria-label="關閉工作區選取"]');
+    const close = root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]');
     expect(close).not.toBeNull(); close!.click(); fixture.detectChanges();
     expect(root.querySelector('[aria-label="工作區選取"]')).toBeNull();
     expect(root.querySelector('[aria-label="近期對話"]')).not.toBeNull();
@@ -594,7 +671,7 @@ describe('App ThreadPlane public behavior', () => {
     folder.click(); fixture.detectChanges();
     expect(root.querySelector('[aria-label="工作區選取"]')).not.toBeNull();
     expect(root.querySelector('app-usage')).toBe(usage);
-    folder.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="個人用量"]')!.click(); fixture.detectChanges();
     expect(root.querySelector('app-usage')).toBe(usage);
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
     expect(requests).toHaveLength(before);
@@ -602,12 +679,12 @@ describe('App ThreadPlane public behavior', () => {
   it('opens Workspace as a peek from collapsed navigation and restores it on cancel', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture,root} = await setup();
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     const folder = root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!;
     folder.click(); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
     expect(root.querySelector('app-chat-navigation')!.classList.contains('peek')).toBe(true);
-    folder.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button[aria-label="關閉側欄"]')!.click(); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
   });
   it('opens and cancels the Workspace panel without changing the chat draft', async () => {
@@ -619,7 +696,7 @@ describe('App ThreadPlane public behavior', () => {
     expect(folder.getAttribute('aria-expanded')).toBe('true');
     expect(root.querySelector('[aria-label="工作區選取"]')).not.toBeNull();
     expect(root.querySelector('app-chat-surface')).toBe(surface); expect(textarea.value).toBe(raw);
-    folder.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!.click(); fixture.detectChanges();
     expect(folder.getAttribute('aria-expanded')).toBe('false');
     expect(root.querySelector('[aria-label="工作區選取"]')).toBeNull();
     expect(root.querySelector('app-chat-surface')).toBe(surface); expect(textarea.value).toBe(raw);
@@ -670,7 +747,7 @@ describe('App ThreadPlane public behavior', () => {
     const textarea = input(root, '  raw\n draft '); fixture.detectChanges();
     const surface = root.querySelector('app-chat-surface');
     const before = requests.length;
-    const toggle = root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]');
+    const toggle = root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])');
     expect(toggle).toBeTruthy();
     expect(toggle!.getAttribute('aria-expanded')).toBe('true');
     expect(root.querySelector('[aria-label="主要功能"]')).toBeTruthy();
@@ -721,7 +798,7 @@ describe('App ThreadPlane public behavior', () => {
   });
   it('returns focus to the feature rail when collapsing a focused context', async () => {
     const {fixture, root} = await setup();
-    const toggle = root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!;
+    const toggle = root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!;
     const action = root.querySelector<HTMLButtonElement>('#navigation-context button[aria-label="新對話"]')!;
     document.body.appendChild(root); action.focus(); expect(document.activeElement).toBe(action);
     toggle.click(); fixture.detectChanges();
@@ -732,7 +809,7 @@ describe('App ThreadPlane public behavior', () => {
     const {fixture, root} = await setup();
     root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="Bot"]')!.click();
     fixture.detectChanges();
-    const toggle = root.querySelector<HTMLButtonElement>('#navigation-context button[aria-label="切換側欄"]');
+    const toggle = root.querySelector<HTMLButtonElement>('#navigation-context button:is([aria-label="收合側欄"], [aria-label="固定側欄"])');
     expect(toggle).toBeTruthy();
     expect(toggle!.closest('[hidden]')).toBeNull();
     toggle!.click(); fixture.detectChanges();
@@ -961,7 +1038,7 @@ describe('App ThreadPlane public behavior', () => {
     let change!: () => void; const media = {matches:false, addEventListener:(_:string, fn:()=>void)=>{change=fn;}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}};
     vi.stubGlobal('matchMedia', () => media);
     const {fixture, root} = await setup();
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     media.matches = true; change(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('button[aria-label="開啟導覽"]')!.click(); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
@@ -1021,7 +1098,7 @@ describe('App ThreadPlane public behavior', () => {
     const {fixture, root} = await setup(); document.body.appendChild(root);
     const raw = '  draft\nnext line  '; input(root, raw); fixture.detectChanges();
     const surface = root.querySelector('app-chat-surface');
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     const trigger = root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="搜尋對話"]');
     expect(trigger).not.toBeNull();
     const before = requests.length;
@@ -1068,7 +1145,7 @@ describe('App ThreadPlane public behavior', () => {
   it('returns focus to the rail search control when collapsed after pointer activation', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup(); document.body.appendChild(root);
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     const trigger = root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="搜尋對話"]')!;
     root.querySelector<HTMLTextAreaElement>('chat-input textarea')!.focus();
     trigger.click(); fixture.detectChanges();
@@ -1120,12 +1197,14 @@ describe('App ThreadPlane public behavior', () => {
     const raw = '  draft\nnext line  ';
     input(root, raw); fixture.detectChanges();
     const surface = root.querySelector('app-chat-surface');
-    const toggle = root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!;
+    const toggle = root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!;
     toggle.click(); fixture.detectChanges();
     const before = requests.length;
     root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!.click(); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
     root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!.click(); fixture.detectChanges();
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
+    root.querySelector<HTMLButtonElement>('button[aria-label="關閉側欄"]')!.click(); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
     expect(root.querySelector('app-chat-surface')).toBe(surface);
     expect(root.querySelector<HTMLTextAreaElement>('chat-input textarea')!.value).toBe(raw);
@@ -1134,10 +1213,10 @@ describe('App ThreadPlane public behavior', () => {
   it('closes the desktop peek with its close control and returns focus to the rail', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup(); document.body.appendChild(root);
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     const rail = root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!;
     rail.focus(); rail.click(); fixture.detectChanges();
-    root.querySelector<HTMLButtonElement>('button[aria-label="關閉導覽"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button[aria-label="關閉側欄"]')!.click(); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
     await vi.waitFor(() => expect(document.activeElement).toBe(rail));
     root.remove();
@@ -1145,10 +1224,10 @@ describe('App ThreadPlane public behavior', () => {
   it('pins a desktop peek and keeps it open when the active rail is clicked', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup();
-    const toggle = root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!;
+    const toggle = root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!;
     const rail = root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!;
     toggle.click(); fixture.detectChanges(); rail.click(); fixture.detectChanges();
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     rail.click(); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
     toggle.click(); fixture.detectChanges();
@@ -1157,7 +1236,7 @@ describe('App ThreadPlane public behavior', () => {
   it('dismisses desktop peek on Escape and restores the rail', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup(); document.body.appendChild(root);
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     const rail = root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!;
     rail.focus(); rail.click(); fixture.detectChanges();
     root.querySelector<HTMLElement>('#navigation-context')!.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); fixture.detectChanges();
@@ -1167,7 +1246,7 @@ describe('App ThreadPlane public behavior', () => {
   it('dismisses desktop peek on an outside click without stealing focus', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup(); document.body.appendChild(root);
-    const toggle = root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!;
+    const toggle = root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!;
     toggle.click(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!.click(); fixture.detectChanges();
     const textarea = root.querySelector<HTMLTextAreaElement>('chat-input textarea')!;
@@ -1178,7 +1257,7 @@ describe('App ThreadPlane public behavior', () => {
   it('closes desktop peek before search and returns to the rail after search', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup(); document.body.appendChild(root);
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     const rail = root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!;
     rail.focus(); rail.click(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('button[aria-label="搜尋對話"]')!.click(); fixture.detectChanges();
@@ -1191,7 +1270,7 @@ describe('App ThreadPlane public behavior', () => {
   it('closes the desktop peek when starting a new conversation', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup();
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!.click(); fixture.detectChanges();
     const button = root.querySelector<HTMLButtonElement>('#navigation-context button[aria-label="新對話"]')!;
     button.click(); fixture.detectChanges();
@@ -1200,7 +1279,7 @@ describe('App ThreadPlane public behavior', () => {
   it('exposes the visible sidebar state separately from the active rail feature', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup();
-    const toggle = root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!;
+    const toggle = root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!;
     const rail = root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!;
     toggle.click(); fixture.detectChanges();
     expect(rail.getAttribute('aria-controls')).toBe('navigation-context');
@@ -1213,7 +1292,7 @@ describe('App ThreadPlane public behavior', () => {
   it('moves keyboard focus into a desktop peek', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup(); document.body.appendChild(root);
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     const rail = root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!;
     rail.focus(); rail.click(); fixture.detectChanges();
     await vi.waitFor(() => expect(root.querySelector('#navigation-context')!.contains(document.activeElement)).toBe(true)); root.remove();
@@ -1221,19 +1300,21 @@ describe('App ThreadPlane public behavior', () => {
   it('clears a peek when entering usage and preserves the collapsed preference', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup();
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!.click(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('nav button[aria-label="個人用量"]')!.click(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!.click(); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
     root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!.click(); fixture.detectChanges();
+    expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(false);
+    root.querySelector<HTMLButtonElement>('button[aria-label="關閉側欄"]')!.click(); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
   });
   it('clears a desktop peek across the mobile breakpoint and restores collapsed preference', async () => {
     let change!: () => void; const media = {matches:false, addEventListener:(_:string, fn:()=>void)=>{change=fn;}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}};
     vi.stubGlobal('matchMedia', () => media);
     const {fixture, root} = await setup();
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!.click(); fixture.detectChanges();
     media.matches=true; change(); fixture.detectChanges();
     media.matches=false; change(); fixture.detectChanges();
@@ -1242,7 +1323,7 @@ describe('App ThreadPlane public behavior', () => {
   it('pins a desktop peek with the existing sidebar shortcut', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup(); document.body.appendChild(root);
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     const rail = root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!;
     rail.click(); fixture.detectChanges();
     window.dispatchEvent(new KeyboardEvent('keydown',{key:'b',ctrlKey:true,bubbles:true,cancelable:true})); fixture.detectChanges();
@@ -1253,9 +1334,9 @@ describe('App ThreadPlane public behavior', () => {
   it('does not steal focus moved after pinning a peek', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup(); document.body.appendChild(root);
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!.click(); fixture.detectChanges();
-    const pin = root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!;
+    const pin = root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!;
     pin.focus(); pin.click(); fixture.detectChanges();
     const textarea = root.querySelector<HTMLTextAreaElement>('chat-input textarea')!;
     textarea.focus();
@@ -1265,9 +1346,9 @@ describe('App ThreadPlane public behavior', () => {
   it('does not steal focus moved after closing a peek', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup(); document.body.appendChild(root);
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!.click(); fixture.detectChanges();
-    const close = root.querySelector<HTMLButtonElement>('button[aria-label="關閉導覽"]')!;
+    const close = root.querySelector<HTMLButtonElement>('button[aria-label="關閉側欄"]')!;
     close.focus(); close.click(); fixture.detectChanges();
     const textarea = root.querySelector<HTMLTextAreaElement>('chat-input textarea')!;
     textarea.focus(); await new Promise(resolve => setTimeout(resolve, 20));
@@ -1276,7 +1357,7 @@ describe('App ThreadPlane public behavior', () => {
   it('dismisses a nonmodal peek with Escape after focus moves to the main area', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup(); document.body.appendChild(root);
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     const rail = root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!;
     rail.click(); fixture.detectChanges();
     const textarea = root.querySelector<HTMLTextAreaElement>('chat-input textarea')!; textarea.focus();
@@ -1287,7 +1368,7 @@ describe('App ThreadPlane public behavior', () => {
   it('does not steal newer main focus after closing search opened from a peek', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup(); document.body.appendChild(root);
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     const rail = root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!;
     rail.focus(); rail.click(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('button[aria-label="搜尋對話"]')!.click(); fixture.detectChanges();
@@ -1299,7 +1380,7 @@ describe('App ThreadPlane public behavior', () => {
   it('uses a visible rail when the search return trigger becomes hidden', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:false, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup(); document.body.appendChild(root);
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     const rail = root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!;
     rail.focus(); rail.click(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('button[aria-label="搜尋對話"]')!.click(); fixture.detectChanges();
@@ -1313,7 +1394,7 @@ describe('App ThreadPlane public behavior', () => {
     let change!: () => void; const media = {matches:false, addEventListener:(_:string, fn:()=>void)=>{change=fn;}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}};
     vi.stubGlobal('matchMedia', () => media);
     const {fixture, root} = await setup();
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click(); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     media.matches = true; change(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!.click(); fixture.detectChanges();
     expect(root.querySelector('[role="dialog"][aria-label="側欄導覽"]')).toBeTruthy();
@@ -1349,7 +1430,7 @@ describe('App ThreadPlane public behavior', () => {
   it('does not expose a desktop-only context toggle on narrow screens', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {root} = await setup();
-    expect(root.querySelector('button[aria-label="切換側欄"]')).toBeNull();
+    expect(root.querySelector('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')).toBeNull();
     expect(root.querySelector('button[aria-label="開啟導覽"]')).toBeTruthy();
   });
   it('dismisses mobile navigation through its backdrop and restores the rail trigger', async () => {
@@ -1431,6 +1512,16 @@ describe('App ThreadPlane public behavior', () => {
     root.querySelector<HTMLButtonElement>('button[aria-label="關閉導覽"]')!.click(); fixture.detectChanges();
     await vi.waitFor(()=>expect(document.activeElement).toBe(open)); root.remove();
   });
+  it('does not steal newer focus after closing the mobile drawer', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture, root} = await setup(); document.body.appendChild(root);
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!.click(); fixture.detectChanges();
+    const close = root.querySelector<HTMLButtonElement>('button[aria-label="關閉導覽"]')!;
+    close.focus(); close.click(); fixture.detectChanges();
+    const textarea = root.querySelector<HTMLTextAreaElement>('chat-input textarea')!;
+    textarea.focus(); await new Promise(resolve => setTimeout(resolve, 30));
+    expect(document.activeElement).toBe(textarea); root.remove();
+  });
   it('exposes the mobile opener relationship and actual expanded state', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     const {fixture, root} = await setup();
@@ -1472,7 +1563,7 @@ describe('App ThreadPlane public behavior', () => {
     let change!:()=>void; const media={matches:false,addEventListener:(_:string,fn:()=>void)=>{change=fn;},removeEventListener:()=>{},addListener:()=>{},removeListener:()=>{}};
     vi.stubGlobal('matchMedia',()=>media);
     const {fixture,root}=await setup();document.body.appendChild(root);
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.click();fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click();fixture.detectChanges();
     media.matches=true;change();fixture.detectChanges();
     const rail=root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!;
     rail.click();fixture.detectChanges();
@@ -1485,7 +1576,7 @@ describe('App ThreadPlane public behavior', () => {
     vi.stubGlobal('matchMedia',()=>media);
     const {fixture,root}=await setup();document.body.appendChild(root);
     const rail=root.querySelector<HTMLButtonElement>('nav[aria-label="主要功能"] button[aria-label="對話"]')!;
-    const toggle=root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!;toggle.focus();expect(document.activeElement).toBe(toggle);
+    const toggle=root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!;toggle.focus();expect(document.activeElement).toBe(toggle);
     media.matches=true;change();fixture.detectChanges();await vi.waitFor(()=>expect(document.activeElement).toBe(rail));
     rail.click();fixture.detectChanges();root.querySelector<HTMLButtonElement>('button[aria-label="搜尋對話"]')!.click();fixture.detectChanges();
     const input=root.querySelector<HTMLInputElement>('chat-history-search-palette input')!;input.focus();expect(document.activeElement).toBe(input);
@@ -1510,7 +1601,7 @@ describe('App ThreadPlane public behavior', () => {
   it('does not override a new focus chosen before breakpoint recovery runs', async () => {
     let change!:()=>void;const media={matches:false,addEventListener:(_:string,fn:()=>void)=>{change=fn;},removeEventListener:()=>{},addListener:()=>{},removeListener:()=>{}};
     vi.stubGlobal('matchMedia',()=>media);const {fixture,root}=await setup();document.body.appendChild(root);
-    root.querySelector<HTMLButtonElement>('button[aria-label="切換側欄"]')!.focus();
+    root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.focus();
     media.matches=true;change();fixture.detectChanges();const textarea=root.querySelector<HTMLTextAreaElement>('chat-input textarea')!;textarea.focus();
     await new Promise(resolve=>setTimeout(resolve,30));expect(document.activeElement).toBe(textarea);root.remove();
   });

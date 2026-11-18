@@ -142,8 +142,11 @@ export class ChatNavigationComponent implements OnInit {
   }
   setLayoutMode(mode: ChatSidenavMode): void { this.layoutMode.set(mode); this.layoutModeChanged.emit(mode); }
   setNavigationOpen(open: boolean): void {
+    const active = document.activeElement;
     this.navigationOpen.set(open);
-    if (!open) { if (this.workspacePanelOpen()) this.workspaceClosed.emit(); this.search.closeSearch(); setTimeout(() => this.drawerTrigger?.focus()); }
+    if (!open) { if (this.workspacePanelOpen()) this.workspaceClosed.emit(); this.search.closeSearch(); setTimeout(() => {
+      if (document.activeElement === active || document.activeElement === document.body) this.drawerTrigger?.focus();
+    }); }
   }
   openSearch(trigger?: HTMLElement): void {
     this.searchTrigger = trigger ?? document.querySelector<HTMLElement>('nav[aria-label="主要功能"] button[aria-label="搜尋對話"]');

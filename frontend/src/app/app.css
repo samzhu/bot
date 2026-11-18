@@ -19,7 +19,7 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .feature-rail { position: relative; z-index: 11; display: flex; flex: 0 0 60px; flex-direction: column; align-items: center; gap: .5rem; padding-block: .5rem; border-right: 1px solid var(--tplane-chat-separator); }
 .feature-rail button { min-width: 44px; min-height: 44px; cursor: pointer; }
-.feature-rail button[aria-pressed="true"] { font-weight: bold; border-inline-start: 4px solid currentColor; }
+.feature-rail button[aria-expanded="true"] { font-weight: bold; border-inline-start: 4px solid currentColor; }
 
 .chat-view { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 .chat-view[hidden] { display: none; }
