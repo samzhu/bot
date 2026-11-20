@@ -40,6 +40,10 @@ public class RunHandle {
     private final String userMessageId;
     private final String assistantId;
     private boolean textStarted;
+    private boolean visibleReplyDispatched;
+    private Runnable firstVisibleReply = () -> {};
+
+    public void onFirstVisibleReply(Runnable callback) { this.firstVisibleReply = callback; }
     private final TerminalCallback callback;
     // Why Disposables.swap(): prevents race conditions where a stream reaches terminal
     // (or is cancelled) before the reactive subscription is attached; disposing swapDisposable
@@ -337,16 +341,25 @@ public class RunHandle {
                         textStarted = true;
                     }
                     sendAgUi(new TextMessageContentEvent(assistantId, chunk));
+                    dispatchFirstVisibleReply(chunk);
                     return;
                 }
                 emitter.send(SseEmitter.event()
                         .name("message.delta")
                         .data(Map.of("runId", runId, "seq", currentSeq, "delta", chunk)));
+                dispatchFirstVisibleReply(chunk);
             } catch (IOException | IllegalStateException ex) {
                 handleWriteFailure("SSE delta send error: " + ex.getMessage());
             } catch (Exception ex) {
                 handleWriteFailure("SSE delta unexpected error: " + ex.getMessage());
             }
+        }
+    }
+
+    private void dispatchFirstVisibleReply(String chunk) {
+        if (!visibleReplyDispatched && !chunk.isBlank()) {
+            visibleReplyDispatched = true;
+            firstVisibleReply.run();
         }
     }
 

@@ -1,7 +1,9 @@
 import { UsageComponent } from './usage.component';
 import { WorkspaceStore } from './workspace.store';
+import { ConversationTitleUpdates } from './conversation-title-updates';
 import {
   Component,
+  DestroyRef,
   OnInit,
   computed,
   inject,
@@ -199,9 +201,14 @@ export class App implements OnInit {
   private readonly verifiedConversationId = signal<string | null>(null);
   private readonly sourceSelections = new WeakMap<ChatSession, number>();
   private readonly selectedSource = signal<ChatSession | null>(null);
+  private readonly originatedConversations = new Set<string>();
   readonly chatSessions = new ChatSessionRegistry(this.chatTransport, () => crypto.randomUUID(), (key, id, source) => {
     const created = this.chatTransport.created.get(id);
-    if (created && this.sourceWorkspaces.get(source) === this.workspaces.selectedId()) this.conversationStore.addCreatedConversation({ ...created, pinned: false });
+    if (created && this.sourceWorkspaces.get(source) === this.workspaces.selectedId()) {
+      this.conversationStore.addCreatedConversation({ ...created, pinned: false });
+      this.originatedConversations.add(id);
+      this.titleUpdates.watch(this.workspaces.selectedId(), [id]);
+    }
     if (this.sourceSelections.get(source) === this.selectionGeneration && this.chatKey() === key) {
       if (created && this.sourceWorkspaces.get(source) === this.workspaces.selectedId()) this.conversationStore.setActiveConversation({ ...created, pinned: false });
       this.verifiedConversationId.set(id);
@@ -211,6 +218,11 @@ export class App implements OnInit {
       this.setStorageItem('bot_active_conversation_id', id);
     }
     this.sessionGeneration.update(n => n + 1);
+  }, (id, source) => {
+    const workspaceId = this.sourceWorkspaces.get(source);
+    if (workspaceId && workspaceId === this.workspaces.selectedId() && this.originatedConversations.has(id)) {
+      this.titleUpdates.watch(workspaceId, [id]);
+    }
   });
   readonly chatKey = computed(() => this.currentConversationId() ? `conversation:${this.currentConversationId()}` : `draft:${JSON.stringify([this.workspaces.selectedId(), (this.activeDraftBot() || this.seedBot())?.id ?? 'none'])}`);
   readonly chatSession = computed(() => { this.sessionGeneration(); const id = this.currentConversationId(); if (id && this.verifiedConversationId() !== id) return this.chatSessions.session(`unverified:${id}`); return this.selectedSource() ?? this.chatSessions.session(this.chatKey()); });
@@ -401,6 +413,12 @@ export class App implements OnInit {
     return 'New Conversation';
   });
 
+  private readonly titleUpdates = new ConversationTitleUpdates((workspaceId, id, title) => this.conversationStore.updateTitle(id, workspaceId, title));
+
+  constructor() {
+    inject(DestroyRef).onDestroy(() => this.titleUpdates.close());
+  }
+
   async ngOnInit(): Promise<void> {
     const initialGeneration = this.selectionGeneration;
     try {
@@ -541,6 +559,8 @@ export class App implements OnInit {
     const wasUsage = this.currentView() === 'usage';
     this.selectionGeneration++;
     this.workspaces.select(id);
+    this.originatedConversations.clear();
+    this.titleUpdates.watch(id, []);
     this.conversationStore.setWorkspace(id);
     this.navigation()?.setWorkspace(id);
     await this.newConversation();
@@ -552,6 +572,7 @@ export class App implements OnInit {
     await this.workspaces.load();
     const id = this.workspaces.selectedId();
     if (!id) return;
+    this.titleUpdates.watch(id, []);
     this.conversationStore.setWorkspace(id); this.navigation()?.setWorkspace(id);
     await this.loadBots();
     try { await this.loadConversations(); }
@@ -604,6 +625,7 @@ export class App implements OnInit {
     try {
       const limit = 20;
       const workspaceId = this.workspaces.selectedId();
+      const titleRevision = this.conversationStore.titleReadRevision();
       const conversation = await this.chatTransport.hydrate(id, workspaceId ?? undefined);
       const json = { data: { conversation } };
 
@@ -636,7 +658,7 @@ export class App implements OnInit {
           createdAt: conv.createdAt || '',
           updatedAt: conv.updatedAt || ''
         };
-        this.conversationStore.setActiveConversation(view);
+        this.conversationStore.setActiveConversation(view, titleRevision);
 
         // Resolve conversation's Bot if not already resolved
         if (conv.botId) {

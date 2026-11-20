@@ -30,7 +30,7 @@ public class AgUiController {
     }
 
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<?> run(@RequestBody String body) {
+    public ResponseEntity<?> run(@RequestBody String body, jakarta.servlet.http.HttpServletRequest request) {
         JsonNode input;
         try {
             input = json.readTree(body);
@@ -86,7 +86,9 @@ public class AgUiController {
         }
 
         // Client history and properties are untrusted; only the new user text enters the server-owned prompt.
-        var result = execution.startAgUiRun(thread.asText(), id.asText(), text, currentUser.getCurrentUserId());
+        var ready = new java.util.concurrent.CompletableFuture<Void>();
+        request.setAttribute(AgUiTransportReadiness.ATTRIBUTE, ready);
+        var result = execution.startAgUiRun(thread.asText(), id.asText(), text, currentUser.getCurrentUserId(), ready);
         return switch (result.type()) {
             case ACCESS_DENIED -> jsonError(404, "CONVERSATION_ACCESS_DENIED");
             case STARTED -> ResponseEntity.ok().contentType(MediaType.TEXT_EVENT_STREAM).body(result.emitter());

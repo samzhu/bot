@@ -52,6 +52,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
 
     private final ChatRunRepository runRepository;
     private final ConversationOperations conversationOperations;
+    private final io.github.samzhu.bot.conversation.ConversationTitleDispatch titleDispatch;
     private final ConversationRecoveryReader conversationRecoveryReader;
     private final BotOperations botOperations;
     private final JdbcAggregateTemplate jdbcAggregateTemplate;
@@ -71,6 +72,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
     public RunExecutionServiceImpl(
             ChatRunRepository runRepository,
             ConversationOperations conversationOperations,
+            io.github.samzhu.bot.conversation.ConversationTitleDispatch titleDispatch,
             ConversationRecoveryReader conversationRecoveryReader,
             BotOperations botOperations,
             JdbcAggregateTemplate jdbcAggregateTemplate,
@@ -88,6 +90,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
             @Value("${bot.conversation.window-turns:10}") int windowTurns) {
         this.runRepository = runRepository;
         this.conversationOperations = conversationOperations;
+        this.titleDispatch = titleDispatch;
         this.conversationRecoveryReader = conversationRecoveryReader;
         this.botOperations = botOperations;
         this.jdbcAggregateTemplate = jdbcAggregateTemplate;
@@ -126,15 +129,20 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
 
     @Override
     public StartRunOutcome startRun(String conversationId, String clientRequestId, String message, String userId) {
-        return startRunInternal(conversationId, clientRequestId, message, userId, false);
+        return startRunInternal(conversationId, clientRequestId, message, userId, false, java.util.concurrent.CompletableFuture.completedFuture(null));
     }
 
     @Override
     public StartRunOutcome startAgUiRun(String conversationId, String runId, String message, String userId) {
-        return startRunInternal(conversationId, runId, message, userId, true);
+        return startAgUiRun(conversationId, runId, message, userId, java.util.concurrent.CompletableFuture.completedFuture(null));
     }
 
-    private StartRunOutcome startRunInternal(String conversationId, String clientRequestId, String message, String userId, boolean agUi) {
+    @Override
+    public StartRunOutcome startAgUiRun(String conversationId, String runId, String message, String userId, java.util.concurrent.CompletionStage<Void> transportReady) {
+        return startRunInternal(conversationId, runId, message, userId, true, transportReady);
+    }
+
+    private StartRunOutcome startRunInternal(String conversationId, String clientRequestId, String message, String userId, boolean agUi, java.util.concurrent.CompletionStage<Void> transportReady) {
         // 1. Verify conversation ownership
         Optional<ConversationView> convOpt = conversationOperations.findConversationById(conversationId, userId);
         if (convOpt.isEmpty()) {
@@ -270,6 +278,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                     }
             );
 
+            if (agUi) handle.onFirstVisibleReply(() -> titleDispatch.afterFirstVisibleReply(conversationId));
             handle.setAdmissionRegistration(registration);
             runRegistry.register(runId, handle);
 
@@ -374,7 +383,8 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         try {
             if (chatModel instanceof StreamingChatModel streamingModel) {
                 try {
-                    subscriptionStarted = handle.startSubscription(() -> usageInvocation.stream(chatModel, new Prompt(aiMessages), usageAttempt, conversationId, conv.workspaceId(), userId, handle)
+                    subscriptionStarted = handle.startSubscription(() -> Mono.fromCompletionStage(transportReady)
+                            .thenMany(Flux.defer(() -> usageInvocation.stream(chatModel, new Prompt(aiMessages), usageAttempt, conversationId, conv.workspaceId(), userId, handle)))
                             .subscribeOn(providerDispatchScheduler)
                             // Observe cancellation even when the worker has not subscribed to the source yet.
                             .doOnCancel(() -> usageInvocation.finalizeCancellationAsync(usageAttempt, handle))
@@ -403,8 +413,9 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                  * as an empty Mono until the deadline scheduler fires.
                  */
                 try {
-                    subscriptionStarted = handle.startSubscription(() -> usageInvocation.call(chatModel, new Prompt(aiMessages), usageAttempt,
-                                    conversationId, conv.workspaceId(), userId, handle)
+                    subscriptionStarted = handle.startSubscription(() -> Mono.fromCompletionStage(transportReady)
+                            .then(Mono.defer(() -> usageInvocation.call(chatModel, new Prompt(aiMessages), usageAttempt,
+                                    conversationId, conv.workspaceId(), userId, handle)))
                             .subscribeOn(providerDispatchScheduler)
                             // Observe cancellation even when the worker has not subscribed to the source yet.
                             .doOnCancel(() -> usageInvocation.finalizeCancellationAsync(usageAttempt, handle))

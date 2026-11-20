@@ -12,6 +12,7 @@ import io.github.samzhu.bot.conversation.ConversationSearchValidationException;
 import io.github.samzhu.bot.conversation.ConversationView;
 import io.github.samzhu.bot.conversation.MessageView;
 import org.springframework.data.jdbc.core.JdbcAggregateTemplate;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -29,12 +30,14 @@ public class ConversationOperationsImpl implements ConversationOperations, Conve
     private final JdbcAggregateTemplate jdbcAggregateTemplate;
     private final BotOperations botOperations;
     private final WorkspaceOperations workspace;
+    private final JdbcTemplate jdbc;
 
     public ConversationOperationsImpl(
             ConversationRepository conversationRepository,
             MessageRepository messageRepository,
             JdbcAggregateTemplate jdbcAggregateTemplate,
-            BotOperations botOperations, WorkspaceOperations workspace) {
+            BotOperations botOperations, WorkspaceOperations workspace, JdbcTemplate jdbc) {
+        this.jdbc = jdbc;
         this.workspace = workspace;
         this.conversationRepository = conversationRepository;
         this.messageRepository = messageRepository;
@@ -43,11 +46,13 @@ public class ConversationOperationsImpl implements ConversationOperations, Conve
     }
 
     @Override
+    @Transactional
     public ConversationView createConversation(String botId, String title, String userId) {
         return createConversation(botId, title, userId, null);
     }
 
     @Override
+    @Transactional
     public ConversationView createConversation(String botId, String title, String userId, String workspaceId) {
         String scope = workspace.requireMember(workspaceId, userId);
         Optional<BotView> botOpt = botOperations.findById(botId, userId);
@@ -64,6 +69,9 @@ public class ConversationOperationsImpl implements ConversationOperations, Conve
         Instant now = Instant.now();
         Conversation conv = new Conversation(convId, botId, safeTitle, userId, scope, false, now, now);
         Conversation saved = jdbcAggregateTemplate.insert(conv);
+        if ("New Conversation".equals(safeTitle)) {
+            jdbc.update("insert into conversation_title_work(conversation_id,state) values (?, 'WAITING')", convId);
+        }
         return toView(saved);
     }
 

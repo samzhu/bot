@@ -1495,6 +1495,275 @@ describe('App ThreadPlane public behavior', () => {
     expect(root.querySelector('main')!.hasAttribute('inert')).toBe(false);
     root.remove();
   });
+  it('subscribes only to newly submitted conversations and merges their notified title', async () => {
+    const {fixture, root} = await setup();
+    let publish!: (value: Uint8Array) => void; let runId = ''; let aguiCalls = 0;
+    const encoder = new TextEncoder();
+    let push!: (event: object) => void;
+    const stream = new ReadableStream<Uint8Array>({start(controller) { push = event => controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)); }});
+    const subscriptions: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (String(url).includes('/api/ag-ui')) { aguiCalls++; runId = body.runId; return new Response(stream, {headers:{'Content-Type':'text/event-stream'}}); }
+      if (body.query?.includes('CreateConversation')) return Response.json({data:{createConversation:conversation('created')}});
+      if (body.query?.includes('conversationTitleChanged')) {
+        subscriptions.push(body.variables.id);
+        return new Response(new ReadableStream({start(controller) { publish = chunk => controller.enqueue(chunk); }}), {headers:{'Content-Type':'text/event-stream'}});
+      }
+      if (body.query?.includes('ConversationTitleRead')) return Response.json({data:{conversation:{id:'created', workspaceId:'personal', title:'Updated title'}}});
+      return Response.json({data:{}});
+    }));
+    input(root, 'first question'); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('chat-input button[aria-label="Send message"]')!.click();
+    await vi.waitFor(() => expect(aguiCalls).toBe(1));
+    push({type:'RUN_STARTED',threadId:'created',runId});
+    await vi.waitFor(() => { fixture.detectChanges(); expect(publish).toBeTypeOf('function'); });
+    const textarea = input(root, '  keep raw\n '); textarea.focus(); fixture.detectChanges();
+    publish(encoder.encode('event:next\ndata:{"data":{"conversationTitleChanged":{"id":"created","version":"1","state":"DONE"}}}\n\n'));
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.querySelector('[data-testid="chat-header-title"]')?.textContent).toContain('Updated title'); });
+    expect(textarea.value).toBe('  keep raw\n ');
+    expect(subscriptions).toEqual(['created']);
+  });
+  it('keeps a notified title when an older history response arrives', async () => {
+    const {fixture, root} = await setup();
+    let publish!: (value: Uint8Array) => void; let releaseHistory!: (r: Response) => void; let historyStarted = false; let historyCount = 0;
+    const encoder = new TextEncoder();
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.query?.includes('CreateConversation')) return Response.json({data:{createConversation:{...conversation('created'),title:'Old title'}}});
+      if (String(url).includes('/api/ag-ui')) return new Response(`data: ${JSON.stringify({type:'RUN_STARTED',threadId:'created',runId:body.runId})}\n\ndata: ${JSON.stringify({type:'RUN_FINISHED',threadId:'created',runId:body.runId})}\n\n`,{headers:{'Content-Type':'text/event-stream'}});
+      if (body.query?.includes('conversationTitleChanged')) return new Response(new ReadableStream<Uint8Array>({start(c) { publish = v => c.enqueue(v); }}),{headers:{'Content-Type':'text/event-stream'}});
+      if (body.query?.includes('ConversationTitleRead')) return Response.json({data:{conversation:{id:'created',workspaceId:'personal',title:'New title'}}});
+      if (body.query?.includes('SessionHistory')) { historyStarted = true; if (++historyCount === 1) return new Promise<Response>(resolve => { releaseHistory=resolve; }); return Response.json({data:{conversation:{...conversation('created'),title:'Newer title'}}}); }
+      return Response.json({data:{}});
+    }));
+    input(root,'first'); fixture.detectChanges(); root.querySelector<HTMLButtonElement>('chat-input button[aria-label="Send message"]')!.click();
+    await vi.waitFor(() => { fixture.detectChanges(); expect(publish).toBeTypeOf('function'); expect(root.textContent).toContain('Old title'); });
+    root.querySelector<HTMLButtonElement>('main header button[aria-label="新對話"]')!.click(); fixture.detectChanges();
+    Array.from(root.querySelectorAll<HTMLButtonElement>('chat-thread-list button')).find(b=>b.textContent?.includes('Old title'))!.click(); fixture.detectChanges();
+    await vi.waitFor(()=>expect(historyStarted).toBe(true));
+    publish(encoder.encode('event:next\ndata:{"data":{"conversationTitleChanged":{"id":"created","version":"1","state":"DONE"}}}\n\n'));
+    await vi.waitFor(()=>{fixture.detectChanges();expect(root.querySelector('[data-testid="chat-header-title"]')?.textContent).toContain('New title');});
+    releaseHistory(Response.json({data:{conversation:{...conversation('created'),title:'Old title',messages:[{id:'loaded-message',runId:'loaded-run',role:'USER',content:'history arrived',interrupted:false,createdAt:'2026-01-01T00:00:00Z'}]}}}));
+    await vi.waitFor(()=>{fixture.detectChanges();expect(root.textContent).toContain('history arrived');});
+    expect(root.querySelector('[data-testid="chat-header-title"]')?.textContent).toContain('New title');
+    expect(root.querySelector('#navigation-context')?.textContent).toContain('New title');
+    root.querySelector<HTMLButtonElement>('main header button[aria-label="新對話"]')!.click(); fixture.detectChanges();
+    Array.from(root.querySelectorAll<HTMLButtonElement>('chat-thread-list button')).find(button => button.textContent?.includes('New title'))!.click(); fixture.detectChanges();
+    await vi.waitFor(()=>{fixture.detectChanges();expect(root.querySelector('[data-testid="chat-header-title"]')?.textContent).toContain('Newer title');});
+  });
+  it('keeps a notified title when an older range response arrives', async () => {
+    const {fixture, root} = await setup();
+    let publish!: (value: Uint8Array) => void; let releaseRange!: (r: Response) => void; let rangeStarted = false;
+    const encoder = new TextEncoder();
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.query?.includes('CreateConversation')) return Response.json({data:{createConversation:{...conversation('created'),title:'Old title'}}});
+      if (String(url).includes('/api/ag-ui')) return new Response(`data: ${JSON.stringify({type:'RUN_STARTED',threadId:'created',runId:body.runId})}\n\ndata: ${JSON.stringify({type:'RUN_FINISHED',threadId:'created',runId:body.runId})}\n\n`,{headers:{'Content-Type':'text/event-stream'}});
+      if (body.query?.includes('conversationTitleChanged')) return new Response(new ReadableStream<Uint8Array>({start(c){publish=v=>c.enqueue(v);}}),{headers:{'Content-Type':'text/event-stream'}});
+      if (body.query?.includes('ConversationTitleRead')) return Response.json({data:{conversation:{id:'created',workspaceId:'personal',title:'New title'}}});
+      if (body.query?.includes('SetConversationPinned')) return Response.json({data:{setConversationPinned:{...conversation('created'),pinned:true}}});
+      if (body.query?.includes('GetConversations')) { if(!body.variables.pinned) return Response.json({data:{conversations:[]}}); rangeStarted=true; return new Promise<Response>(resolve=>{releaseRange=resolve;}); }
+      return Response.json({data:{}});
+    }));
+    input(root,'first'); fixture.detectChanges(); root.querySelector<HTMLButtonElement>('chat-input button[aria-label="Send message"]')!.click();
+    await vi.waitFor(()=>{fixture.detectChanges();expect(publish).toBeTypeOf('function');expect(root.textContent).toContain('Old title');});
+    const section = root.querySelector('[aria-label="近期對話"]')!;
+    section.querySelector<HTMLButtonElement>('[aria-label="More actions"]')!.click(); fixture.detectChanges();
+    Array.from(section.querySelectorAll<HTMLElement>('[role="menuitem"]')).find(item => item.textContent?.trim() === 'Pin')!.click(); fixture.detectChanges();
+    await vi.waitFor(()=>expect(rangeStarted).toBe(true));
+    publish(encoder.encode('event:next\ndata:{"data":{"conversationTitleChanged":{"id":"created","version":"1","state":"DONE"}}}\n\n'));
+    await vi.waitFor(()=>{fixture.detectChanges();expect(root.querySelector('#navigation-context')?.textContent).toContain('New title');});
+    releaseRange(Response.json({data:{conversations:[{...conversation('created'),title:'Old title',pinned:true}]}}));
+    await vi.waitFor(()=>{fixture.detectChanges();expect(root.querySelector('[aria-label="釘選對話"]')?.textContent).toMatch(/Old title|New title/);});
+    expect(root.querySelector('#navigation-context')?.textContent).toContain('New title');
+    expect(root.querySelector('[data-testid="chat-header-title"]')?.textContent).toContain('New title');
+  });
+  it('ignores a late title read after switching workspaces', async () => {
+    let publish!: (value: Uint8Array) => void; let finishRead!: (response: Response) => void; let readStarted = false; let runId = '';
+    const encoder = new TextEncoder();
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.query?.includes('Workspaces')) return Response.json({data:{workspaces:[{id:'personal',name:'Personal',role:'MANAGER',personal:true},{id:'other',name:'Other',role:'MANAGER',personal:false}]}});
+      if (body.query?.includes('defaultLocalBot')) return Response.json({data:{defaultLocalBot:local,bots:[botA,botB]}});
+      if (body.query?.includes('conversations(')) return Response.json({data:{conversations:[]}});
+      if (body.query?.includes('CreateConversation')) return Response.json({data:{createConversation:conversation('created')}});
+      if (String(url).includes('/api/ag-ui')) { runId = body.runId; return new Response(`data: ${JSON.stringify({type:'RUN_STARTED',threadId:'created',runId})}\n\ndata: ${JSON.stringify({type:'RUN_FINISHED',threadId:'created',runId})}\n\n`, {headers:{'Content-Type':'text/event-stream'}}); }
+      if (body.query?.includes('conversationTitleChanged')) return new Response(new ReadableStream<Uint8Array>({start(controller) { publish = value => controller.enqueue(value); }}), {headers:{'Content-Type':'text/event-stream'}});
+      if (body.query?.includes('ConversationTitleRead')) { readStarted = true; return new Promise<Response>(resolve => { finishRead = resolve; }); }
+      return Response.json({data:{}});
+    }));
+    const {fixture, root} = await setup();
+    input(root, 'first'); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('chat-input button[aria-label="Send message"]')!.click();
+    await vi.waitFor(() => expect(publish).toBeTypeOf('function'));
+    publish(encoder.encode('event:next\ndata:{"data":{"conversationTitleChanged":{"id":"created","version":"1","state":"DONE"}}}\n\n'));
+    await vi.waitFor(() => expect(readStarted).toBe(true));
+    root.querySelector<HTMLButtonElement>('nav button[aria-label="工作區"]')!.click(); fixture.detectChanges();
+    const select = root.querySelector<HTMLSelectElement>('#workspace-select')!;
+    select.value = 'other'; select.dispatchEvent(new Event('change')); fixture.detectChanges();
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.querySelector('.workspace-name')?.textContent).toContain('Other'); });
+    const textarea = input(root, 'other draft'); fixture.detectChanges();
+    finishRead(Response.json({data:{conversation:{id:'created',workspaceId:'personal',title:'late title'}}}));
+    await new Promise(resolve => setTimeout(resolve, 20)); fixture.detectChanges();
+    expect(root.querySelector('[data-testid="chat-header-title"]')?.textContent).not.toContain('late title');
+    expect(textarea.value).toBe('other draft');
+  });
+  it('retries a title subscription that ends before any event', async () => {
+    const {fixture, root} = await setup();
+    let subscriptions = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.query?.includes('CreateConversation')) return Response.json({data:{createConversation:conversation('retry-eof')}});
+      if (String(url).includes('/api/ag-ui')) return new Response(`data: ${JSON.stringify({type:'RUN_STARTED',threadId:body.threadId,runId:body.runId})}\n\ndata: ${JSON.stringify({type:'RUN_FINISHED',threadId:body.threadId,runId:body.runId})}\n\n`, {headers:{'Content-Type':'text/event-stream'}});
+      if (body.query?.includes('conversationTitleChanged')) {
+        subscriptions++;
+        if (subscriptions === 1) return new Response('', {headers:{'Content-Type':'text/event-stream'}});
+        return new Response('event:next\ndata:{"data":{"conversationTitleChanged":{"id":"retry-eof","version":"1","state":"DONE"}}}\n\n', {headers:{'Content-Type':'text/event-stream'}});
+      }
+      if (body.query?.includes('ConversationTitleRead')) return Response.json({data:{conversation:{id:'retry-eof',workspaceId:'personal',title:'EOF recovered'}}});
+      return Response.json({data:{}});
+    }));
+    input(root, 'first'); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('chat-input button[aria-label="Send message"]')!.click();
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.querySelector('[data-testid="chat-header-title"]')?.textContent).toContain('EOF recovered'); }, {timeout: 4000});
+    expect(subscriptions).toBe(2);
+  });
+  it('retries a temporary title subscription failure without blocking the run', async () => {
+    const {fixture, root} = await setup();
+    let runs = 0, subscriptions = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.query?.includes('CreateConversation')) return Response.json({data:{createConversation:conversation('retry-network')}});
+      if (String(url).includes('/api/ag-ui')) {
+        runs++;
+        return new Response(`data: ${JSON.stringify({type:'RUN_STARTED',threadId:body.threadId,runId:body.runId})}\n\ndata: ${JSON.stringify({type:'RUN_FINISHED',threadId:body.threadId,runId:body.runId})}\n\n`, {headers:{'Content-Type':'text/event-stream'}});
+      }
+      if (body.query?.includes('conversationTitleChanged')) {
+        subscriptions++;
+        if (subscriptions === 1) return new Response('', {status:503});
+        return new Response('event:next\ndata:{"data":{"conversationTitleChanged":{"id":"retry-network","version":"1","state":"DONE"}}}\n\n', {headers:{'Content-Type':'text/event-stream'}});
+      }
+      if (body.query?.includes('ConversationTitleRead')) return Response.json({data:{conversation:{id:'retry-network',workspaceId:'personal',title:'Recovered title'}}});
+      return Response.json({data:{}});
+    }));
+    input(root, 'first'); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('chat-input button[aria-label="Send message"]')!.click();
+    await vi.waitFor(() => expect(runs).toBe(1));
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.querySelector('[data-testid="chat-header-title"]')?.textContent).toContain('Recovered title'); }, {timeout: 4000});
+    expect(subscriptions).toBe(2);
+  });
+  it('watches again when a failed first run is followed by visible text', async () => {
+    const {fixture, root} = await setup();
+    let runCount = 0, subscriptions = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.query?.includes('CreateConversation')) return Response.json({data:{createConversation:conversation('retry')}});
+      if (String(url).includes('/api/ag-ui')) {
+        runCount++;
+        const frames = runCount === 1
+          ? [{type:'RUN_STARTED',threadId:'retry',runId:body.runId},{type:'RUN_ERROR',message:'synthetic failure'}]
+          : [{type:'RUN_STARTED',threadId:'retry',runId:body.runId},{type:'TEXT_MESSAGE_START',messageId:'answer',role:'assistant'},{type:'TEXT_MESSAGE_CONTENT',messageId:'answer',delta:'Visible reply'},{type:'TEXT_MESSAGE_END',messageId:'answer'},{type:'RUN_FINISHED',threadId:'retry',runId:body.runId}];
+        return new Response(frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join(''), {headers:{'Content-Type':'text/event-stream'}});
+      }
+      if (body.query?.includes('conversationTitleChanged')) {
+        subscriptions++;
+        const change = {id:'retry', version:subscriptions === 1 ? '0' : '1', state:subscriptions === 1 ? 'UNAVAILABLE' : 'DONE'};
+        return new Response(`event:next\ndata:${JSON.stringify({data:{conversationTitleChanged:change}})}\n\n`, {headers:{'Content-Type':'text/event-stream'}});
+      }
+      if (body.query?.includes('ConversationTitleRead')) return Response.json({data:{conversation:{id:'retry',workspaceId:'personal',title:'Retried title'}}});
+      return Response.json({data:{}});
+    }));
+    input(root, 'first'); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('chat-input button[aria-label="Send message"]')!.click();
+    await vi.waitFor(() => { fixture.detectChanges(); expect(runCount).toBe(1); expect(subscriptions).toBe(1); });
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.querySelector('chat-input button[aria-label="Send message"]')).toBeTruthy(); });
+    input(root, 'second'); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('chat-input button[aria-label="Send message"]')!.click();
+    await vi.waitFor(() => { fixture.detectChanges(); expect(runCount).toBe(2); expect(subscriptions).toBe(2); });
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.querySelector('[data-testid="chat-header-title"]')?.textContent).toContain('Retried title'); });
+  });
+  it('bounds title subscriptions without losing accepted pending conversations', async () => {
+    const {fixture, root} = await setup();
+    let created = 0, runs = 0;
+    const channels = new Map<string, ReadableStreamDefaultController<Uint8Array>>();
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.query?.includes('CreateConversation')) return Response.json({data:{createConversation:conversation(`queued-${++created}`)}});
+      if (String(url).includes('/api/ag-ui')) {
+        runs++;
+        return new Response(`data: ${JSON.stringify({type:'RUN_STARTED',threadId:body.threadId,runId:body.runId})}\n\ndata: ${JSON.stringify({type:'RUN_FINISHED',threadId:body.threadId,runId:body.runId})}\n\n`, {headers:{'Content-Type':'text/event-stream'}});
+      }
+      if (body.query?.includes('conversationTitleChanged')) return new Response(new ReadableStream<Uint8Array>({start(controller) { channels.set(body.variables.id, controller); }}), {headers:{'Content-Type':'text/event-stream'}});
+      if (body.query?.includes('ConversationTitleRead')) return Response.json({data:{conversation:{id:body.variables.id,workspaceId:'personal',title:'Done'}}});
+      return Response.json({data:{}});
+    }));
+    for (let i = 1; i <= 17; i++) {
+      if (i > 1) { root.querySelector<HTMLButtonElement>('main header button[aria-label="新對話"]')!.click(); fixture.detectChanges(); }
+      input(root, `question ${i}`); fixture.detectChanges();
+      root.querySelector<HTMLButtonElement>('chat-input button[aria-label="Send message"]')!.click();
+      await vi.waitFor(() => { fixture.detectChanges(); expect(runs).toBe(i); });
+      await vi.waitFor(() => { fixture.detectChanges(); expect(root.querySelector('chat-input button[aria-label="Send message"]')).toBeTruthy(); });
+    }
+    expect([...channels.keys()]).toEqual(['queued-1', 'queued-2']);
+    for (let i = 1; i <= 15; i++) {
+      const id = `queued-${i}`;
+      channels.get(id)!.enqueue(new TextEncoder().encode(`event:next\ndata:${JSON.stringify({data:{conversationTitleChanged:{id,version:'1',state:'DONE'}}})}\n\n`));
+      await vi.waitFor(() => expect(channels.has(`queued-${i + 2}`)).toBe(true));
+    }
+    expect(channels.size).toBe(17);
+  });
+  it('releases subscription capacity after completed title work', async () => {
+    const {fixture, root} = await setup();
+    let created = 0, subscribed = 0, runs = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.query?.includes('CreateConversation')) return Response.json({data:{createConversation:conversation(`new-${++created}`)}});
+      if (String(url).includes('/api/ag-ui')) {
+        runs++;
+        return new Response(`data: ${JSON.stringify({type:'RUN_STARTED',threadId:body.threadId,runId:body.runId})}\n\ndata: ${JSON.stringify({type:'RUN_FINISHED',threadId:body.threadId,runId:body.runId})}\n\n`, {headers:{'Content-Type':'text/event-stream'}});
+      }
+      if (body.query?.includes('conversationTitleChanged')) {
+        subscribed++;
+        return new Response(`event:next\ndata:${JSON.stringify({data:{conversationTitleChanged:{id:body.variables.id,version:'0',state:'UNAVAILABLE'}}})}\n\nevent:complete\ndata:\n\n`, {headers:{'Content-Type':'text/event-stream'}});
+      }
+      return Response.json({data:{}});
+    }));
+    for (let i = 1; i <= 17; i++) {
+      if (i > 1) { root.querySelector<HTMLButtonElement>('main header button[aria-label="新對話"]')!.click(); fixture.detectChanges(); }
+      input(root, `question ${i}`); fixture.detectChanges();
+      root.querySelector<HTMLButtonElement>('chat-input button[aria-label="Send message"]')!.click();
+      await vi.waitFor(() => { fixture.detectChanges(); expect(runs).toBe(i); expect(subscribed).toBe(i); });
+      await vi.waitFor(() => { fixture.detectChanges(); expect(root.querySelector('chat-input button[aria-label="Send message"]')).toBeTruthy(); });
+    }
+    expect(subscribed).toBe(17);
+  }, 15000);
+  it('does not subscribe to a populated historical sidebar or block a new run', async () => {
+    const subscriptions: string[] = []; let runs = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.query?.includes('Workspaces')) return Response.json({data:{workspaces:[{id:'personal',name:'Personal',role:'MANAGER',personal:true}]}});
+      if (body.query?.includes('defaultLocalBot')) return Response.json({data:{defaultLocalBot:local,bots:[botA,botB]}});
+      if (body.query?.includes('conversations(')) return Response.json({data:{conversations:body.variables.pinned ? [] : Array.from({length:20}, (_, i) => conversation(`old-${i}`))}});
+      if (body.query?.includes('SessionHistory')) return Response.json({data:{conversation:conversation('old-0')}});
+      if (body.query?.includes('CreateConversation')) return Response.json({data:{createConversation:conversation('created')}});
+      if (String(url).includes('/api/ag-ui')) {
+        runs++;
+        return new Response(`data: ${JSON.stringify({type:'RUN_STARTED',threadId:body.threadId,runId:body.runId})}\n\ndata: ${JSON.stringify({type:'RUN_FINISHED',threadId:body.threadId,runId:body.runId})}\n\n`, {headers:{'Content-Type':'text/event-stream'}});
+      }
+      if (body.query?.includes('conversationTitleChanged')) subscriptions.push(body.variables.id);
+      return Response.json({data:{}});
+    }));
+    const {fixture} = await setup(); fixture.detectChanges();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(subscriptions).toEqual([]);
+    const root = fixture.nativeElement as HTMLElement;
+    root.querySelector<HTMLButtonElement>('main header button[aria-label="新對話"]')!.click(); fixture.detectChanges();
+    input(root, 'new request'); fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('chat-input button[aria-label="Send message"]')!.click();
+    await vi.waitFor(() => expect(runs).toBe(1));
+    expect(subscriptions.every(id => id === 'created')).toBe(true);
+  });
   it('closes the mobile drawer after selecting a conversation', async () => {
     vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
     vi.stubGlobal('fetch', vi.fn(async (_url:string, init?:RequestInit) => {

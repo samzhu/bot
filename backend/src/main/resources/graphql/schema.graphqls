@@ -259,3 +259,6 @@ extend type Mutation {
  manualCostRevision(input: ManualCostRevisionInput!): CostRevisionResult!
  reconcileCost(input: ReconcileCostInput!): CostRevisionResult!
 }
+
+type ConversationTitleChange { id: ID! version: String! state: String! }
+type Subscription { conversationTitleChanged(conversationId: ID!): ConversationTitleChange! }

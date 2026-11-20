@@ -10,6 +10,7 @@ public interface ExecutionOperations {
     List<RunView> listRunsByConversation(String conversationId, int limit, int offset);
     StartRunOutcome startRun(String conversationId, String clientRequestId, String message, String userId);
     StartRunOutcome startAgUiRun(String conversationId, String runId, String message, String userId);
+    StartRunOutcome startAgUiRun(String conversationId, String runId, String message, String userId, java.util.concurrent.CompletionStage<Void> transportReady);
     CancelRunOutcome cancelRun(String runId, String userId);
 
     record StartRunOutcome(

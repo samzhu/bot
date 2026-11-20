@@ -30,6 +30,14 @@ export interface RangeFetchResult {
   providedIn: 'root'
 })
 export class ConversationListStore {
+  private titleRevision = 0;
+  private readonly titleUpdates = new Map<string, {revision: number; title: string}>();
+  titleReadRevision(): number { return this.titleRevision; }
+  private preserveNewerTitle(row: ConversationView, readRevision: number): ConversationView {
+    const update = this.titleUpdates.get(row.id);
+    return update && update.revision > readRevision ? {...row, title: update.title} : row;
+  }
+
   private workspaceId: string | null = null;
   setWorkspace(id: string | null): void { if (id === this.workspaceId) return; this.resetAll(); this.workspaceId = id; }
 
@@ -204,6 +212,7 @@ export class ConversationListStore {
    * 4. Clears pinRefreshError on success.
    */
   private async commitRangeRefetch(targetPinned: number, targetUnpinned: number, queryGen: number): Promise<boolean> {
+    const titleRevision = this.titleReadRevision();
     const [pinnedResult, unpinnedResult] = await Promise.all([
       this.fetchRangeByPinned(true, targetPinned),
       this.fetchRangeByPinned(false, targetUnpinned)
@@ -215,11 +224,11 @@ export class ConversationListStore {
     }
 
     // Single synchronous commit across both sections
-    this.pinnedConversations.set(pinnedResult.items);
+    this.pinnedConversations.set(pinnedResult.items.map(row => this.preserveNewerTitle(row, titleRevision)));
     this.pinnedOffset.set(pinnedResult.items.length);
     this.hasMorePinned.set(pinnedResult.hasMore);
 
-    this.unpinnedConversations.set(unpinnedResult.items);
+    this.unpinnedConversations.set(unpinnedResult.items.map(row => this.preserveNewerTitle(row, titleRevision)));
     this.unpinnedOffset.set(unpinnedResult.items.length);
     this.hasMoreUnpinned.set(unpinnedResult.hasMore);
 
@@ -275,6 +284,7 @@ export class ConversationListStore {
     this.loadMorePinnedError.set(null);
     const pageEpoch = ++this.currentPinnedPageEpoch;
     const queryGen = this.queryGeneration;
+    const titleRevision = this.titleReadRevision();
 
     try {
       const limit = 20;
@@ -291,7 +301,7 @@ export class ConversationListStore {
 
       if (itemsToAdd.length > 0) {
         const existingIds = new Set(this.pinnedConversations().map(c => c.id));
-        const unique = itemsToAdd.filter(c => !existingIds.has(c.id));
+        const unique = itemsToAdd.filter(c => !existingIds.has(c.id)).map(row => this.preserveNewerTitle(row, titleRevision));
         this.pinnedConversations.update(prev => [...prev, ...unique]);
         this.pinnedOffset.update(o => o + unique.length);
       }
@@ -322,6 +332,7 @@ export class ConversationListStore {
     this.loadMoreUnpinnedError.set(null);
     const pageEpoch = ++this.currentUnpinnedPageEpoch;
     const queryGen = this.queryGeneration;
+    const titleRevision = this.titleReadRevision();
 
     try {
       const limit = 20;
@@ -338,7 +349,7 @@ export class ConversationListStore {
 
       if (itemsToAdd.length > 0) {
         const existingIds = new Set(this.unpinnedConversations().map(c => c.id));
-        const unique = itemsToAdd.filter(c => !existingIds.has(c.id));
+        const unique = itemsToAdd.filter(c => !existingIds.has(c.id)).map(row => this.preserveNewerTitle(row, titleRevision));
         this.unpinnedConversations.update(prev => [...prev, ...unique]);
         this.unpinnedOffset.update(o => o + unique.length);
       }
@@ -525,9 +536,18 @@ export class ConversationListStore {
     }
   }
 
-  setActiveConversation(conv: ConversationView | null): void {
+  updateTitle(id: string, workspaceId: string, title: string): void {
+    if (this.workspaceId !== workspaceId) return;
+    this.titleUpdates.set(id, {revision: ++this.titleRevision, title});
+    const update = (rows: ConversationView[]) => rows.map(row => row.id === id ? {...row, title} : row);
+    this.pinnedConversations.update(update);
+    this.unpinnedConversations.update(update);
+    this.activeConversation.update(row => row?.id === id ? {...row, title} : row);
+  }
+
+  setActiveConversation(conv: ConversationView | null, readRevision = this.titleReadRevision()): void {
     // Retain strictly as independent metadata, never injecting into paginated list
-    this.activeConversation.set(conv);
+    this.activeConversation.set(conv ? this.preserveNewerTitle(conv, readRevision) : null);
   }
 
   addCreatedConversation(conv: ConversationView): void {
@@ -545,6 +565,7 @@ export class ConversationListStore {
   }
 
   resetAll(): void {
+    this.titleUpdates.clear();
     this.queryGeneration++;
     this.activePinTokens.clear();
     this.activeRetryToken = 0;

@@ -122,7 +122,7 @@ class AgUiDenialIntegrationTests {
             for (var entry:Map.of("RECOVERY_REQUIRED","RECOVERY_REQUIRED","OVERLOADED","OVERLOADED", "ADMISSION_UNAVAILABLE","ADMISSION_UNAVAILABLE",marker,"SERVICE_UNAVAILABLE").entrySet()) {
                 String run=UUID.randomUUID().toString();
                 doReturn(new ExecutionOperations.StartRunOutcome(ExecutionOperations.StartRunOutcome.Type.SERVICE_UNAVAILABLE,null,null,entry.getKey()))
-                        .when(execution).startAgUiRun(eq(conversation),eq(run),anyString(),eq("dev-user"));
+                        .when(execution).startAgUiRun(eq(conversation),eq(run),anyString(),eq("dev-user"),any());
                 var response=start(conversation,run);
                 assertFalse(response.body().contains(marker));
                 assertDenial(response,entry.getValue(),conversation,run);

@@ -30,7 +30,7 @@ class ConversationPinningUnitTests {
         JdbcAggregateTemplate jdbcTemp = mock(JdbcAggregateTemplate.class);
         BotOperations botOps = mock(BotOperations.class);
 
-        ConversationOperationsImpl ops = new ConversationOperationsImpl(convRepo, msgRepo, jdbcTemp, botOps, mock(WorkspaceOperations.class));
+        ConversationOperationsImpl ops = new ConversationOperationsImpl(convRepo, msgRepo, jdbcTemp, botOps, mock(WorkspaceOperations.class), mock(org.springframework.jdbc.core.JdbcTemplate.class));
 
         Conversation conv = new Conversation("c-1", "b-1", "Title", "foreign-user", "workspace-1", false, Instant.now(), Instant.now());
         when(convRepo.findById("c-1")).thenReturn(Optional.of(conv));
@@ -54,7 +54,7 @@ class ConversationPinningUnitTests {
 
         WorkspaceOperations workspaces = mock(WorkspaceOperations.class);
         when(workspaces.isMember("workspace-1", "owner-user")).thenReturn(true);
-        ConversationOperationsImpl ops = new ConversationOperationsImpl(convRepo, msgRepo, jdbcTemp, mock(BotOperations.class), workspaces);
+        ConversationOperationsImpl ops = new ConversationOperationsImpl(convRepo, msgRepo, jdbcTemp, mock(BotOperations.class), workspaces, mock(org.springframework.jdbc.core.JdbcTemplate.class));
 
         Conversation initial = new Conversation("c-1", "b-1", "Title", "owner-user", "workspace-1", false, Instant.now(), Instant.now());
         when(convRepo.findById("c-1"))

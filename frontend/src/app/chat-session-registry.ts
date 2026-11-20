@@ -25,7 +25,8 @@ export class ChatSessionRegistry {
   private readonly pending = new WeakMap<ChatSession, { raw: string; version: number; runId: string; settled: boolean; key: string }>();
   private readonly creationFailures = new Map<string, WritableSignal<{ runId: string; raw: string }[]>>();
   private readonly checks = new WeakMap<ChatSession, { runId: string; task: Promise<void> }>();
-  constructor(private readonly transport: ChatSessionTransport, private readonly newRunId: () => string = () => crypto.randomUUID(), private readonly onCreated?: (sourceKey: string, conversationId: string, source: ChatSession) => void) {}
+  constructor(private readonly transport: ChatSessionTransport, private readonly newRunId: () => string = () => crypto.randomUUID(), private readonly onCreated?: (sourceKey: string, conversationId: string, source: ChatSession) => void,
+      private readonly onVisible?: (conversationId: string, source: ChatSession) => void) {}
   session(key: string): ChatSession {
     let session = this.sessions.get(key);
     if (!session) {
@@ -79,9 +80,16 @@ export class ChatSessionRegistry {
         this.onCreated?.(key, source.conversationId, source);
       }
       dispatched = true;
+      let sawVisible = false;
       let result = await this.transport.run(source.conversationId, runId, raw, delta => {
         const pending = this.pending.get(source);
-        if (pending?.runId === runId && !pending.settled) source.partial.update(text => text + delta);
+        if (pending?.runId === runId && !pending.settled) {
+          source.partial.update(text => text + delta);
+          if (!sawVisible && delta.trim() && source.conversationId) {
+            sawVisible = true;
+            this.onVisible?.(source.conversationId, source);
+          }
+        }
       });
       if (this.pending.get(source)?.runId !== runId || this.pending.get(source)?.settled) return;
       if (result.status === 'DUPLICATE' || result.status === 'UNKNOWN') result = await this.transport.reconcile(source.conversationId, runId);
