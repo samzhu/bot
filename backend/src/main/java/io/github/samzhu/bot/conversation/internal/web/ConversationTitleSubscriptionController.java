@@ -2,8 +2,6 @@ package io.github.samzhu.bot.conversation.internal.web;
 
 import io.github.samzhu.bot.identity.CurrentUserProvider;
 import io.github.samzhu.bot.conversation.ConversationOperations;
-import io.github.samzhu.bot.conversation.ConversationTitleGenerator;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.graphql.data.method.annotation.Argument;
 import org.springframework.graphql.data.method.annotation.SubscriptionMapping;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -20,13 +18,11 @@ class ConversationTitleSubscriptionController {
     private final JdbcTemplate jdbc;
     private final ConversationOperations conversations;
     private final CurrentUserProvider currentUser;
-    private final ObjectProvider<ConversationTitleGenerator> generator;
 
-    ConversationTitleSubscriptionController(JdbcTemplate jdbc, ConversationOperations conversations, CurrentUserProvider currentUser, ObjectProvider<ConversationTitleGenerator> generator) {
+    ConversationTitleSubscriptionController(JdbcTemplate jdbc, ConversationOperations conversations, CurrentUserProvider currentUser) {
         this.jdbc = jdbc;
         this.conversations = conversations;
         this.currentUser = currentUser;
-        this.generator = generator;
     }
 
     record WorkState(String state, String version) {}
@@ -37,7 +33,6 @@ class ConversationTitleSubscriptionController {
         if (conversations.findConversationById(conversationId, user).isEmpty()) {
             throw new io.github.samzhu.bot.conversation.ConversationAccessDeniedException("Conversation access denied");
         }
-        if (generator.getIfAvailable() == null) return Flux.just(new ConversationTitleChange(conversationId, "0", "UNAVAILABLE"));
         // Poll only this authorized work item; a short lease bounds disconnected idle streams.
         return Flux.interval(Duration.ZERO, Duration.ofMillis(500))
                 .take(6)
@@ -54,7 +49,7 @@ class ConversationTitleSubscriptionController {
                     """, (rs, row) -> new WorkState(rs.getString(1), Long.toString(rs.getLong(2))), user, conversationId, user))
                         .subscribeOn(Schedulers.boundedElastic()))
                 .map(rows -> rows.isEmpty() ? new WorkState("UNAVAILABLE", "0") : rows.getFirst())
-                .takeUntil(work -> !work.state().equals("WAITING") && !work.state().equals("CLAIMED"))
+                .takeUntil(work -> !work.state().equals("WAITING") && !work.state().equals("READY") && !work.state().equals("CLAIMED"))
                 .last()
                 .map(work -> new ConversationTitleChange(conversationId, work.version(), work.state()))
                 .flux();

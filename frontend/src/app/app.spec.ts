@@ -1609,6 +1609,27 @@ describe('App ThreadPlane public behavior', () => {
     expect(root.querySelector('[data-testid="chat-header-title"]')?.textContent).not.toContain('late title');
     expect(textarea.value).toBe('other draft');
   });
+  it('reconciles the selected pending conversation after a reload', async () => {
+    let subscriptions = 0;
+    const row = {...conversation('reload-pending'), title:'New Conversation'};
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.query?.includes('Workspaces')) return Response.json({data:{workspaces:[{id:'personal',name:'Personal',role:'MANAGER',personal:true}]}});
+      if (body.query?.includes('defaultLocalBot')) return Response.json({data:{defaultLocalBot:local,bots:[botA,botB]}});
+      if (body.query?.includes('conversations(')) return Response.json({data:{conversations:[row]}});
+      if (body.query?.includes('SessionHistory')) return Response.json({data:{conversation:row}});
+      if (body.query?.includes('conversationTitleChanged')) {
+        subscriptions++;
+        return new Response('event:next\ndata:{"data":{"conversationTitleChanged":{"id":"reload-pending","version":"1","state":"DONE"}}}\n\n', {headers:{'Content-Type':'text/event-stream'}});
+      }
+      if (body.query?.includes('ConversationTitleRead')) return Response.json({data:{conversation:{id:'reload-pending',workspaceId:'personal',title:'Recovered after reload'}}});
+      return Response.json({data:{}});
+    }));
+    const {fixture, root} = await setup();
+    await vi.waitFor(() => { fixture.detectChanges(); expect(root.querySelector('[data-testid="chat-header-title"]')?.textContent).toContain('Recovered after reload'); });
+    expect(subscriptions).toBe(1);
+    expect(root.querySelector('#navigation-context')?.textContent).toContain('Recovered after reload');
+  });
   it('retries a title subscription that ends before any event', async () => {
     const {fixture, root} = await setup();
     let subscriptions = 0;

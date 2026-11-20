@@ -659,6 +659,8 @@ export class App implements OnInit {
           updatedAt: conv.updatedAt || ''
         };
         this.conversationStore.setActiveConversation(view, titleRevision);
+        // A selected pending title may have completed while this page was disconnected.
+        if (workspaceId && conv.title === 'New Conversation') this.titleUpdates.watch(workspaceId, [id]);
 
         // Resolve conversation's Bot if not already resolved
         if (conv.botId) {

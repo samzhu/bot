@@ -29,33 +29,73 @@ class ConversationTitleService implements ConversationTitleDispatch {
     private final ObjectProvider<ConversationTitleGenerator> generator;
     private final SimpleAsyncTaskExecutor executor;
     private final ThreadPoolTaskScheduler deadlines;
+    private final ThreadPoolTaskScheduler recovery;
     private final Semaphore concurrent = new Semaphore(2);
     private final Duration queueTimeout;
     private final Duration executionTimeout;
+    private final Duration recoveryWindow;
 
     ConversationTitleService(JdbcTemplate jdbc, TransactionTemplate transactions,
             ObjectProvider<ConversationTitleGenerator> generator,
             @Qualifier("conversationTitleExecutor") SimpleAsyncTaskExecutor executor,
             @Qualifier("conversationTitleDeadlines") ThreadPoolTaskScheduler deadlines,
+            @Qualifier("conversationTitleRecovery") ThreadPoolTaskScheduler recovery,
             @Value("${bot.conversation.title.queue-timeout:5s}") Duration queueTimeout,
-            @Value("${bot.conversation.title.execution-timeout:30s}") Duration executionTimeout) {
+            @Value("${bot.conversation.title.execution-timeout:30s}") Duration executionTimeout,
+            @Value("${bot.conversation.title.recovery-window:5m}") Duration recoveryWindow) {
         this.jdbc = jdbc;
         this.transactions = transactions;
         this.generator = generator;
         this.executor = executor;
         this.deadlines = deadlines;
+        this.recovery = recovery;
         this.queueTimeout = queueTimeout;
         this.executionTimeout = executionTimeout;
+        this.recoveryWindow = recoveryWindow;
     }
 
     @Override public void afterFirstVisibleReply(String conversationId) {
-        var available = generator.getIfAvailable();
-        if (available == null) return;
         try {
-            executor.execute(() -> runBounded(conversationId, available));
+            executor.execute(() -> {
+                jdbc.update("update conversation_title_work set state='READY', ready_until=clock_timestamp() + (? * interval '1 millisecond') where conversation_id=? and state='WAITING'", recoveryWindow.toMillis(), conversationId);
+                var available = generator.getIfAvailable();
+                if (available != null) runBounded(conversationId, available);
+            });
         } catch (RuntimeException ex) {
             log.warn("Unable to schedule conversation title work");
         }
+    }
+
+    @org.springframework.context.event.EventListener(org.springframework.boot.context.event.ApplicationReadyEvent.class)
+    void startRecovery() {
+        recovery.scheduleWithFixedDelay(this::recover, Duration.ofSeconds(1));
+    }
+
+    private void recover() {
+        try {
+            jdbc.update("update conversation_title_work set state='FAILED' where state='READY' and ready_until <= clock_timestamp()");
+            jdbc.update("update conversation_title_work set state='FAILED' where state='CLAIMED' and claimed_until <= clock_timestamp()");
+            var available = generator.getIfAvailable();
+            if (available == null) return;
+            // Take a finite snapshot; an ineligible READY must not monopolize recovery.
+            var ids = jdbc.query("""
+                select w.conversation_id from conversation_title_work w
+                join conversation c on c.id=w.conversation_id
+                where w.state='READY' and w.ready_until > clock_timestamp()
+                and c.title='New Conversation'
+                and exists (select 1 from message m where m.conversation_id=w.conversation_id and m.role='USER')
+                order by w.ready_until, w.conversation_id limit 2
+                """, (rs, row) -> rs.getString(1));
+            for (String id : ids) {
+                if (!concurrent.tryAcquire()) break;
+                try {
+                    executor.execute(() -> {
+                        try { runAcquired(id, available); }
+                        finally { concurrent.release(); }
+                    });
+                } catch (RuntimeException ex) { concurrent.release(); throw ex; }
+            }
+        } catch (RuntimeException ex) { log.warn("Unable to recover conversation title work"); }
     }
 
     private void runBounded(String conversationId, ConversationTitleGenerator available) {
@@ -63,9 +103,18 @@ class ConversationTitleService implements ConversationTitleDispatch {
         try {
             acquired = concurrent.tryAcquire(queueTimeout.toMillis(), TimeUnit.MILLISECONDS);
             if (!acquired) {
-                jdbc.update("update conversation_title_work set state='FAILED' where conversation_id=? and state='WAITING'", conversationId);
+                jdbc.update("update conversation_title_work set state='FAILED' where conversation_id=? and state='READY'", conversationId);
                 return;
             }
+            runAcquired(conversationId, available);
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+        } finally {
+            if (acquired) concurrent.release();
+        }
+    }
+
+    private void runAcquired(String conversationId, ConversationTitleGenerator available) {
             Thread worker = Thread.currentThread();
             AtomicBoolean expired = new AtomicBoolean();
             Instant expiresAt = Instant.now().plus(executionTimeout);
@@ -78,22 +127,17 @@ class ConversationTitleService implements ConversationTitleDispatch {
             try { generate(conversationId, available, expired, expiresAt); }
             catch (RuntimeException ex) { log.warn("Conversation title work could not complete"); }
             finally { if (deadline != null) deadline.cancel(false); }
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-        } finally {
-            if (acquired) concurrent.release();
-        }
     }
 
     private void generate(String conversationId, ConversationTitleGenerator available, AtomicBoolean expired, Instant expiresAt) {
         if (expired.get()) return;
         var input = transactions.execute(status -> {
             int claimed = jdbc.update("""
-                update conversation_title_work w set state='CLAIMED'
-                where w.conversation_id=? and w.state='WAITING' and clock_timestamp() < ?
+                update conversation_title_work w set state='CLAIMED', claimed_until=?
+                where w.conversation_id=? and w.state='READY' and clock_timestamp() < ? and clock_timestamp() < w.ready_until
                 and exists (select 1 from conversation c where c.id=w.conversation_id and c.title='New Conversation')
                 and exists (select 1 from message m where m.conversation_id=w.conversation_id and m.role='USER')
-                """, conversationId, java.sql.Timestamp.from(expiresAt));
+                """, java.sql.Timestamp.from(expiresAt), conversationId, java.sql.Timestamp.from(expiresAt));
             if (claimed != 1) return null;
             return jdbc.queryForObject("select content from message where conversation_id=? and role='USER' order by created_at, id limit 1", String.class, conversationId);
         });
@@ -142,6 +186,15 @@ class ConversationTitleExecutorConfiguration {
         var scheduler = new ThreadPoolTaskScheduler();
         scheduler.setPoolSize(1);
         scheduler.setThreadNamePrefix("conversation-title-deadline-");
+        return scheduler;
+    }
+
+    // A blocked recovery query must not occupy the deadline scheduler.
+    @Bean(name = "conversationTitleRecovery", defaultCandidate = false)
+    ThreadPoolTaskScheduler conversationTitleRecovery() {
+        var scheduler = new ThreadPoolTaskScheduler();
+        scheduler.setPoolSize(1);
+        scheduler.setThreadNamePrefix("conversation-title-recovery-");
         return scheduler;
     }
 

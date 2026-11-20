@@ -84,7 +84,7 @@ export class ConversationTitleUpdates {
                     if (await this.refresh(workspaceId, id, signal)) this.versions.set(id, version);
                     else retry = true;
                   }
-                  pending = retry || change.state === 'WAITING' || change.state === 'CLAIMED';
+                  pending = retry || change.state === 'WAITING' || change.state === 'READY' || change.state === 'CLAIMED';
                   terminal = true;
                 } else if (event?.errors) { terminal = true; error = true; }
               }
