@@ -33,7 +33,9 @@
   } @else {
   <div class="primary-panel">
   @if (initializing()) { <p role="status">載入中…</p> }
+  @if (mode() === 'bots') {
   <button class="compact-action" type="button" aria-label="新對話" title="新對話" [disabled]="initializing()" (click)="newChat()"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v16M4 12h16"/></svg><span class="icon-hint" aria-hidden="true">新對話</span></button>
+  }
 
   </div>
   <div class="navigation">

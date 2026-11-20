@@ -39,6 +39,7 @@
         <header chatHeader class="header"><span class="workspace-name" tabindex="0" [title]="selectedWorkspaceName()">{{selectedWorkspaceName()}}</span><h1 data-testid="chat-header-title" tabindex="0" [title]="currentTitle()">{{currentTitle()}}</h1>
           @if (specifiedBot(); as bot) { <div data-testid="header-bot-meta"><span data-testid="header-bot-name" tabindex="0" [title]="bot.name">{{bot.name}}</span>
             @if (getModeDisplay(bot).isSimulated || !bot.canChat) { <span data-testid="header-execution-mode">{{getModeDisplay(bot).isSimulated ? '模擬' : '停用'}}</span> }</div> }
+          <button class="new-conversation" type="button" aria-label="新對話" [disabled]="isInitializing()" (click)="navigation()?.newChat()">新對話</button>
         </header>
       </app-chat-surface>
     </div>

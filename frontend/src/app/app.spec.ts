@@ -808,7 +808,7 @@ describe('App ThreadPlane public behavior', () => {
   it('returns focus to the feature rail when collapsing a focused context', async () => {
     const {fixture, root} = await setup();
     const toggle = root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!;
-    const action = root.querySelector<HTMLButtonElement>('#navigation-context button[aria-label="新對話"]')!;
+    const action = root.querySelector<HTMLButtonElement>('#navigation-context button[aria-label="收合側欄"]')!;
     document.body.appendChild(root); action.focus(); expect(document.activeElement).toBe(action);
     toggle.click(); fixture.detectChanges();
     expect(document.activeElement).toBe(root.querySelector('nav button[aria-label="對話"]'));
@@ -1195,9 +1195,50 @@ describe('App ThreadPlane public behavior', () => {
     expect(select).not.toBeNull();
     expect(Array.from(select!.options).map(option => option.textContent)).toEqual(['Personal', 'Other']);
   });
-  it('keeps new conversation without a routine reload in the compact sidebar', async () => {
+  it('offers a named new conversation action in the chat main header', async () => {
     const {root} = await setup();
-    expect(root.querySelector('#navigation-context button[aria-label="新對話"]')).not.toBeNull();
+    expect(root.querySelector('main header button[aria-label="新對話"]')).not.toBeNull();
+  });
+  it('starts a draft from the header without creating a conversation or losing its raw text', async () => {
+    const {fixture, root} = await setup();
+    const raw = '  original\n draft  ';
+    input(root, raw); fixture.detectChanges();
+    const before = requests.length;
+    const button = root.querySelector<HTMLButtonElement>('main header button[aria-label="新對話"]')!;
+    button.click(); fixture.detectChanges();
+    expect(root.querySelector<HTMLTextAreaElement>('chat-input textarea')!.value).toBe(raw);
+    expect(requests).toHaveLength(before);
+    expect(button.disabled).toBe(false);
+  });
+  it('keeps focus on the new conversation button after the mobile drawer has closed', async () => {
+    vi.stubGlobal('matchMedia', () => ({matches:true, addEventListener:()=>{}, removeEventListener:()=>{}, addListener:()=>{}, removeListener:()=>{}}));
+    const {fixture, root} = await setup();
+    document.body.appendChild(root);
+    try {
+      const opener = root.querySelector<HTMLButtonElement>('button[aria-label="開啟導覽"]')!;
+      opener.style.display = 'block'; // jsdom does not apply the stubbed media query.
+      opener.click();
+      fixture.detectChanges();
+      const drawer = root.querySelector<HTMLElement>('[role="dialog"][aria-label="側欄導覽"]')!;
+      await vi.waitFor(() => expect(document.activeElement).toBe(drawer));
+      drawer.querySelector<HTMLButtonElement>('button[aria-label="關閉導覽"]')!.click();
+      fixture.detectChanges();
+      await vi.waitFor(() => expect(document.activeElement).toBe(opener));
+
+      const button = root.querySelector<HTMLButtonElement>('main header button[aria-label="新對話"]')!;
+      button.focus();
+      expect(document.activeElement).toBe(button);
+      button.click();
+      fixture.detectChanges();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(document.activeElement).toBe(button);
+    } finally {
+      root.remove();
+    }
+  });
+  it('keeps the chat sidebar free of duplicate new conversation and routine reload actions', async () => {
+    const {root} = await setup();
+    expect(root.querySelector('#navigation-context button[aria-label="新對話"]')).toBeNull();
     expect(root.querySelector('#navigation-context button[aria-label="重新載入對話"]')).toBeNull();
   });
   it('peeks from the collapsed desktop rail without changing the draft or docking preference', async () => {
@@ -1281,7 +1322,7 @@ describe('App ThreadPlane public behavior', () => {
     const {fixture, root} = await setup();
     root.querySelector<HTMLButtonElement>('button:is([aria-label="收合側欄"], [aria-label="固定側欄"])')!.click(); fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('nav button[aria-label="對話"]')!.click(); fixture.detectChanges();
-    const button = root.querySelector<HTMLButtonElement>('#navigation-context button[aria-label="新對話"]')!;
+    const button = root.querySelector<HTMLButtonElement>('main header button[aria-label="新對話"]')!;
     button.click(); fixture.detectChanges();
     expect(root.querySelector<HTMLElement>('#navigation-context')!.hidden).toBe(true);
   });

@@ -278,13 +278,15 @@ describe('ChatNavigationComponent', () => {
     expect(fixture.nativeElement.querySelector('.search-alert button')).toBeTruthy();
   });
 
-  it('keeps the workspace selector and new chat in the context', async () => {
+  it('keeps new chat in the Bot context and the workspace selector in its panel', async () => {
     const fixture = TestBed.createComponent(ChatNavigationComponent);
     fixture.componentRef.setInput('workspaces', [{ id: 'w1', name: 'Personal' }]);
     fixture.componentRef.setInput('workspaceId', 'w1');
     fixture.detectChanges(); await settle(fixture);
     const root = fixture.nativeElement as HTMLElement;
     expect(root.querySelector('.workspace-label')).toBeNull();
+    expect(root.querySelector('button[aria-label="新對話"]')).toBeNull();
+    fixture.componentRef.setInput('mode', 'bots'); fixture.detectChanges();
     expect(root.querySelector('button[aria-label="新對話"]')).not.toBeNull();
     fixture.componentRef.setInput('workspacePanelOpen', true); fixture.detectChanges();
     expect(root.querySelector('.workspace-label')?.textContent).toContain('目前工作區：Personal');

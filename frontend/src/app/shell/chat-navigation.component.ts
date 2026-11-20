@@ -197,7 +197,7 @@ export class ChatNavigationComponent implements OnInit {
     this.search.closeSearch();
     this.newChatRequested.emit();
     if (this.peek()) this.peekClosed.emit();
-    if (this.layoutMode() === 'drawer') this.setNavigationOpen(false);
+    if (this.layoutMode() === 'drawer' && this.navigationOpen()) this.setNavigationOpen(false);
   }
 
   readonly pinned = computed(() => this.toThreads(this.conversations.pinnedConversations()));
