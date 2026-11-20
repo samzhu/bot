@@ -10,6 +10,7 @@
     "test": "ng test --no-watch --no-progress && npm run test:parser",
     "test:unit": "ng test --no-watch --no-progress",
     "test:layout": "npm run test:unit -- --include=src/app/app.spec.ts --include=src/app/app-threadplane.spec.ts --include=src/app/shell/chat-navigation.component.spec.ts",
+    "test:layout:browser": "node e2e/app-shell-layout.mjs",
     "test:parser": "node --test src/app/sse-parser.spec.mjs",
     "test:guard": "node --test test/*.test.mjs"
   },

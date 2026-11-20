@@ -56,8 +56,6 @@
 
 - 每次規劃、開票、修改或驗收涉及套件行為的工作，以及依賴升級、文件與實作不一致時，重新確認實際解析版本與對應章節；沿用舊結論前檢查版本與文件是否已變動。
 - **AG-UI**：涉及 Agent 通訊時查閱[官方協定](https://docs.ag-ui.com/)、[HttpAgent](https://docs.ag-ui.com/sdk/js/client/http-agent)與 [Middleware](https://docs.ag-ui.com/sdk/js/client/middleware)，搭配 ThreadPlane adapter 與固定版本公開型別查核事件、識別字、取消及復原；區分瀏覽器能力與可信伺服器責任。
-- **Angular／CDK**：查閱 [Angular 官方文件](https://angular.dev/)與 [CDK 官方文件](https://material.angular.dev/cdk/categories)，核對目前版本的表單、signals、元件生命週期、無障礙及測試能力。
-- **ThreadPlane**：涉及替換或使用其聊天元件／Agent adapter 時，先讀 [Angular 指南](https://threadplane.ai/docs/angular/chat/getting-started/introduction)，由 [API 索引](https://threadplane.ai/docs/api?mode=docs)進入對應元件與 adapter；對照 npm 實際發布版本、peer dependencies、公開型別及原碼，區分未發布的開發 API，並查核輸入、取消、持久化與生命週期的應用責任。
 - **Spring AI**：使用[目前指定的 2.1 reference](https://docs.spring.io/spring-ai/reference/2.1/index.html)，並核對實際 BOM／module 版本；RC API 有落差時查同版 tag、JAR 與 release notes。
 - **Spring Boot／Framework**：查閱 [Boot reference](https://docs.spring.io/spring-boot/reference/)、[配置屬性表](https://docs.spring.io/spring-boot/appendix/application-properties/index.html)及 [Framework reference](https://docs.spring.io/spring-framework/reference/)，依工作選讀配置、測試、開發服務、GraphQL、串流生命週期與打包章節。
 - **模型／雲端整合**：以 [Gemini API 官方文件](https://ai.google.dev/gemini-api/docs)、[Google AI Studio](https://aistudio.google.com/)及 [Google Cloud 官方文件](https://cloud.google.com/docs)確認模型識別字、能力、限制與部署選項；設定中的模型名稱與實際 SDK 支援須分別核對。
@@ -104,13 +102,7 @@
    - 避免冗餘封裝：無第二種實作需求時，不預先建立無實質效益的空介面；非必要不強迫移除所有 starter。
    - 排除配置查證：若需使用 `autoconfigure.exclude`，須先查閱官方與實際自動配置機制，並於程式碼中明確註解排除理由。
 
-5. **前端開發與元件規範**
-   - 需求追溯：規劃、實作與驗收前，先核對使用者指定的需求與設計依據，建立可追溯的對照；偏差、取捨與驗收條件記錄於規格 Issue。AGENTS.md 僅保存跨任務工作原則，具體功能與畫面設計集中於規格。
-   - 標準與型別優先：遵循專案已安裝之穩定 Angular 規範；使用 ThreadPlane 先查閱官方手冊與已發布的 TypeScript 型別宣告。
-   - 樣式整合原則：採用 SDK 原生預設樣式，不覆寫 SDK 私有內部 CSS；設計參考之 PDF 僅作功能與版面配置參考，不可視為直接 UI 樣式來源。
-   - 標準元件回退：SDK 欠缺通用管理控制項時，評估採用標準 Angular/HTML 能力，不捏造假 API 或假 Handler。
-   - 共用版面與狀態邊界：應用殼層負責共用導覽、版面切換和全域快捷鍵。功能元件負責自己的內容與互動，聊天狀態由對話來源管理。收合、切換功能或跨斷點時，依合約保留草稿、執行中 Run、選取及桌面停駐偏好。新結構先在規格記錄適用範圍，待有可觀察、穩定的合約再加入自動檢查。
-   - 鍵盤與響應式：修改共用導覽時，分別驗證桌面的停駐與暫開、手機抽屜、跨斷點的收合與焦點恢復。檢查快捷鍵、Escape、Tab、可存取名稱及展開狀態，並保留文字輸入及 IME 的既有行為。
+5. **前端**：規劃、修改或驗收 `frontend/` 時，先讀[前端開發守則](frontend/DEVELOPMENT.md)，依其中的模組邊界、版面約定與建置及瀏覽器驗收執行。
 
 ## 四、驗收品質與環境安全
 
@@ -121,8 +113,6 @@
 2. **真實行為驗收與模型測試隔離**
    - 可觀察驗收：驗收聚焦於外部公開 API、可觀察行為、真實 PostgreSQL 資料庫狀態及必要之瀏覽器操作；依實際風險評估，不因未執行無關之發布流程視為缺口，亦不將常態文件維護包裝成功能缺口。
    - 測試成本防護：一般自動化測試一律使用 Fake/Spy 模擬模型，防止產生非預期付費呼叫；真實模型之 Smoke 測試須維持獨立隔離並明確手動觸發。
-   - 前端建置門檻：完整建置使用 `cd frontend && npm run build`。此入口每次先跑既有版面與導覽行為測試，通過才執行 Angular 應用程式建置。直接執行 `ng build`、開發伺服器或 watch 的結果僅供開發迭代。
-   - 版面驗收：變更共用版面或導覽時，同一候選須通過上述完整建置及受影響的公開行為測試。若改到實際排版、捲動或響應式呈現，另在 Chrome 用相關桌面和手機視窗查核，記錄視窗尺寸、操作結果及必要截圖。瀏覽器驗收涉及後端時使用已驗證的 Fake 模型環境。
 
 3. **系統狀態真實性**
    - 誠實呈現狀態：外部整合（如 GCP 連線或特定推論狀態）尚未實際串接時，須誠實呈現未連線或未就緒狀態，不虛構 READY 或成功狀態；允許明確標示的本機模擬，不能以本機實作冒充遠端成功。

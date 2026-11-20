@@ -2,6 +2,8 @@
 
 Angular with ThreadPlane native components and the AG-UI adapter. See the
 [root README](../README.md) for prerequisites, profiles and ./dev.sh startup.
+Read the [frontend development guide](DEVELOPMENT.md) before planning, changing,
+or reviewing frontend work.
 
 ## Local checks
 
@@ -19,25 +21,15 @@ Dependency verification also uses npm ls and npm audit.
 This project invokes ESLint directly through npm. The Angular CLI's `ng lint`
 command delegates to a configured lint builder. [Angular CLI lint reference](https://angular.dev/cli/lint)
 
-## Frontend ownership
-
-`src/app/app.ts` composes the application. `src/app/shell/` holds the shared
-navigation component, its template, styles and tests. Keeping them together
-follows the [Angular style guide](https://angular.dev/style-guide#group-closely-related-files-together-in-the-same-directory).
-`src/app/bot/` owns Bot management. For this project, production code in shell
-and Bot may use feature interfaces. App
-composes both, so shell and Bot cannot import App, and Bot cannot import shell.
-Integration specs can import App to test the composed UI.
-
-ESLint matches static module specifiers as written. Review module aliases,
-dynamic imports and indirect dependency paths when changing these boundaries.
-ESLint also checks public ThreadPlane entry points in TypeScript and image
-alternative text and form labels in external and inline Angular templates.
-[Angular ESLint configuration](https://github.com/angular-eslint/angular-eslint/blob/main/docs/CONFIGURING_ESLINT.md)
-
 ## Browser verification
 
-The current suites require a running frontend and a verified fake-model backend:
+After `npm run build`, run `npm run test:layout:browser` to measure the rendered
+app shell in Chrome using isolated read-only fixtures. The check serves the
+build and fixtures through browser interception and needs no running services.
+Set `CHROME_PATH` if Chrome is installed in a nonstandard location. The
+[frontend development guide](DEVELOPMENT.md#建置與驗收) documents what this check covers.
+
+The integration suites require a running frontend and a verified fake-model backend.
 
     node e2e/threadplane-chat.mjs
     node e2e/threadplane-navigation.mjs
