@@ -81,6 +81,8 @@ npm start
 ```
 
 Access the UI at `http://localhost:4200`.
+See the [frontend development guide](frontend/DEVELOPMENT.md) for module
+boundaries, app shell layout conventions, and verification requirements.
 
 ---
 
@@ -126,9 +128,13 @@ npm run test:unit
 # 3. SSE Stream Parser test suite alone
 npm run test:parser
 
-# 4. Production bundle build (verified within angular.json budgets)
+# 4. Lint, layout behavior tests, and production build
 npm run build
 ```
+
+After building, run `npm run test:layout:browser` in `frontend/` to verify the
+rendered app shell in Chrome with isolated fixtures. This check needs no
+running servers. See [frontend browser verification](frontend/README.md#browser-verification).
 
 ### End-to-End Browser Automation
 
@@ -163,26 +169,34 @@ not count as current validation. See [frontend verification details](frontend/RE
 
 ## 5. Architectural Boundaries & MVP Limitations
 
-### UI and Protocol
+### 前端套件 ThreadPlane
 
-ThreadPlane supplies the native Sidenav, thread list, search palette, chat window,
-messages, Markdown, input, typing indicator, error UI and applicable management
-controls. Controls without a matching published component use standard Angular /
-HTML. CopilotKit is removed; LangGraph is not used.
+ThreadPlane 提供 Angular 聊天元件與 AG-UI 轉接層。下表版本於 2026-11-20 依本專案的
+[前端鎖檔](frontend/package-lock.json)與已安裝套件核對。套件介面可查閱 [ThreadPlane Angular 指南](https://threadplane.ai/docs/angular/chat/getting-started/introduction)與 [API 參考](https://threadplane.ai/docs/api)。
 
-Normal chat posts to /api/ag-ui through @threadplane/ag-ui and @ag-ui/client.
-Bot management, history, pinning and authoritative status checks use GraphQL.
-Each Conversation owns its Run and draft state independently of the selected view.
-New Chat creates no persisted Conversation until the first valid submission.
+| 套件 | 鎖定版本 | 在本專案的用途 |
+| --- | --- | --- |
+| `@threadplane/chat` | `0.3.7` | 提供聊天視窗、訊息、輸入框、串流 Markdown、回覆中與錯誤提示、對話列表、搜尋面板、手機側欄遮罩、Bot 管理的下拉選單與基礎樣式。 |
+| `@threadplane/ag-ui` | `0.3.7` | `toAgent()` 將 AG-UI 串流事件轉成聊天元件使用的 `Agent` 狀態。 |
+| `@threadplane/a2ui` | `0.3.7` | 聊天 SDK 的同儕依賴，提供 A2UI 協定型別與解析工具。 |
+| `@threadplane/render` | `0.3.7` | 聊天 SDK 的同儕依賴，可將結構化 UI 規格渲染成 Angular 元件。此 MVP 的助理回覆採串流 Markdown。 |
+| `@threadplane/telemetry` | `0.3.7` | SDK 的遙測同儕依賴。聊天轉接層明確設定 `telemetry: false`。 |
+
+應用程式自行管理整體版面、Workspace 切換、草稿、Run 的送出與取消。一般聊天透過
+`@ag-ui/client@1.0.4` 的 `HttpAgent` 向 Spring Boot 的 `POST /api/ag-ui` 送出請求並接收 SSE，
+再由 `@threadplane/ag-ui` 將事件交給 Angular 元件。使用者權限、提示詞、模型執行、預算與持久化由後端負責。
+Bot 管理、歷史、釘選及 Run 狀態查詢走 GraphQL。每個 Conversation 分別管理 Run 和草稿，切換畫面可保留這些狀態。
+新對話在首次有效送出時才會寫入資料庫。參閱 [ThreadPlane `toAgent()`](https://threadplane.ai/docs/api/ag-ui/toAgent)與 [AG-UI `HttpAgent`](https://docs.ag-ui.com/sdk/js/client/http-agent)。
 
 ### Dependency Verification
 
-As verified on 2026-11-12, ThreadPlane packages are pinned to 0.3.7, AG-UI core /
-client to 1.0.4 and Zod to 4.6.6. Optional KaTeX is omitted; the previous scoped
+As verified on 2026-11-12, AG-UI core and client were pinned to 1.0.4 and Zod to
+4.6.6. Optional KaTeX is omitted; the previous scoped
 override is removed. The resolved tree contains no CopilotKit packages, and the
 verification npm audit reported zero vulnerabilities. Recheck the actual lockfile
-and audit when dependencies change. Runtime telemetry is disabled; installs used
-TPLANE_TELEMETRY_DISABLED=1 and --ignore-scripts to disable the installation collector.
+and audit when dependencies change. The documented install command uses
+`TPLANE_TELEMETRY_DISABLED=1` and `--ignore-scripts` to disable the installation collector.
+See [ThreadPlane telemetry and opt-out](https://threadplane.ai/privacy).
 
 ### Execution and Recovery Boundary
 
