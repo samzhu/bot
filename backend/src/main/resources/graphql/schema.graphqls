@@ -182,7 +182,7 @@ type UsagePageInfo { hasNextPage: Boolean! endCursor: String }
 type UsageAttemptConnection { nodes: [UsageAttempt!]! pageInfo: UsagePageInfo! }
 type UsageSnapshotConnection { nodes: [UsageSnapshot!]! pageInfo: UsagePageInfo! }
 type UsageAttempt {
- id: ID! workspaceId: ID! runId: ID providerRequestId: String providerResponseId: String preparedAt: String! startedAt: String finishedAt: String
+ id: ID! workspaceId: ID! runId: ID purpose: String! titleConversationId: ID providerRequestId: String providerResponseId: String preparedAt: String! startedAt: String finishedAt: String
  provider: String! endpoint: String! model: String! channel: String! executionOutcome: String!
  usagePresence: UsagePresence! captureCompleteness: CaptureCompleteness! projectionError: String
  projectionState: ProjectionState! projectionVersion: String! effectiveSnapshotId: ID simulation: Boolean! attemptCoverage: AttemptCoverage!

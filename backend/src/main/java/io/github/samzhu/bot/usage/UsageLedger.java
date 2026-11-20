@@ -44,6 +44,7 @@ public interface UsageLedger {
             String runId,
             String workspaceId,
             String actorId,
+            String purpose,
             String provider,
             String endpoint,
             String model,

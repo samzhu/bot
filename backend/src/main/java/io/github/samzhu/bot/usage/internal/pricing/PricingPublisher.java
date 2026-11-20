@@ -47,15 +47,18 @@ public class PricingPublisher {
         var fixture = FakePricingEvidence.dialect(input);
         boolean realGoogle = "GOOGLE".equals(input.provider()) && "generateContent".equals(input.endpoint()) && "GEMINI_API".equals(input.channel());
         String calcProvider = fixture != null ? fixture.provider() : "gemini";
-        String calcEndpoint = fixture != null ? fixture.endpoint() : "generateContent";
-        boolean extraCostsAbsent = fixture != null && fixture.textOnlyEvidence();
+        boolean title = "CONVERSATION_TITLE".equals(input.purpose()) && "GOOGLE".equals(input.provider())
+                && "interactions".equals(input.endpoint()) && "gemini-3.5-flash-lite".equals(input.model())
+                && "GEMINI_API".equals(input.channel());
+        String calcEndpoint = fixture != null ? fixture.endpoint() : title ? "interactions" : "generateContent";
+        boolean extraCostsAbsent = title || (fixture != null && fixture.textOnlyEvidence());
         PricingCalculator.Estimate estimate = null;
         List<String> reasons = new ArrayList<>();
         if (undispatched) reasons.add("NOT_DISPATCHED");
         else if (!"MATCHED".equals(choice.state())) {
             reasons.add(switch (choice.state()) { case "MISSING" -> "MISSING_PRICE"; case "OVERLAPPING" -> "OVERLAPPING_PRICE"; default -> "LEGACY_UNPRICED"; });
             if ("MISSING".equals(choice.state()) && snapshot != null && "VALID".equals(input.projectionState())
-                    && "JSONB".equals(snapshot.rawState()) && (realGoogle || fixture != null)) {
+                    && "JSONB".equals(snapshot.rawState()) && (realGoogle || title || fixture != null)) {
                 estimate = new PricingCalculator().estimate(new PricingCalculator.Input(calcProvider, calcEndpoint, input.model(), input.channel(), snapshot.rawJson(),
                     "FINAL".equals(snapshot.semantic()), "VERIFIED".equals(input.attemptCoverage()), extraCostsAbsent), null);
                 for (var r:estimate.reasons()) if (!reasons.contains(r.name())) reasons.add(r.name());
@@ -64,7 +67,7 @@ public class PricingPublisher {
             }
         }
         else if (!"VALID".equals(input.projectionState()) || snapshot == null || !"JSONB".equals(snapshot.rawState())) reasons.add(input.projectionReason() == null ? "USAGE_UNKNOWN" : input.projectionReason());
-        else if (!realGoogle && fixture == null) reasons.add("UNSUPPORTED_ENDPOINT");
+        else if (!realGoogle && !title && fixture == null) reasons.add("UNSUPPORTED_ENDPOINT");
         else {
             var calcPrice = new PriceSnapshot(calcProvider, calcEndpoint, input.model(), input.channel(), choice.revision(), choice.rates());
             estimate = new PricingCalculator().estimate(new PricingCalculator.Input(calcProvider, calcEndpoint, input.model(), input.channel(), snapshot.rawJson(),

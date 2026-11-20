@@ -229,11 +229,12 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
                 if ((boolean)policy.get("enabled")) {
                     var cap=(java.math.BigDecimal)policy.get("cap_usd");
                     var known=(java.math.BigDecimal)policy.get("known_subtotal_usd");
-                    if (cap.signum()==0 || (known!=null && known.compareTo(cap)>=0)) return new RegisterResult.Denied(Reason.MONTH_CAP);
+                    var held=titleMonthHolds(command.workspaceId(),command.partition(),period);
+                    if (cap.signum()==0 || (known==null ? java.math.BigDecimal.ZERO : known).add(held).compareTo(cap)>=0) return new RegisterResult.Denied(Reason.MONTH_CAP);
                     if ((boolean)policy.get("terminal_effective_unknown")) return new RegisterResult.Denied(Reason.MONTH_UNKNOWN);
                 }
                 var weekly=weeklyBudgets.select(command.workspaceId(),command.actorId(),command.partition(),sampledAt);
-                var weeklyReason=weeklyReason(weekly);
+                var weeklyReason=weeklyReason(weekly, titleWeekHolds(command.workspaceId(),command.actorId(),command.partition(),weekly));
                 if (weeklyReason!=null) return new RegisterResult.Denied(weeklyReason);
                 var registration = new Registration(UUID.randomUUID().toString(), command.workspaceId(),
                         command.runId(), command.actorId(), command.conversationId(), command.partition());
@@ -395,11 +396,12 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
             if ((boolean)budget.get("enabled")) {
                 var cap=(java.math.BigDecimal)budget.get("cap_usd");
                 var known=(java.math.BigDecimal)budget.get("known_subtotal_usd");
-                if (cap.signum()==0 || (known!=null && known.compareTo(cap)>=0)) return resolveDenied(command,Reason.MONTH_CAP);
+                var held=titleMonthHolds(r.workspaceId(),r.partition(),period);
+                if (cap.signum()==0 || (known==null ? java.math.BigDecimal.ZERO : known).add(held).compareTo(cap)>=0) return resolveDenied(command,Reason.MONTH_CAP);
                 if ((boolean)budget.get("terminal_effective_unknown")) return resolveDenied(command,Reason.MONTH_UNKNOWN);
             }
             var weekly=weeklyBudgets.select(r.workspaceId(),r.actorId(),r.partition(),sampled.startedAt());
-            var weeklyReason=weeklyReason(weekly);
+            var weeklyReason=weeklyReason(weekly, titleWeekHolds(r.workspaceId(),r.actorId(),r.partition(),weekly));
             if (weeklyReason!=null) return resolveDenied(command,weeklyReason);
             int changed=jdbc.update("update provider_attempt set started_at=?,catalog_marker=?,catalog_revision_id=?,projection_version=projection_version+1 where id=? and started_at is null and execution_outcome='IN_PROGRESS'",
                     java.sql.Timestamp.from(sampled.startedAt()),sampled.revisionId()==null?"NO_CATALOG":"CAPTURED",sampled.revisionId(),command.attemptId());
@@ -421,9 +423,16 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
         });
     }
 
-    private Reason weeklyReason(io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Budget budget) {
+    private java.math.BigDecimal titleMonthHolds(String workspace, Partition partition, YearMonth period) {
+        return jdbc.queryForObject("select coalesce(sum(amount_usd),0) from workspace_title_reservation where workspace_id=? and partition=? and month_start=? and state in ('HELD','UNKNOWN')", java.math.BigDecimal.class, workspace, partition.name(), period.atDay(1));
+    }
+    private java.math.BigDecimal titleWeekHolds(String workspace, String actor, Partition partition, io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Budget budget) {
+        return jdbc.queryForObject("select coalesce(sum(amount_usd),0) from workspace_title_reservation where workspace_id=? and actor_id=? and partition=? and reserved_at>=? and reserved_at<? and state in ('HELD','UNKNOWN')", java.math.BigDecimal.class, workspace, actor, partition.name(), java.sql.Timestamp.from(budget.start()), java.sql.Timestamp.from(budget.end()));
+    }
+    private Reason weeklyReason(io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Budget budget, java.math.BigDecimal held) {
         if (!budget.enabled()) return null;
-        if (budget.capUsd().signum()==0 || (budget.knownSubtotalUsd()!=null && budget.knownSubtotalUsd().compareTo(budget.capUsd())>=0)) return Reason.WEEK_CAP;
+        var spent=budget.knownSubtotalUsd()==null ? java.math.BigDecimal.ZERO : budget.knownSubtotalUsd();
+        if (budget.capUsd().signum()==0 || spent.add(held).compareTo(budget.capUsd())>=0) return Reason.WEEK_CAP;
         return budget.terminalUnknownCount()>0 ? Reason.WEEK_UNKNOWN : null;
     }
     @Override public CompletionStage<ClaimInspection> inspectClaim(Registration registration,String attemptId) {

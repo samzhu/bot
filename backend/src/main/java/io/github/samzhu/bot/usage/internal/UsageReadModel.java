@@ -8,6 +8,8 @@ final class UsageReadModel {
             String id,
             String workspaceId,
             String runId,
+            String purpose,
+            String titleConversationId,
             String providerRequestId,
             String providerResponseId,
             String preparedAt,
@@ -29,7 +31,7 @@ final class UsageReadModel {
             boolean managerScope, boolean reportRead,
             io.github.samzhu.bot.usage.UsageCostOperations.Cost reportCost) {
         Attempt withReportCost(io.github.samzhu.bot.usage.UsageCostOperations.Cost cost) {
-            return new Attempt(id,workspaceId,runId,providerRequestId,providerResponseId,preparedAt,startedAt,finishedAt,
+            return new Attempt(id,workspaceId,runId,purpose,titleConversationId,providerRequestId,providerResponseId,preparedAt,startedAt,finishedAt,
                     provider,endpoint,model,channel,executionOutcome,usagePresence,captureCompleteness,projectionError,
                     projectionState,projectionVersion,effectiveSnapshotId,simulation,attemptCoverage,managerScope,true,cost);
         }
@@ -61,6 +63,8 @@ final class UsageReadModel {
                 rs.getString("id"),
                 rs.getString("workspace_id"),
                 rs.getString("run_id"),
+                rs.getString("purpose"),
+                rs.getString("title_conversation_id"),
                 rs.getString("provider_request_id"),
                 rs.getString("provider_response_id"),
                 rs.getTimestamp("prepared_at").toInstant().toString(),

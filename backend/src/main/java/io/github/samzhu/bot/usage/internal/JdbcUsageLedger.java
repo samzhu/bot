@@ -430,6 +430,7 @@ FROM provider_attempt a LEFT JOIN usage_snapshot s ON s.attempt_id=a.id AND s.id
                                     rs.getString("run_id"),
                                     rs.getString("workspace_id"),
                                     rs.getString("actor_id"),
+                                    rs.getString("purpose"),
                                     rs.getString("provider"),
                                     rs.getString("endpoint"),
                                     rs.getString("model"),

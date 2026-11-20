@@ -53,6 +53,7 @@ public final class PricingCalculator {
             case "openai:responses-fixture-ttl" -> openAi(raw, ctx, true);
             case "anthropic:messages" -> anthropic(raw, ctx);
             case "gemini:generateContent" -> gemini(raw, ctx);
+            case "gemini:interactions" -> interactions(raw, ctx);
             default -> ctx.reasons.add(Reason.UNSUPPORTED_ENDPOINT);
         }
         return ctx.result();
@@ -105,6 +106,23 @@ public final class PricingCalculator {
             else { c.line("input", ordinary); c.line("cache_read", cached); }
         }
         c.line("output", output); c.line("thoughts", thoughts); c.line("tool_input", tool);
+    }
+    private static void interactions(JsonNode raw, Context c) {
+        var input=c.count(raw,"total_input_tokens");
+        var cached=c.count(raw,"total_cached_tokens");
+        var output=c.count(raw,"total_output_tokens");
+        var thought=c.count(raw,"total_thought_tokens");
+        var tool=c.count(raw,"total_tool_use_tokens");
+        var total=c.count(raw,"total_tokens");
+        if (input!=null && cached!=null) {
+            var ordinary=input.subtract(cached);
+            if (ordinary.signum()<0) c.reasons.add(Reason.INVALID_USAGE);
+            else { c.line("input",ordinary); c.line("cache_read",cached); }
+        }
+        c.line("output",output); c.line("thoughts",thought);
+        if (tool!=null && tool.signum()!=0) c.reasons.add(Reason.EXTRA_COST_UNKNOWN);
+        if (input!=null && output!=null && thought!=null && total!=null && !input.add(output).add(thought).equals(total))
+            c.reasons.add(Reason.INVALID_USAGE);
     }
     private static final class Context {
         final PriceSnapshot price;

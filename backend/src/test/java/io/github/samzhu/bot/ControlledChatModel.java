@@ -39,6 +39,7 @@ public class ControlledChatModel implements ChatModel, StreamingChatModel {
     }
 
     private final List<Prompt> recordedPrompts = new CopyOnWriteArrayList<>();
+    private final java.util.concurrent.atomic.AtomicInteger holdSubscriptions = new java.util.concurrent.atomic.AtomicInteger();
     private final java.util.concurrent.atomic.AtomicInteger automaticSubscriptions = new java.util.concurrent.atomic.AtomicInteger();
     private final java.util.concurrent.atomic.AtomicInteger automaticDisposals = new java.util.concurrent.atomic.AtomicInteger();
 
@@ -57,6 +58,7 @@ public class ControlledChatModel implements ChatModel, StreamingChatModel {
 
     public synchronized void reset() {
         recordedPrompts.clear();
+        holdSubscriptions.set(0);
         automaticSubscriptions.set(0);
         automaticDisposals.set(0);
         mode = Mode.AUTOMATIC;
@@ -88,6 +90,7 @@ public class ControlledChatModel implements ChatModel, StreamingChatModel {
         return Collections.unmodifiableList(recordedPrompts);
     }
 
+    public int holdSubscriptions() { return holdSubscriptions.get(); }
     public int automaticSubscriptions() { return automaticSubscriptions.get(); }
     public int automaticDisposals() { return automaticDisposals.get(); }
 
@@ -148,7 +151,7 @@ public class ControlledChatModel implements ChatModel, StreamingChatModel {
 
         if (mode == Mode.HOLD) {
             return sink.asFlux()
-                    .doOnSubscribe(sub -> subscribedLatch.countDown())
+                    .doOnSubscribe(sub -> { holdSubscriptions.incrementAndGet(); subscribedLatch.countDown(); })
                     .doOnCancel(() -> cancelledLatch.countDown())
                     .doFinally(signalType -> finishedLatch.countDown());
         }

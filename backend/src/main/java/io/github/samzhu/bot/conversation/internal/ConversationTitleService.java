@@ -25,6 +25,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 class ConversationTitleService implements ConversationTitleDispatch {
     private static final Logger log = LoggerFactory.getLogger(ConversationTitleService.class);
     private final JdbcTemplate jdbc;
+    private final io.github.samzhu.bot.usage.ConversationTitleAdmission admission;
     private final TransactionTemplate transactions;
     private final ObjectProvider<ConversationTitleGenerator> generator;
     private final SimpleAsyncTaskExecutor executor;
@@ -35,7 +36,7 @@ class ConversationTitleService implements ConversationTitleDispatch {
     private final Duration executionTimeout;
     private final Duration recoveryWindow;
 
-    ConversationTitleService(JdbcTemplate jdbc, TransactionTemplate transactions,
+    ConversationTitleService(JdbcTemplate jdbc, TransactionTemplate transactions, io.github.samzhu.bot.usage.ConversationTitleAdmission admission,
             ObjectProvider<ConversationTitleGenerator> generator,
             @Qualifier("conversationTitleExecutor") SimpleAsyncTaskExecutor executor,
             @Qualifier("conversationTitleDeadlines") ThreadPoolTaskScheduler deadlines,
@@ -44,6 +45,7 @@ class ConversationTitleService implements ConversationTitleDispatch {
             @Value("${bot.conversation.title.execution-timeout:30s}") Duration executionTimeout,
             @Value("${bot.conversation.title.recovery-window:5m}") Duration recoveryWindow) {
         this.jdbc = jdbc;
+        this.admission = admission;
         this.transactions = transactions;
         this.generator = generator;
         this.executor = executor;
@@ -82,6 +84,7 @@ class ConversationTitleService implements ConversationTitleDispatch {
                 select w.conversation_id from conversation_title_work w
                 join conversation c on c.id=w.conversation_id
                 where w.state='READY' and w.ready_until > clock_timestamp()
+                and (w.next_attempt_at is null or w.next_attempt_at <= clock_timestamp())
                 and c.title='New Conversation'
                 and exists (select 1 from message m where m.conversation_id=w.conversation_id and m.role='USER')
                 order by w.ready_until, w.conversation_id limit 2
@@ -147,7 +150,31 @@ class ConversationTitleService implements ConversationTitleDispatch {
             return;
         }
         try {
-            String generated = available.generate(input.substring(0, Math.min(input.length(), 10000)));
+            var decision = admission.allow(conversationId);
+            if (decision == io.github.samzhu.bot.usage.ConversationTitleAdmission.Decision.DEFERRED) {
+                // Deferral is permitted only before an attempt or hold exists; retain the original expiry.
+                jdbc.update("""
+                    update conversation_title_work set state='READY',claimed_until=null,next_attempt_at=clock_timestamp()+interval '1 second'
+                    where conversation_id=? and state='CLAIMED' and ready_until>clock_timestamp()
+                    and not exists (select 1 from workspace_title_reservation h where h.conversation_id=conversation_title_work.conversation_id)
+                    and not exists (select 1 from provider_attempt a where a.title_conversation_id=conversation_title_work.conversation_id and a.purpose='CONVERSATION_TITLE')
+                    """, conversationId);
+                return;
+            }
+            if (decision != io.github.samzhu.bot.usage.ConversationTitleAdmission.Decision.ALLOWED) {
+                jdbc.update("update conversation_title_work set state='FAILED' where conversation_id=? and state='CLAIMED'", conversationId);
+                return;
+            }
+            if (expired.get() || Thread.currentThread().isInterrupted()) {
+                admission.unknown(conversationId);
+                return;
+            }
+            var result = available.generateResult(input.substring(0, Math.min(input.length(), 10000)));
+            if (result == null || !admission.capture(conversationId, result)) {
+                jdbc.update("update conversation_title_work set state='FAILED' where conversation_id=? and state='CLAIMED'", conversationId);
+                return;
+            }
+            String generated = result.title();
             String value = generated == null ? "" : generated.strip();
             if (expired.get() || value.isBlank() || value.length() > 255 || value.contains("\n") || value.contains("\r")) {
                 jdbc.update("update conversation_title_work set state='FAILED' where conversation_id=? and state='CLAIMED'", conversationId);
@@ -171,6 +198,7 @@ class ConversationTitleService implements ConversationTitleDispatch {
             });
         } catch (Exception ex) {
             boolean interrupted = Thread.interrupted() || ex instanceof InterruptedException;
+            try { admission.unknown(conversationId); } catch (RuntimeException failure) { log.warn("Unable to record title usage uncertainty"); }
             try { jdbc.update("update conversation_title_work set state='FAILED' where conversation_id=? and state='CLAIMED'", conversationId); }
             catch (RuntimeException failure) { log.warn("Unable to record conversation title failure"); }
             if (interrupted) Thread.currentThread().interrupt();

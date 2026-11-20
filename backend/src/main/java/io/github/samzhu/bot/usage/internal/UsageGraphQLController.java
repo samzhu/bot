@@ -140,8 +140,14 @@ public class UsageGraphQLController {
         String key =
                 switch (attempt.provider()) {
                     case "FAKE" -> field;
-                    case "GOOGLE" ->
-                            switch (field) {
+                    case "GOOGLE" -> "interactions".equals(attempt.endpoint())
+                            ? switch (field) {
+                                case "input" -> "total_input_tokens";
+                                case "output" -> "total_output_tokens";
+                                case "cacheRead" -> "total_cached_tokens";
+                                default -> "";
+                            }
+                            : switch (field) {
                                 case "input" -> "promptTokenCount";
                                 case "output" -> "candidatesTokenCount";
                                 case "cacheRead" -> "cachedContentTokenCount";
@@ -151,6 +157,13 @@ public class UsageGraphQLController {
                 };
         String meaning;
         if (key.isEmpty()) meaning = "Provider field not available";
+        else if ("GOOGLE".equals(attempt.provider()) && "interactions".equals(attempt.endpoint()))
+            meaning = switch (field) {
+                case "input" -> "Gemini total_input_tokens，包含已快取的輸入";
+                case "output" -> "Gemini total_output_tokens，不包含獨立的 total_thought_tokens";
+                case "cacheRead" -> "Gemini total_cached_tokens，為輸入的子集";
+                default -> "Provider field not available";
+            };
         else if ("GOOGLE".equals(attempt.provider()))
             meaning =
                     switch (field) {

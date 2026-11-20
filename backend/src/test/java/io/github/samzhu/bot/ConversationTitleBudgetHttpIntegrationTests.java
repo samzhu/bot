@@ -1,0 +1,651 @@
+package io.github.samzhu.bot;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.genai.Client;
+import com.google.genai.gaos.models.interactions.CreateModelInteraction;
+import com.google.genai.gaos.models.interactions.InteractionsInput;
+import com.google.genai.gaos.models.operations.CreateInteractionRequestBody;
+import com.google.genai.gaos.utils.RetryConfig;
+import com.google.genai.types.ClientOptions;
+import com.google.genai.types.HttpOptions;
+import com.google.genai.types.HttpRetryOptions;
+import com.sun.net.httpserver.HttpServer;
+import io.github.samzhu.bot.conversation.ConversationTitleGenerator;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
+import org.springframework.core.env.Environment;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.bean.override.convention.TestBean;
+import org.testcontainers.postgresql.PostgreSQLContainer;
+
+import javax.sql.DataSource;
+import java.net.*;
+import java.net.http.*;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import static org.junit.jupiter.api.Assertions.*;
+
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@Import({TestcontainersConfiguration.class, ConversationTitleBudgetHttpIntegrationTests.LoopbackConfig.class})
+@ActiveProfiles("test")
+class ConversationTitleBudgetHttpIntegrationTests {
+    static class Loopback implements AutoCloseable {
+        final HttpServer server;
+        final AtomicInteger requests = new AtomicInteger();
+        volatile boolean hold;
+        volatile boolean success;
+        volatile boolean invalidTitle;
+        volatile String failureMode = "503";
+        volatile boolean validRequest;
+        volatile boolean virtualThread;
+        volatile boolean transactionActive;
+        volatile CountDownLatch entered = new CountDownLatch(1);
+        volatile CountDownLatch release = new CountDownLatch(1);
+        final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
+        Loopback() throws Exception {
+            server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            server.setExecutor(workers);
+            server.createContext("/", exchange -> {
+                requests.incrementAndGet();
+                var request = new ObjectMapper().readTree(exchange.getRequestBody().readAllBytes());
+                validRequest = "POST".equals(exchange.getRequestMethod()) && exchange.getRequestURI().getPath().endsWith("/interactions")
+                    && "gemini-3.5-flash-lite".equals(request.path("model").asText()) && request.has("store") && !request.path("store").asBoolean(true)
+                    && !request.path("background").asBoolean(true) && !request.path("stream").asBoolean(true)
+                    && request.path("generation_config").path("max_output_tokens").asInt() == 64
+                    && "minimal".equals(request.path("generation_config").path("thinking_level").asText())
+                    && !request.has("tools") && !request.has("previous_interaction_id")
+                    && "Synthetic ledger question".equals(request.path("input").asText());
+                entered.countDown();
+                if (hold) {
+                    try { release.await(30, TimeUnit.SECONDS); }
+                    catch (InterruptedException ex) { Thread.currentThread().interrupt(); }
+                }
+                if (!success && "disconnect".equals(failureMode)) { exchange.close(); return; }
+                if (!success && "redirect".equals(failureMode)) {
+                    exchange.getResponseHeaders().set("Location", base() + "/must-not-repeat");
+                    exchange.sendResponseHeaders(307, -1); exchange.close(); return;
+                }
+                byte[] body = (success
+                    ? "{\"id\":\"synthetic-response\",\"status\":\"completed\",\"steps\":[{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"Synthetic title\"}]}],\"usage\":{\"total_input_tokens\":7,\"total_cached_tokens\":0,\"total_output_tokens\":3,\"total_thought_tokens\":1,\"total_tool_use_tokens\":0,\"total_tokens\":11}}"
+                    : "{\"error\":{\"code\":503,\"message\":\"synthetic\",\"status\":\"UNAVAILABLE\"}}" ).getBytes(StandardCharsets.UTF_8);
+                if (success && invalidTitle) body = new String(body, StandardCharsets.UTF_8).replace("Synthetic title", "   ").getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                if (!success) exchange.getResponseHeaders().set("Retry-After", "0");
+                exchange.sendResponseHeaders(success ? 200 : 503, body.length);
+                try (var output = exchange.getResponseBody()) { output.write(body); }
+            });
+            server.start();
+        }
+        String base() { return "http://127.0.0.1:" + server.getAddress().getPort(); }
+        @Override public void close() { release.countDown(); server.stop(0); workers.close(); }
+    }
+    @TestConfiguration(proxyBeanMethods = false)
+    static class LoopbackConfig {
+        @Bean Loopback loopback(Environment environment) throws Exception {
+            if (!environment.matchesProfiles("test & !real-ai")) throw new IllegalStateException("test profile required");
+            return new Loopback();
+        }
+        @Bean(destroyMethod = "close") Client localInteractionClient(Loopback loopback, Environment environment) {
+            if (!environment.matchesProfiles("test & !real-ai")) throw new IllegalStateException("test profile required");
+            int port = loopback.server.getAddress().getPort();
+            var http = io.github.samzhu.bot.execution.internal.model.TitleHttpTransport.builder()
+                    .proxy(Proxy.NO_PROXY).callTimeout(java.time.Duration.ofSeconds(15)).addInterceptor(chain -> {
+                        var url = chain.request().url();
+                        if (!"http".equals(url.scheme()) || !"127.0.0.1".equals(url.host()) || url.port() != port)
+                            throw new java.io.IOException("test transport forbids non-loopback target");
+                        return chain.proceed(chain.request());
+                    }).build();
+            var options = HttpOptions.builder().baseUrl(loopback.base()).timeout(15000)
+                    .retryOptions(HttpRetryOptions.builder().attempts(1).build()).build();
+            if (!options.baseUrl().orElseThrow().equals(loopback.base())) throw new IllegalStateException("loopback required");
+            return Client.builder().enterprise(false).apiKey("synthetic-test-only")
+                    .httpOptions(options).clientOptions(ClientOptions.builder().customHttpClient(http).build()).build();
+        }
+        @Bean AtomicInteger titleAdapterInvocations() { return new AtomicInteger(); }
+        @Bean ConversationTitleGenerator titleFakeUsingLocalSdk(Client localInteractionClient, AtomicInteger titleAdapterInvocations, Loopback loopback) {
+            var actual = new io.github.samzhu.bot.execution.internal.model.GeminiConversationTitleGenerator(localInteractionClient);
+            return new ConversationTitleGenerator() {
+                @Override public String generate(String input) throws Exception { return generateResult(input).title(); }
+                @Override public Result generateResult(String input) throws Exception {
+                    titleAdapterInvocations.incrementAndGet();
+                    loopback.virtualThread = Thread.currentThread().isVirtual();
+                    loopback.transactionActive = org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive();
+                    return actual.generateResult(input);
+                }
+            };
+        }
+    }
+    @LocalServerPort int port;
+    @Autowired JdbcTemplate jdbc;
+    @Autowired DataSource dataSource;
+    @Autowired PostgreSQLContainer postgres;
+    @Autowired Loopback loopback;
+    @Autowired Environment environment;
+    @Autowired AtomicInteger titleAdapterInvocations;
+    @Autowired io.github.samzhu.bot.usage.internal.pricing.CatalogActivation catalog;
+    @TestBean(name="mockChatModel", methodName="chatModel", enforceOverride=true) ChatModel chat;
+    static ControlledChatModel chatModel() { return ControlledChatModel.getInstance(); }
+    static final java.util.concurrent.atomic.AtomicBoolean REAL_FIXTURE = new java.util.concurrent.atomic.AtomicBoolean();
+    static final AtomicInteger PARTITION_READS = new AtomicInteger();
+    @TestBean(name="activeTitlePartition", methodName="testTitlePartition", enforceOverride=true)
+    io.github.samzhu.bot.usage.ConversationTitlePartition testPartition;
+    static io.github.samzhu.bot.usage.ConversationTitlePartition testTitlePartition() {
+        return () -> { PARTITION_READS.incrementAndGet(); return REAL_FIXTURE.get() ? io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.REAL : io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.SIMULATION; };
+    }
+    @TestBean(name="fakeUsageCaptureAdapter", methodName="testChatUsageAdapter", enforceOverride=true)
+    io.github.samzhu.bot.execution.internal.capture.UsageCaptureAdapter fakeUsage;
+    static io.github.samzhu.bot.execution.internal.capture.UsageCaptureAdapter testChatUsageAdapter() {
+        var fake = new io.github.samzhu.bot.execution.internal.capture.FakeUsageCaptureAdapter();
+        return new io.github.samzhu.bot.execution.internal.capture.UsageCaptureAdapter() {
+            @Override public io.github.samzhu.bot.usage.UsageLedger.Dispatch dispatch(String run, String workspace, String actor) {
+                var original = fake.dispatch(run, workspace, actor);
+                return REAL_FIXTURE.get() ? new io.github.samzhu.bot.usage.UsageLedger.Dispatch(run,workspace,actor,
+                    original.provider(),original.endpoint(),original.model(),original.channel(),original.adapterVersion(),false,original.attemptCoverage()) : original;
+            }
+            @Override public java.util.Optional<io.github.samzhu.bot.usage.UsageLedger.Snapshot> capture(org.springframework.ai.chat.model.ChatResponse r, String id, long n) { return fake.capture(r,id,n); }
+        };
+    }
+    @BeforeEach void resetPartition() { REAL_FIXTURE.set(false); PARTITION_READS.set(0); }
+    final HttpClient http = HttpClient.newHttpClient();
+    final ObjectMapper json = new ObjectMapper();
+    HttpRequest request(String path, Object body) throws Exception {
+        return HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path)).header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body))).build();
+    }
+    @Test void budgetDenialAfterChatAdmissionMakesNoTitleProviderRequest() throws Exception {
+        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        try (var connection = dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(), connection.getMetaData().getURL()); }
+        loopback.requests.set(0);
+        assertEquals(0, loopback.requests.get());
+        chatModel().reset(); chatModel().setHoldMode(true);
+        String scope = "title-budget-" + UUID.randomUUID();
+        jdbc.update("insert into workspace(id,name) values (?,?)", scope, "Synthetic budget");
+        jdbc.update("insert into workspace_member(workspace_id,user_id,role,active) values (?,'dev-user','MANAGER',true)", scope);
+        jdbc.update("insert into bot(id,name,system_prompt,created_at) values ('bot-general','General','test',current_timestamp) on conflict(id) do nothing");
+        var create = http.send(request("/graphql", Map.of("query", "mutation($workspace: ID!) { createConversation(botId: \"bot-general\", workspaceId: $workspace) { id } }", "variables", Map.of("workspace", scope))), HttpResponse.BodyHandlers.ofString());
+        String id = json.readTree(create.body()).path("data").path("createConversation").path("id").asText();
+        assertFalse(id.isBlank(), create.body());
+        String run = UUID.randomUUID().toString();
+        var body = Map.of("threadId", id, "runId", run, "state", Map.of(),
+                "messages", List.of(Map.of("id", UUID.randomUUID().toString(), "role", "user", "content", "Synthetic first question")),
+                "tools", List.of(), "context", List.of(), "forwardedProps", Map.of());
+        var pending = http.sendAsync(request("/api/ag-ui", body), HttpResponse.BodyHandlers.ofString());
+        try {
+            assertTrue(chatModel().awaitSubscribed(8, TimeUnit.SECONDS), "chat must already be admitted");
+            assertEquals(1, jdbc.update("update workspace_monthly_budget set enabled=true, cap_usd=0 where workspace_id=? and partition='SIMULATION'", scope));
+            chatModel().emitChunk("visible response"); chatModel().complete();
+            String events = pending.get(10, TimeUnit.SECONDS).body();
+            assertTrue(events.contains("TEXT_MESSAGE_CONTENT"), events);
+            assertTrue(events.contains("RUN_FINISHED"), events);
+            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+            String state = "";
+            while (System.nanoTime() < end) {
+                state = jdbc.queryForObject("select state from conversation_title_work where conversation_id=?", String.class, id);
+                if ("FAILED".equals(state) || "DONE".equals(state)) break;
+                Thread.sleep(20);
+            }
+            assertEquals("FAILED", state);
+            assertEquals(0, loopback.requests.get(), "budget denial must stop the title before any provider HTTP request");
+            var read = http.send(request("/graphql", Map.of("query", "query($id: ID!) { conversation(id: $id) { title } }", "variables", Map.of("id", id))), HttpResponse.BodyHandlers.ofString());
+            assertEquals("New Conversation", json.readTree(read.body()).path("data").path("conversation").path("title").asText());
+        } finally { chatModel().complete(); }
+    }
+    @Test void concurrentTitlesReserveSharedBudgetBeforeSending() throws Exception {
+        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        try (var connection = dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(), connection.getMetaData().getURL()); }
+        chatModel().reset(); chatModel().setHoldMode(true);
+        loopback.requests.set(0); loopback.hold = true; loopback.entered = new CountDownLatch(1); loopback.release = new CountDownLatch(1);
+        String scope = "title-concurrent-" + UUID.randomUUID();
+        jdbc.update("insert into workspace(id,name) values (?,?)", scope, "Synthetic concurrent budget");
+        jdbc.update("insert into workspace_member(workspace_id,user_id,role,active) values (?,'dev-user','MANAGER',true)", scope);
+        jdbc.update("insert into bot(id,name,system_prompt,created_at) values ('bot-general','General','test',current_timestamp) on conflict(id) do nothing");
+        var price = new io.github.samzhu.bot.pricing.PriceSnapshot("GOOGLE", "interactions", "gemini-3.5-flash-lite", "GEMINI_API", "synthetic", Map.of("input","1", "cache_read","1", "output","1", "thoughts","1"));
+        catalog.publish("synthetic-title-" + UUID.randomUUID(), "synthetic-test-only", List.of(new io.github.samzhu.bot.pricing.PriceCatalog.Entry(price, java.time.Instant.now().minusSeconds(60), java.time.Instant.now().plusSeconds(3600))));
+        List<CompletableFuture<HttpResponse<String>>> streams = new ArrayList<>();
+        List<String> ids = new ArrayList<>();
+        try {
+            for (int i=0; i<2; i++) {
+                var create = http.send(request("/graphql", Map.of("query", "mutation($workspace: ID!) { createConversation(botId: \"bot-general\", workspaceId: $workspace) { id } }", "variables", Map.of("workspace", scope))), HttpResponse.BodyHandlers.ofString());
+                String id = json.readTree(create.body()).path("data").path("createConversation").path("id").asText();
+                assertFalse(id.isBlank(), create.body()); ids.add(id);
+                var body = Map.of("threadId", id, "runId", UUID.randomUUID().toString(), "state", Map.of(),
+                        "messages", List.of(Map.of("id", UUID.randomUUID().toString(), "role", "user", "content", "Synthetic concurrent question")),
+                        "tools", List.of(), "context", List.of(), "forwardedProps", Map.of());
+                streams.add(http.sendAsync(request("/api/ag-ui", body), HttpResponse.BodyHandlers.ofString()));
+            }
+            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+            while (chatModel().holdSubscriptions() < 2 && System.nanoTime() < end) Thread.sleep(10);
+            assertEquals(2, chatModel().holdSubscriptions(), "both chats must already be subscribed");
+            assertEquals(1, jdbc.update("update workspace_monthly_budget set enabled=true,cap_usd=1.5 where workspace_id=? and partition='SIMULATION'", scope));
+            chatModel().emitChunk("visible reply");
+            assertTrue(loopback.entered.await(5, TimeUnit.SECONDS));
+            end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            int failed = 0;
+            while (System.nanoTime() < end) {
+                failed = jdbc.queryForObject("select count(*) from conversation_title_work where conversation_id in (?,?) and state='FAILED'", Integer.class, ids.get(0), ids.get(1));
+                if (failed == 1) break;
+                Thread.sleep(20);
+            }
+            assertEquals(1, failed, "the second title must be denied while the first hold is outstanding");
+            assertEquals(1, loopback.requests.get(), "shared cap permits at most one reserved title request");
+            chatModel().complete();
+            for (var stream : streams) assertTrue(stream.get(10, TimeUnit.SECONDS).body().contains("RUN_FINISHED"));
+        } finally {
+            loopback.release.countDown(); loopback.hold = false; chatModel().complete();
+            if (ids.size() == 2) {
+                long cleanupUntil = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+                int active = 1;
+                while (System.nanoTime() < cleanupUntil) {
+                    active = jdbc.queryForObject("select count(*) from conversation_title_work where conversation_id in (?,?) and state in ('READY','CLAIMED')", Integer.class, ids.get(0), ids.get(1));
+                    if (active == 0) break;
+                    Thread.sleep(20);
+                }
+                assertEquals(0, active, "fixture title workers must finish before datasource shutdown");
+            }
+        }
+    }
+
+    @Test void completedTitleHasDistinctDurableUsageAttempt() throws Exception {
+        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        try (var connection = dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(), connection.getMetaData().getURL()); }
+        chatModel().reset(); chatModel().setHoldMode(true);
+        loopback.requests.set(0); titleAdapterInvocations.set(0); loopback.validRequest = false; loopback.success = true; loopback.hold = true; loopback.entered = new CountDownLatch(1); loopback.release = new CountDownLatch(1);
+        String scope = "title-ledger-" + UUID.randomUUID();
+        jdbc.update("insert into workspace(id,name) values (?,?)", scope, "Synthetic ledger");
+        jdbc.update("insert into workspace_member(workspace_id,user_id,role,active) values (?,'dev-user','MANAGER',true)", scope);
+        jdbc.update("insert into bot(id,name,system_prompt,created_at) values ('bot-general','General','test',current_timestamp) on conflict(id) do nothing");
+        var price = new io.github.samzhu.bot.pricing.PriceSnapshot("GOOGLE", "interactions", "gemini-3.5-flash-lite", "GEMINI_API", "synthetic", Map.of("input","1", "cache_read","1", "output","1", "thoughts","1"));
+        catalog.publish("synthetic-ledger-" + UUID.randomUUID(), "synthetic-test-only", List.of(new io.github.samzhu.bot.pricing.PriceCatalog.Entry(price, java.time.Instant.now().minusSeconds(60), java.time.Instant.now().plusSeconds(3600))));
+        var create = http.send(request("/graphql", Map.of("query", "mutation($workspace: ID!) { createConversation(botId: \"bot-general\", workspaceId: $workspace) { id } }", "variables", Map.of("workspace", scope))), HttpResponse.BodyHandlers.ofString());
+        String id = json.readTree(create.body()).path("data").path("createConversation").path("id").asText();
+        assertFalse(id.isBlank(), create.body());
+        String run = UUID.randomUUID().toString();
+        var body = Map.of("threadId", id, "runId", run, "state", Map.of(), "messages", List.of(Map.of("id", UUID.randomUUID().toString(), "role", "user", "content", "Synthetic ledger question")), "tools", List.of(), "context", List.of(), "forwardedProps", Map.of());
+        var stream = http.sendAsync(request("/api/ag-ui", body), HttpResponse.BodyHandlers.ofString());
+        try {
+            assertTrue(chatModel().awaitSubscribed(8, TimeUnit.SECONDS));
+            assertEquals(1, jdbc.update("update workspace_monthly_budget set enabled=true,cap_usd=3 where workspace_id=? and partition='SIMULATION'", scope));
+            chatModel().emitChunk("visible response");
+            long started = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (titleAdapterInvocations.get() == 0 && System.nanoTime() < started) Thread.sleep(20);
+            assertEquals(1, titleAdapterInvocations.get(), "admission must have entered the adapter");
+            assertEquals(1, jdbc.queryForObject("select count(*) from provider_attempt where purpose='CONVERSATION_TITLE' and title_conversation_id=?", Integer.class, id));
+            assertTrue(loopback.entered.await(5, TimeUnit.SECONDS), "adapter must reach the isolated provider transport");
+            chatModel().complete();
+            String runEvents = stream.get(8, TimeUnit.SECONDS).body();
+            assertTrue(runEvents.contains("TEXT_MESSAGE_CONTENT") && runEvents.contains("visible response"), runEvents);
+            assertTrue(runEvents.contains("RUN_FINISHED"), runEvents);
+            assertEquals("CLAIMED", jdbc.queryForObject("select state from conversation_title_work where conversation_id=?", String.class, id));
+            var messagesBefore = jdbc.queryForList("select id from message where conversation_id=? order by id", String.class, id);
+            assertEquals(2, messagesBefore.size());
+            var sessionsBefore = jdbc.queryForList("select id from ai_session where id=? order by id", String.class, id);
+            assertEquals(List.of(id), sessionsBefore);
+            var sessionEventsBefore = jdbc.queryForList("select id from ai_session_event where session_id=? order by id", String.class, id);
+            var subscription = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/graphql"))
+                    .header("Content-Type", "application/json").header("Accept", "text/event-stream")
+                    .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(Map.of("query", "subscription($id: ID!) { conversationTitleChanged(conversationId: $id) { id version state } }", "variables", Map.of("id", id))))).build();
+            var pendingNotice = http.send(subscription, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, pendingNotice.statusCode());
+            assertTrue(pendingNotice.body().contains("CLAIMED"), pendingNotice.body());
+            var completedNotice = http.sendAsync(subscription, HttpResponse.BodyHandlers.ofInputStream());
+            loopback.release.countDown();
+            var noticeResponse = completedNotice.get(8, TimeUnit.SECONDS);
+            assertEquals(200, noticeResponse.statusCode());
+            try (var reader = new java.io.BufferedReader(new java.io.InputStreamReader(noticeResponse.body(), StandardCharsets.UTF_8))) {
+                String line; StringBuilder events = new StringBuilder();
+                do { line = reader.readLine(); assertNotNull(line, () -> "subscription ended: " + events); events.append(line).append('\n'); } while (!line.contains("conversationTitleChanged"));
+                var notice = json.readTree(line.substring("data:".length())).path("data").path("conversationTitleChanged");
+                assertEquals(id, notice.path("id").asText());
+                assertEquals("1", notice.path("version").asText());
+                assertEquals("DONE", notice.path("state").asText());
+            }
+            assertEquals("DONE", jdbc.queryForObject("select state from conversation_title_work where conversation_id=?", String.class, id));
+            assertEquals(1L, jdbc.queryForObject("select version from conversation_title_work where conversation_id=?", Long.class, id));
+            assertEquals(messagesBefore, jdbc.queryForList("select id from message where conversation_id=? order by id", String.class, id));
+            assertEquals(sessionsBefore, jdbc.queryForList("select id from ai_session where id=? order by id", String.class, id));
+            assertEquals(sessionEventsBefore, jdbc.queryForList("select id from ai_session_event where session_id=? order by id", String.class, id));
+            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(8); String state = "";
+            while (System.nanoTime() < end) {
+                state = jdbc.queryForObject("select state from conversation_title_work where conversation_id=?", String.class, id);
+                if ("DONE".equals(state) || "FAILED".equals(state)) break;
+                Thread.sleep(20);
+            }
+            assertEquals("DONE", state, "controlled SDK title must complete before checking ledger");
+            assertEquals(1, loopback.requests.get());
+            assertTrue(loopback.validRequest, "Interactions wire parameters must match the bounded stateless contract");
+            assertTrue(loopback.virtualThread); assertFalse(loopback.transactionActive);
+            var titleRead = http.send(request("/graphql", Map.of("query", "query($id: ID!) { conversation(id: $id) { title } }", "variables", Map.of("id", id))), HttpResponse.BodyHandlers.ofString());
+            assertEquals("Synthetic title", json.readTree(titleRead.body()).path("data").path("conversation").path("title").asText());
+            assertEquals(1, jdbc.queryForObject("select count(*) from provider_attempt where purpose='CONVERSATION_TITLE' and title_conversation_id=? and run_id is null and workspace_id=? and actor_id='dev-user'", Integer.class, id, scope));
+            assertEquals(1, jdbc.queryForObject("select count(*) from usage_snapshot s join provider_attempt a on a.id=s.attempt_id where a.purpose='CONVERSATION_TITLE' and a.title_conversation_id=? and s.semantic='FINAL'", Integer.class, id), "the SDK native usage must be durably captured");
+            end = System.nanoTime() + TimeUnit.SECONDS.toNanos(6);
+            int priced = 0;
+            while (System.nanoTime() < end) {
+                priced = jdbc.queryForObject("select count(*) from provider_attempt a join usage_cost_current c on c.attempt_id=a.id join usage_cost_estimate e on e.id=c.estimate_id where a.title_conversation_id=? and e.status='COMPLETE' and e.complete_amount=0.000011", Integer.class, id);
+                if (priced == 1) break;
+                Thread.sleep(20);
+            }
+            assertEquals(1, priced, "native title usage must produce the controlled catalog cost");
+            assertEquals("SETTLED", jdbc.queryForObject("select state from workspace_title_reservation where conversation_id=?", String.class, id));
+            String attempt = jdbc.queryForObject("select id from provider_attempt where title_conversation_id=?", String.class, id);
+            var usage = http.send(request("/graphql", Map.of("query", "query($w: ID!, $a: ID!) { myUsageAttempt(workspaceId: $w, id: $a) { id runId purpose titleConversationId input { value } output { value } cost { status completeAmount } } }", "variables", Map.of("w", scope, "a", attempt))), HttpResponse.BodyHandlers.ofString());
+            var report = json.readTree(usage.body());
+            assertFalse(report.has("errors"), report.toString());
+            var observed = report.path("data").path("myUsageAttempt");
+            assertEquals("CONVERSATION_TITLE", observed.path("purpose").asText());
+            assertEquals(id, observed.path("titleConversationId").asText());
+            assertTrue(observed.path("runId").isNull());
+            assertEquals("7", observed.path("input").path("value").asText());
+            assertEquals("3", observed.path("output").path("value").asText());
+            assertEquals("COMPLETE", observed.path("cost").path("status").asText());
+            assertEquals(0, new java.math.BigDecimal("0.000011").compareTo(new java.math.BigDecimal(observed.path("cost").path("completeAmount").asText())));
+            var reportHttp = http.send(request("/graphql", Map.of("query", "query($w: ID!) { myUsageReport(workspaceId: $w, simulation: true, model: \"gemini-3.5-flash-lite\") { summary { recordedAttemptCount completeTotal } nativeGroups { endpoint input { knownValue } output { knownValue } cacheRead { knownValue } } attempts { nodes { id purpose titleConversationId } } } }", "variables", Map.of("w", scope))), HttpResponse.BodyHandlers.ofString());
+            var aggregate = json.readTree(reportHttp.body());
+            assertFalse(aggregate.has("errors"), aggregate.toString());
+            var titleReport = aggregate.path("data").path("myUsageReport");
+            assertEquals("1", titleReport.path("summary").path("recordedAttemptCount").asText());
+            assertEquals(0,new java.math.BigDecimal("0.000011").compareTo(new java.math.BigDecimal(titleReport.path("summary").path("completeTotal").asText())));
+            assertEquals("7", titleReport.path("nativeGroups").get(0).path("input").path("knownValue").asText());
+            assertEquals("3", titleReport.path("nativeGroups").get(0).path("output").path("knownValue").asText());
+            assertEquals("0", titleReport.path("nativeGroups").get(0).path("cacheRead").path("knownValue").asText());
+            assertEquals("CONVERSATION_TITLE", titleReport.path("attempts").path("nodes").get(0).path("purpose").asText());
+            assertEquals(1, jdbc.queryForObject("select count(*) from chat_run where conversation_id=?", Integer.class, id));
+        } finally { loopback.release.countDown(); loopback.hold = false; loopback.success = false; chatModel().complete(); }
+    }
+
+    @Test void activeUnreservedRealChatDefersTitleUntilChatHasKnownCost() throws Exception {
+        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        try (var connection = dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(), connection.getMetaData().getURL()); }
+        REAL_FIXTURE.set(true); chatModel().reset(); chatModel().setHoldMode(true);
+        loopback.requests.set(0); loopback.hold = true; loopback.success = true; loopback.entered = new CountDownLatch(1); loopback.release = new CountDownLatch(1);
+        String scope = "title-defer-" + UUID.randomUUID();
+        jdbc.update("insert into workspace(id,name) values (?,?)", scope, "Synthetic real-partition test");
+        jdbc.update("insert into workspace_member(workspace_id,user_id,role,active) values (?,'dev-user','MANAGER',true)", scope);
+        jdbc.update("insert into bot(id,name,system_prompt,created_at) values ('bot-general','General','test',current_timestamp) on conflict(id) do nothing");
+        jdbc.update("insert into workspace_monthly_budget(workspace_id,partition,enabled,cap_usd) values (?,'REAL',true,10)", scope);
+        jdbc.update("insert into member_weekly_budget(workspace_id,member_user_id,partition,enabled,cap_usd) values (?,'dev-user','REAL',true,10)", scope);
+        var price = new io.github.samzhu.bot.pricing.PriceSnapshot("GOOGLE", "interactions", "gemini-3.5-flash-lite", "GEMINI_API", "synthetic", Map.of("input","1", "cache_read","1", "output","1", "thoughts","1"));
+        catalog.publish("synthetic-defer-" + UUID.randomUUID(), "synthetic-test-only", List.of(new io.github.samzhu.bot.pricing.PriceCatalog.Entry(price, java.time.Instant.now().minusSeconds(60), java.time.Instant.now().plusSeconds(3600))));
+        var created = http.send(request("/graphql", Map.of("query", "mutation($workspace: ID!) { createConversation(botId: \"bot-general\", workspaceId: $workspace) { id } }", "variables", Map.of("workspace", scope))), HttpResponse.BodyHandlers.ofString());
+        String id = json.readTree(created.body()).path("data").path("createConversation").path("id").asText(); assertFalse(id.isBlank());
+        String run = UUID.randomUUID().toString();
+        var body = Map.of("threadId", id, "runId", run, "state", Map.of(), "messages", List.of(Map.of("id", UUID.randomUUID().toString(), "role", "user", "content", "Synthetic defer question")), "tools", List.of(), "context", List.of(), "forwardedProps", Map.of());
+        var stream = http.sendAsync(request("/api/ag-ui", body), HttpResponse.BodyHandlers.ofString());
+        try {
+            assertTrue(chatModel().awaitSubscribed(8, TimeUnit.SECONDS));
+            assertEquals(1, jdbc.queryForObject("select count(*) from provider_attempt where run_id=? and simulation=false and execution_outcome='IN_PROGRESS'", Integer.class, run));
+            chatModel().emitChunk("visible response");
+            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5); String state = "";
+            while (PARTITION_READS.get() == 0 && System.nanoTime() < end) Thread.sleep(20);
+            assertTrue(PARTITION_READS.get() > 0, "title admission must inspect REAL partition");
+            while (System.nanoTime() < end) {
+                state = jdbc.queryForObject("select state from conversation_title_work where conversation_id=?", String.class, id);
+                if ("READY".equals(state) || "FAILED".equals(state)) break;
+                Thread.sleep(20);
+            }
+            assertEquals("READY", state, "known-undispatched title must remain eligible while real chat is unsettled");
+            assertEquals(0, loopback.requests.get());
+            assertEquals(0, jdbc.queryForObject("select count(*) from provider_attempt where title_conversation_id=?", Integer.class, id));
+            chatModel().complete(); assertTrue(stream.get(10, TimeUnit.SECONDS).body().contains("RUN_FINISHED"));
+            // Synthetic test-only trusted settlement; actual Google incomplete usage remains unknown and blocked.
+            String attempt = jdbc.queryForObject("select id from provider_attempt where run_id=?", String.class, run);
+            long version = jdbc.queryForObject("select projection_version from provider_attempt where id=?", Long.class, attempt);
+            String estimate = UUID.randomUUID().toString();
+            jdbc.update("insert into usage_cost_estimate(id,attempt_id,source_version,price_snapshot_id,calculator_version,status,known_subtotal,complete_amount,details,payload_hash) values (?,?,?,null,'synthetic','COMPLETE',0,0,'{}'::jsonb,'synthetic')", estimate, attempt, version);
+            jdbc.update("insert into usage_cost_current(attempt_id,estimate_id) values (?,?) on conflict(attempt_id) do update set estimate_id=excluded.estimate_id", attempt, estimate);
+            jdbc.update("update workspace_monthly_budget_period set known_subtotal_usd=0,terminal_effective_unknown=false where workspace_id=? and partition='REAL'", scope);
+            assertTrue(loopback.entered.await(8, TimeUnit.SECONDS), "settled chat must permit the pending title");
+            assertEquals(1, loopback.requests.get());
+        } finally {
+            loopback.release.countDown(); chatModel().complete();
+            long cleanupUntil=System.nanoTime()+TimeUnit.SECONDS.toNanos(8);
+            while (System.nanoTime()<cleanupUntil) {
+                String work=jdbc.queryForObject("select state from conversation_title_work where conversation_id=?", String.class, id);
+                if ("DONE".equals(work) || "FAILED".equals(work)) break;
+                Thread.sleep(20);
+            }
+            loopback.hold=false; loopback.success=false; REAL_FIXTURE.set(false);
+        }
+    }
+
+    @Test void provider503IsNotRetriedAndKeepsUnknownHold() throws Exception { checkProviderFailure("503"); }
+
+    @Test void providerRedirectAndDisconnectCannotRepeatHttp() throws Exception {
+        checkProviderFailure("redirect");
+        checkProviderFailure("disconnect");
+    }
+
+    private void checkProviderFailure(String failureMode) throws Exception {
+        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        try (var connection = dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(), connection.getMetaData().getURL()); }
+        chatModel().reset(); chatModel().setHoldMode(true);
+        loopback.requests.set(0); loopback.success=false; loopback.hold=false; loopback.failureMode=failureMode; loopback.entered=new CountDownLatch(1);
+        String scope="title-error-" + UUID.randomUUID();
+        jdbc.update("insert into workspace(id,name) values (?,?)", scope, "Synthetic provider failure");
+        jdbc.update("insert into workspace_member(workspace_id,user_id,role,active) values (?,'dev-user','MANAGER',true)", scope);
+        jdbc.update("insert into bot(id,name,system_prompt,created_at) values ('bot-general','General','test',current_timestamp) on conflict(id) do nothing");
+        var price = new io.github.samzhu.bot.pricing.PriceSnapshot("GOOGLE", "interactions", "gemini-3.5-flash-lite", "GEMINI_API", "synthetic", Map.of("input","1", "cache_read","1", "output","1", "thoughts","1"));
+        catalog.publish("synthetic-error-"+UUID.randomUUID(), "synthetic-test-only", List.of(new io.github.samzhu.bot.pricing.PriceCatalog.Entry(price, java.time.Instant.now().minusSeconds(60), java.time.Instant.now().plusSeconds(3600))));
+        var created = http.send(request("/graphql", Map.of("query", "mutation($workspace: ID!) { createConversation(botId: \"bot-general\", workspaceId: $workspace) { id } }", "variables", Map.of("workspace", scope))), HttpResponse.BodyHandlers.ofString());
+        String id = json.readTree(created.body()).path("data").path("createConversation").path("id").asText(); assertFalse(id.isBlank());
+        var body = Map.of("threadId", id, "runId", UUID.randomUUID().toString(), "state", Map.of(), "messages", List.of(Map.of("id", UUID.randomUUID().toString(), "role", "user", "content", "Synthetic failure question")), "tools", List.of(), "context", List.of(), "forwardedProps", Map.of());
+        var stream = http.sendAsync(request("/api/ag-ui", body), HttpResponse.BodyHandlers.ofString());
+        try {
+            assertTrue(chatModel().awaitSubscribed(8, TimeUnit.SECONDS));
+            assertEquals(1, jdbc.update("update workspace_monthly_budget set enabled=true,cap_usd=3 where workspace_id=? and partition='SIMULATION'", scope));
+            chatModel().emitChunk("visible response");
+            assertTrue(loopback.entered.await(5, TimeUnit.SECONDS));
+            long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(8); String state="";
+            while (System.nanoTime()<end) {
+                state=jdbc.queryForObject("select state from conversation_title_work where conversation_id=?", String.class,id);
+                if ("FAILED".equals(state)) break;
+                Thread.sleep(20);
+            }
+            assertEquals("FAILED",state);
+            assertEquals("UNKNOWN",jdbc.queryForObject("select execution_outcome from provider_attempt where title_conversation_id=?",String.class,id));
+            assertEquals("UNKNOWN",jdbc.queryForObject("select state from workspace_title_reservation where conversation_id=?",String.class,id));
+            Thread.sleep(1500); // Observe at least one recovery scan after terminal state.
+            assertEquals(1,loopback.requests.get());
+            var read=http.send(request("/graphql",Map.of("query","query($id: ID!) { conversation(id: $id) { title } }","variables",Map.of("id",id))),HttpResponse.BodyHandlers.ofString());
+            assertEquals("New Conversation",json.readTree(read.body()).path("data").path("conversation").path("title").asText());
+            chatModel().complete(); assertTrue(stream.get(10,TimeUnit.SECONDS).body().contains("RUN_FINISHED"));
+        } finally { chatModel().complete(); loopback.failureMode="503"; }
+    }
+
+    @Test void outstandingTitleHoldContributesToNewChatMonthAndWeekAdmission() throws Exception {
+        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        try (var connection=dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(),connection.getMetaData().getURL()); }
+        for (boolean weekly : new boolean[]{false,true}) {
+            REAL_FIXTURE.set(false); chatModel().reset(); chatModel().setHoldMode(true);
+            loopback.requests.set(0); loopback.success=false; loopback.hold=true; loopback.entered=new CountDownLatch(1); loopback.release=new CountDownLatch(1);
+            String scope="title-hold-run-"+UUID.randomUUID();
+            jdbc.update("insert into workspace(id,name) values (?,?)",scope,"Synthetic title hold");
+            jdbc.update("insert into workspace_member(workspace_id,user_id,role,active) values (?,'dev-user','MANAGER',true)",scope);
+            jdbc.update("insert into bot(id,name,system_prompt,created_at) values ('bot-general','General','test',current_timestamp) on conflict(id) do nothing");
+            var price=new io.github.samzhu.bot.pricing.PriceSnapshot("GOOGLE","interactions","gemini-3.5-flash-lite","GEMINI_API","synthetic",Map.of("input","1","cache_read","1","output","1","thoughts","1"));
+            catalog.publish("synthetic-run-"+UUID.randomUUID(),"synthetic-test-only",List.of(new io.github.samzhu.bot.pricing.PriceCatalog.Entry(price,java.time.Instant.now().minusSeconds(60),java.time.Instant.now().plusSeconds(3600))));
+            var mutation=Map.of("query","mutation($workspace: ID!) { createConversation(botId: \"bot-general\", workspaceId: $workspace) { id } }","variables",Map.of("workspace",scope));
+            String first=json.readTree(http.send(request("/graphql",mutation),HttpResponse.BodyHandlers.ofString()).body()).path("data").path("createConversation").path("id").asText();
+            String second=json.readTree(http.send(request("/graphql",mutation),HttpResponse.BodyHandlers.ofString()).body()).path("data").path("createConversation").path("id").asText();
+            assertFalse(first.isBlank()); assertFalse(second.isBlank());
+            var initial=Map.of("threadId",first,"runId",UUID.randomUUID().toString(),"state",Map.of(),"messages",List.of(Map.of("id",UUID.randomUUID().toString(),"role","user","content","Synthetic existing chat")),"tools",List.of(),"context",List.of(),"forwardedProps",Map.of());
+            var stream=http.sendAsync(request("/api/ag-ui",initial),HttpResponse.BodyHandlers.ofString());
+            try {
+                assertTrue(chatModel().awaitSubscribed(8,TimeUnit.SECONDS));
+                if (weekly) jdbc.update("insert into member_weekly_budget(workspace_id,member_user_id,partition,enabled,cap_usd) values (?,'dev-user','SIMULATION',true,1.048640)",scope);
+                else assertEquals(1,jdbc.update("update workspace_monthly_budget set enabled=true,cap_usd=1.048640 where workspace_id=? and partition='SIMULATION'",scope));
+                chatModel().emitChunk("visible response"); assertTrue(loopback.entered.await(5,TimeUnit.SECONDS));
+                assertEquals("HELD",jdbc.queryForObject("select state from workspace_title_reservation where conversation_id=?",String.class,first));
+                var next=Map.of("threadId",second,"runId",UUID.randomUUID().toString(),"state",Map.of(),"messages",List.of(Map.of("id",UUID.randomUUID().toString(),"role","user","content","Synthetic next chat")),"tools",List.of(),"context",List.of(),"forwardedProps",Map.of());
+                var denied=http.send(request("/api/ag-ui",next),HttpResponse.BodyHandlers.ofString());
+                assertEquals(503,denied.statusCode(),denied.body());
+                assertEquals(weekly?"WEEK_CAP":"MONTH_CAP",json.readTree(denied.body()).path("code").asText());
+                assertEquals(1,chatModel().getRecordedPrompts().size());
+                chatModel().complete(); assertTrue(stream.get(10,TimeUnit.SECONDS).body().contains("RUN_FINISHED"));
+            } finally {
+                loopback.release.countDown(); chatModel().complete();
+                long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(8);
+                while (System.nanoTime()<end) {
+                    String state=jdbc.queryForObject("select state from conversation_title_work where conversation_id=?",String.class,first);
+                    if ("DONE".equals(state) || "FAILED".equals(state)) break;
+                    Thread.sleep(20);
+                }
+                loopback.hold=false;
+            }
+        }
+    }
+
+    @Test void heldTitleDoesNotBlockAnotherAdmissibleChat() throws Exception {
+        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        try (var connection=dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(),connection.getMetaData().getURL()); }
+        for (boolean weekly : new boolean[]{false}) {
+            REAL_FIXTURE.set(false); chatModel().reset(); chatModel().setHoldMode(true);
+            loopback.requests.set(0); loopback.success=false; loopback.hold=true; loopback.entered=new CountDownLatch(1); loopback.release=new CountDownLatch(1);
+            String scope="title-hold-run-"+UUID.randomUUID();
+            jdbc.update("insert into workspace(id,name) values (?,?)",scope,"Synthetic title hold");
+            jdbc.update("insert into workspace_member(workspace_id,user_id,role,active) values (?,'dev-user','MANAGER',true)",scope);
+            jdbc.update("insert into bot(id,name,system_prompt,created_at) values ('bot-general','General','test',current_timestamp) on conflict(id) do nothing");
+            var price=new io.github.samzhu.bot.pricing.PriceSnapshot("GOOGLE","interactions","gemini-3.5-flash-lite","GEMINI_API","synthetic",Map.of("input","1","cache_read","1","output","1","thoughts","1"));
+            catalog.publish("synthetic-run-"+UUID.randomUUID(),"synthetic-test-only",List.of(new io.github.samzhu.bot.pricing.PriceCatalog.Entry(price,java.time.Instant.now().minusSeconds(60),java.time.Instant.now().plusSeconds(3600))));
+            var mutation=Map.of("query","mutation($workspace: ID!) { createConversation(botId: \"bot-general\", workspaceId: $workspace) { id } }","variables",Map.of("workspace",scope));
+            String first=json.readTree(http.send(request("/graphql",mutation),HttpResponse.BodyHandlers.ofString()).body()).path("data").path("createConversation").path("id").asText();
+            String second=json.readTree(http.send(request("/graphql",mutation),HttpResponse.BodyHandlers.ofString()).body()).path("data").path("createConversation").path("id").asText();
+            assertFalse(first.isBlank()); assertFalse(second.isBlank());
+            var initial=Map.of("threadId",first,"runId",UUID.randomUUID().toString(),"state",Map.of(),"messages",List.of(Map.of("id",UUID.randomUUID().toString(),"role","user","content","Synthetic existing chat")),"tools",List.of(),"context",List.of(),"forwardedProps",Map.of());
+            var stream=http.sendAsync(request("/api/ag-ui",initial),HttpResponse.BodyHandlers.ofString());
+            try {
+                assertTrue(chatModel().awaitSubscribed(8,TimeUnit.SECONDS));
+                if (weekly) jdbc.update("insert into member_weekly_budget(workspace_id,member_user_id,partition,enabled,cap_usd) values (?,'dev-user','SIMULATION',true,1.048640)",scope);
+                else assertEquals(1,jdbc.update("update workspace_monthly_budget set enabled=true,cap_usd=3 where workspace_id=? and partition='SIMULATION'",scope));
+                chatModel().emitChunk("visible response"); assertTrue(loopback.entered.await(5,TimeUnit.SECONDS));
+                assertEquals("HELD",jdbc.queryForObject("select state from workspace_title_reservation where conversation_id=?",String.class,first));
+                var next=Map.of("threadId",second,"runId",UUID.randomUUID().toString(),"state",Map.of(),"messages",List.of(Map.of("id",UUID.randomUUID().toString(),"role","user","content","Synthetic next chat")),"tools",List.of(),"context",List.of(),"forwardedProps",Map.of());
+                var accepted=http.sendAsync(request("/api/ag-ui",next),HttpResponse.BodyHandlers.ofString());
+                long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(8);
+                while (chatModel().holdSubscriptions()<2 && System.nanoTime()<deadline) Thread.sleep(20);
+                assertEquals(2,chatModel().holdSubscriptions(), "second chat must dispatch before held title returns");
+                assertEquals("HELD",jdbc.queryForObject("select state from workspace_title_reservation where conversation_id=?",String.class,first));
+                chatModel().emitChunk("second visible response");
+                chatModel().complete();
+                assertTrue(accepted.get(8,TimeUnit.SECONDS).body().contains("RUN_FINISHED"));
+                assertTrue(stream.get(8,TimeUnit.SECONDS).body().contains("RUN_FINISHED"));
+                assertTrue(loopback.requests.get() >= 1);
+            } finally {
+                loopback.release.countDown(); chatModel().complete();
+                long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(8);
+                while (System.nanoTime()<end) {
+                    int active=jdbc.queryForObject("select count(*) from conversation_title_work where conversation_id in (?,?) and state in ('READY','CLAIMED')",Integer.class,first,second);
+                    if (active == 0) break;
+                    Thread.sleep(20);
+                }
+                loopback.hold=false;
+            }
+        }
+    }
+
+    @Test void revokedMemberCannotDispatchTitleAfterChatStarted() throws Exception {
+        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        try (var connection=dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(),connection.getMetaData().getURL()); }
+        chatModel().reset(); chatModel().setHoldMode(true); loopback.requests.set(0); loopback.hold=false; loopback.success=false;
+        String scope="title-revoked-"+UUID.randomUUID();
+        jdbc.update("insert into workspace(id,name) values (?,?)",scope,"Synthetic revoked scope");
+        jdbc.update("insert into workspace_member(workspace_id,user_id,role,active) values (?,'dev-user','MANAGER',true)",scope);
+        jdbc.update("insert into bot(id,name,system_prompt,created_at) values ('bot-general','General','test',current_timestamp) on conflict(id) do nothing");
+        var created=http.send(request("/graphql",Map.of("query","mutation($workspace: ID!) { createConversation(botId: \"bot-general\", workspaceId: $workspace) { id } }","variables",Map.of("workspace",scope))),HttpResponse.BodyHandlers.ofString());
+        String id=json.readTree(created.body()).path("data").path("createConversation").path("id").asText(); assertFalse(id.isBlank());
+        var body=Map.of("threadId",id,"runId",UUID.randomUUID().toString(),"state",Map.of(),"messages",List.of(Map.of("id",UUID.randomUUID().toString(),"role","user","content","Synthetic revoked request")),"tools",List.of(),"context",List.of(),"forwardedProps",Map.of());
+        var stream=http.sendAsync(request("/api/ag-ui",body),HttpResponse.BodyHandlers.ofString());
+        try {
+            assertTrue(chatModel().awaitSubscribed(8,TimeUnit.SECONDS));
+            assertEquals(1,jdbc.update("update workspace_member set active=false where workspace_id=? and user_id='dev-user'",scope));
+            chatModel().emitChunk("visible response"); chatModel().complete();
+            assertTrue(stream.get(10,TimeUnit.SECONDS).body().contains("RUN_FINISHED"));
+            long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(8); String state="";
+            while (System.nanoTime()<end) {
+                state=jdbc.queryForObject("select state from conversation_title_work where conversation_id=?",String.class,id);
+                if ("FAILED".equals(state)) break;
+                Thread.sleep(20);
+            }
+            assertEquals("FAILED",state); assertEquals(0,loopback.requests.get());
+            assertEquals(0,jdbc.queryForObject("select count(*) from provider_attempt where title_conversation_id=?",Integer.class,id));
+            assertEquals("New Conversation",jdbc.queryForObject("select title from conversation where id=?",String.class,id));
+        } finally { chatModel().complete(); }
+    }
+
+    @Test void stopFinishesWhileTitleHttpIsHeldThenTitleCommits() throws Exception {
+        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        try (var connection=dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(),connection.getMetaData().getURL()); }
+        chatModel().reset(); chatModel().setHoldMode(true); loopback.requests.set(0); loopback.success=true; loopback.hold=true; loopback.entered=new CountDownLatch(1); loopback.release=new CountDownLatch(1);
+        String scope="title-stop-"+UUID.randomUUID();
+        jdbc.update("insert into workspace(id,name) values (?,?)",scope,"Synthetic stop");
+        jdbc.update("insert into workspace_member(workspace_id,user_id,role,active) values (?,'dev-user','MANAGER',true)",scope);
+        jdbc.update("insert into bot(id,name,system_prompt,created_at) values ('bot-general','General','test',current_timestamp) on conflict(id) do nothing");
+        var price=new io.github.samzhu.bot.pricing.PriceSnapshot("GOOGLE","interactions","gemini-3.5-flash-lite","GEMINI_API","synthetic",Map.of("input","1","cache_read","1","output","1","thoughts","1"));
+        catalog.publish("synthetic-stop-"+UUID.randomUUID(),"synthetic-test-only",List.of(new io.github.samzhu.bot.pricing.PriceCatalog.Entry(price,java.time.Instant.now().minusSeconds(60),java.time.Instant.now().plusSeconds(3600))));
+        var created=http.send(request("/graphql",Map.of("query","mutation($workspace: ID!) { createConversation(botId: \"bot-general\", workspaceId: $workspace) { id } }","variables",Map.of("workspace",scope))),HttpResponse.BodyHandlers.ofString());
+        String id=json.readTree(created.body()).path("data").path("createConversation").path("id").asText(); assertFalse(id.isBlank());
+        String run=UUID.randomUUID().toString();
+        var body=Map.of("threadId",id,"runId",run,"state",Map.of(),"messages",List.of(Map.of("id",UUID.randomUUID().toString(),"role","user","content","Synthetic stop question")),"tools",List.of(),"context",List.of(),"forwardedProps",Map.of());
+        var stream=http.sendAsync(request("/api/ag-ui",body),HttpResponse.BodyHandlers.ofString());
+        try {
+            assertTrue(chatModel().awaitSubscribed(8,TimeUnit.SECONDS));
+            assertEquals(1,jdbc.update("update workspace_monthly_budget set enabled=true,cap_usd=3 where workspace_id=? and partition='SIMULATION'",scope));
+            chatModel().emitChunk("visible response"); assertTrue(loopback.entered.await(5,TimeUnit.SECONDS));
+            var cancel=http.send(request("/api/runs/"+run+"/cancel",Map.of()),HttpResponse.BodyHandlers.ofString());
+            assertEquals(200,cancel.statusCode(),cancel.body());
+            assertTrue(stream.get(8,TimeUnit.SECONDS).body().contains("RUN_FINISHED"));
+            assertEquals("CANCELLED",jdbc.queryForObject("select status from chat_run where id=?",String.class,run));
+            assertEquals("CLAIMED",jdbc.queryForObject("select state from conversation_title_work where conversation_id=?",String.class,id));
+            loopback.release.countDown();
+            long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(8); String state="";
+            while (System.nanoTime()<end) {
+                state=jdbc.queryForObject("select state from conversation_title_work where conversation_id=?",String.class,id);
+                if ("DONE".equals(state) || "FAILED".equals(state)) break;
+                Thread.sleep(20);
+            }
+            assertEquals("DONE",state); assertEquals(1,loopback.requests.get());
+            assertEquals(1,jdbc.queryForObject("select count(*) from chat_run where conversation_id=?",Integer.class,id));
+            var read=http.send(request("/graphql",Map.of("query","query($id: ID!) { conversation(id: $id) { title } }","variables",Map.of("id",id))),HttpResponse.BodyHandlers.ofString());
+            assertEquals("Synthetic title",json.readTree(read.body()).path("data").path("conversation").path("title").asText());
+        } finally { loopback.release.countDown(); loopback.hold=false; loopback.success=false; chatModel().complete(); }
+    }
+
+    @Test void invalidTitleKeepsDefaultAfterUsageSettles() throws Exception {
+        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        try (var connection=dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(),connection.getMetaData().getURL()); }
+        chatModel().reset(); chatModel().setHoldMode(true); loopback.requests.set(0); loopback.success=true; loopback.invalidTitle=true; loopback.hold=false; loopback.entered=new CountDownLatch(1);
+        String scope="title-invalid-"+UUID.randomUUID();
+        jdbc.update("insert into workspace(id,name) values (?,?)",scope,"Synthetic invalid");
+        jdbc.update("insert into workspace_member(workspace_id,user_id,role,active) values (?,'dev-user','MANAGER',true)",scope);
+        jdbc.update("insert into bot(id,name,system_prompt,created_at) values ('bot-general','General','test',current_timestamp) on conflict(id) do nothing");
+        var price=new io.github.samzhu.bot.pricing.PriceSnapshot("GOOGLE","interactions","gemini-3.5-flash-lite","GEMINI_API","synthetic",Map.of("input","1","cache_read","1","output","1","thoughts","1"));
+        catalog.publish("synthetic-invalid-"+UUID.randomUUID(),"synthetic-test-only",List.of(new io.github.samzhu.bot.pricing.PriceCatalog.Entry(price,java.time.Instant.now().minusSeconds(60),java.time.Instant.now().plusSeconds(3600))));
+        var created=http.send(request("/graphql",Map.of("query","mutation($workspace: ID!) { createConversation(botId: \"bot-general\", workspaceId: $workspace) { id } }","variables",Map.of("workspace",scope))),HttpResponse.BodyHandlers.ofString());
+        String id=json.readTree(created.body()).path("data").path("createConversation").path("id").asText(); assertFalse(id.isBlank());
+        var body=Map.of("threadId",id,"runId",UUID.randomUUID().toString(),"state",Map.of(),"messages",List.of(Map.of("id",UUID.randomUUID().toString(),"role","user","content","Synthetic invalid title")),"tools",List.of(),"context",List.of(),"forwardedProps",Map.of());
+        var stream=http.sendAsync(request("/api/ag-ui",body),HttpResponse.BodyHandlers.ofString());
+        try {
+            assertTrue(chatModel().awaitSubscribed(8,TimeUnit.SECONDS));
+            assertEquals(1,jdbc.update("update workspace_monthly_budget set enabled=true,cap_usd=3 where workspace_id=? and partition='SIMULATION'",scope));
+            chatModel().emitChunk("visible response"); chatModel().complete();
+            assertTrue(stream.get(8,TimeUnit.SECONDS).body().contains("RUN_FINISHED")); assertTrue(loopback.entered.await(5,TimeUnit.SECONDS));
+            long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(8); String state="";
+            while (System.nanoTime()<end) { state=jdbc.queryForObject("select state from conversation_title_work where conversation_id=?",String.class,id); if ("FAILED".equals(state)) break; Thread.sleep(20); }
+            assertEquals("FAILED",state); assertEquals(1,loopback.requests.get());
+            assertEquals("SETTLED",jdbc.queryForObject("select state from workspace_title_reservation where conversation_id=?",String.class,id));
+            var read=http.send(request("/graphql",Map.of("query","query($id: ID!) { conversation(id: $id) { title } }","variables",Map.of("id",id))),HttpResponse.BodyHandlers.ofString());
+            assertEquals("New Conversation",json.readTree(read.body()).path("data").path("conversation").path("title").asText());
+        } finally { loopback.invalidTitle=false; loopback.success=false; chatModel().complete(); }
+    }
+
+}

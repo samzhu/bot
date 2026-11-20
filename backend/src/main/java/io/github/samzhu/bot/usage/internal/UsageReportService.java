@@ -170,7 +170,9 @@ public class UsageReportService {
         Group(String p,String e,String m,String s){provider=p;endpoint=e;model=m;schema=s;}
         void add(Row row) {
             String[] keys;
-            if (("GOOGLE".equals(provider)||"FAKE_GEMINI".equals(provider)) && "generateContent".equals(endpoint))
+            if ("GOOGLE".equals(provider) && "interactions".equals(endpoint))
+                keys=new String[]{"total_input_tokens","total_output_tokens","total_cached_tokens",null};
+            else if (("GOOGLE".equals(provider)||"FAKE_GEMINI".equals(provider)) && "generateContent".equals(endpoint))
                 keys=new String[]{"promptTokenCount","candidatesTokenCount","cachedContentTokenCount",null};
             else if ("FAKE_OPENAI".equals(provider) && "responses-fixture-ttl".equals(endpoint) && "pricing-fixture-v1".equals(schema))
                 keys=new String[]{"input_tokens","output_tokens","input_tokens_details.cached_tokens","input_tokens_details.cache_write_tokens"};
@@ -189,6 +191,7 @@ public class UsageReportService {
         }
         NativeGroup view(){return new NativeGroup(provider,endpoint,model,schema,metrics[0].view(meaning(0)),metrics[1].view(meaning(1)),metrics[2].view(meaning(2)),metrics[3].view(meaning(3)));}
         String meaning(int i){
+            if ("GOOGLE".equals(provider) && "interactions".equals(endpoint)) return new String[]{"Gemini total_input_tokens，包含已快取的輸入","Gemini total_output_tokens，不包含獨立的 total_thought_tokens","Gemini total_cached_tokens，為輸入的子集","Provider field not available"}[i];
             if ("GOOGLE".equals(provider)||"FAKE_GEMINI".equals(provider)) return new String[]{"Gemini promptTokenCount，包含已快取的輸入","Gemini candidatesTokenCount，不包含獨立的 thoughtsTokenCount","Gemini cachedContentTokenCount，為 prompt 的子集","Provider field not available"}[i];
             if ("FAKE_ANTHROPIC".equals(provider)) return new String[]{"Anthropic input_tokens，不包含 cache read/write","Anthropic output_tokens","Anthropic cache_read_input_tokens","Anthropic cache_creation_input_tokens"}[i];
             if ("FAKE_OPENAI".equals(provider)) return new String[]{"OpenAI input_tokens，包含 cache read/write","OpenAI output_tokens，包含 reasoning","OpenAI cached_tokens，為 input 子集","OpenAI cache_write_tokens，為 input 子集"}[i];
