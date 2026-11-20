@@ -64,7 +64,7 @@ try {
   page.setDefaultTimeout(8000);
   await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
   await check('app css has no private SDK selectors', async () => {
-    for (const f of ['../src/app/app.css', '../src/app/chat-navigation.component.css']) {
+    for (const f of ['../src/app/app.css', '../src/app/shell/chat-navigation.component.css']) {
       const t = (await readFile(new URL(f, import.meta.url), 'utf8')).replace(/--tplane-chat-[a-z0-9-]+/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
       assert.ok(!/::ng-deep|(^|[\s,{}>+~])chat-[a-z-]+|\.tplane-/m.test(t), f);
     }

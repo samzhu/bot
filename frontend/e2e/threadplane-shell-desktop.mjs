@@ -70,7 +70,7 @@ try {
   });
 
   await check('app css contains no private SDK selectors', async () => {
-    for (const f of ['../src/app/app.css', '../src/app/chat-navigation.component.css']) {
+    for (const f of ['../src/app/app.css', '../src/app/shell/chat-navigation.component.css']) {
       const text = await css(f);
       assert.ok(!/::ng-deep|(^|[\s,{}>+~])chat-[a-z-]+|\.tplane-|\.chat-(?!pane)/m.test(text.replace(/--tplane-chat-[a-z0-9-]+/g, '').replace(/\/\*[\s\S]*?\*\//g, '')), `${f} references SDK internals`);
     }

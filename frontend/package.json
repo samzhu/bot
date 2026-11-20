@@ -4,11 +4,12 @@
   "scripts": {
     "ng": "ng",
     "start": "ng serve --proxy-config proxy.conf.json",
-    "build": "npm run test:layout && ng build",
+    "build": "npm run lint && npm run test:layout && ng build",
     "watch": "ng build --watch --configuration development",
+    "lint": "eslint \"src/**/*.{ts,html}\" --max-warnings=0",
     "test": "ng test --no-watch --no-progress && npm run test:parser",
     "test:unit": "ng test --no-watch --no-progress",
-    "test:layout": "npm run test:unit -- --include=src/app/app.spec.ts --include=src/app/app-threadplane.spec.ts --include=src/app/chat-navigation.component.spec.ts",
+    "test:layout": "npm run test:unit -- --include=src/app/app.spec.ts --include=src/app/app-threadplane.spec.ts --include=src/app/shell/chat-navigation.component.spec.ts",
     "test:parser": "node --test src/app/sse-parser.spec.mjs",
     "test:guard": "node --test test/*.test.mjs"
   },
@@ -36,12 +37,16 @@
     "zod": "4.6.6"
   },
   "devDependencies": {
+    "@angular-eslint/eslint-plugin-template": "22.8.0",
+    "@angular-eslint/template-parser": "22.8.0",
     "@angular/build": "22.2.6",
     "@angular/cli": "22.2.6",
     "@angular/compiler-cli": "22.2.5",
+    "eslint": "10.15.0",
     "jsdom": "^31.0.0",
     "puppeteer-core": "^25.17.0",
     "typescript": "6.0.3",
+    "typescript-eslint": "8.73.0",
     "vitest": "^4.1.12"
   }
 }

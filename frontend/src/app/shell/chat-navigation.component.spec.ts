@@ -1,8 +1,8 @@
 import { TestBed } from '@angular/core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChatNavigationComponent } from './chat-navigation.component';
-import { BotStore } from './bot/bot-store';
-import { ConversationListStore } from './conversation-list-store';
+import { BotStore } from '../bot/bot-store';
+import { ConversationListStore } from '../conversation-list-store';
 
 const bot = (id: string) => ({ id, name: `Bot ${id}`, target: 'GKE_REMOTE', connectionStatus: 'NOT_CONNECTED', executionMode: 'UNAVAILABLE', canChat: false, createdAt: '', updatedAt: '' });
 const response = (bots: unknown[]) => ({ ok: true, json: async () => ({ data: { defaultLocalBot: { ...bot('default'), target: 'LOCAL' }, bots } }) });

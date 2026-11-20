@@ -6,13 +6,34 @@ Angular with ThreadPlane native components and the AG-UI adapter. See the
 ## Local checks
 
     TPLANE_TELEMETRY_DISABLED=1 npm ci --ignore-scripts
+    npm run lint
     npm test
     npm run test:guard
     npm run build
 
-npm test runs component / application tests and retained historical SSE parser
+`npm run build` runs lint and `npm run test:layout` before compiling. `npm test`
+runs component / application tests and retained historical SSE parser
 utility tests. Production chat uses ThreadPlane and the official AG-UI client.
 Dependency verification also uses npm ls and npm audit.
+
+This project invokes ESLint directly through npm. The Angular CLI's `ng lint`
+command delegates to a configured lint builder. [Angular CLI lint reference](https://angular.dev/cli/lint)
+
+## Frontend ownership
+
+`src/app/app.ts` composes the application. `src/app/shell/` holds the shared
+navigation component, its template, styles and tests. Keeping them together
+follows the [Angular style guide](https://angular.dev/style-guide#group-closely-related-files-together-in-the-same-directory).
+`src/app/bot/` owns Bot management. For this project, production code in shell
+and Bot may use feature interfaces. App
+composes both, so shell and Bot cannot import App, and Bot cannot import shell.
+Integration specs can import App to test the composed UI.
+
+ESLint matches static module specifiers as written. Review module aliases,
+dynamic imports and indirect dependency paths when changing these boundaries.
+ESLint also checks public ThreadPlane entry points in TypeScript and image
+alternative text and form labels in external and inline Angular templates.
+[Angular ESLint configuration](https://github.com/angular-eslint/angular-eslint/blob/main/docs/CONFIGURING_ESLINT.md)
 
 ## Browser verification
 

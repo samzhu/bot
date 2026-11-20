@@ -1,11 +1,11 @@
 import { Component, computed, DestroyRef, effect, ElementRef, inject, input, OnInit, output, signal, untracked, viewChild } from '@angular/core';
 import { A11yModule } from '@angular/cdk/a11y';
 import { ChatSidenavScrimComponent, ChatHistorySearchPaletteComponent, ChatThreadListComponent, type ChatSidenavMode, type Thread, type ThreadActionAdapter } from '@threadplane/chat';
-import { ChatSearchStore } from './chat-search.store';
-import { BotStore } from './bot/bot-store';
-import { BotView, getBotExecutionModeDisplay } from './bot/bot.model';
-import type { Workspace } from './workspace.store';
-import { ConversationListStore, ConversationView } from './conversation-list-store';
+import { ChatSearchStore } from '../chat-search.store';
+import { BotStore } from '../bot/bot-store';
+import { BotView, getBotExecutionModeDisplay } from '../bot/bot.model';
+import type { Workspace } from '../workspace.store';
+import { ConversationListStore, ConversationView } from '../conversation-list-store';
 
 @Component({
   selector: 'app-chat-navigation',

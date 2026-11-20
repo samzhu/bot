@@ -18,7 +18,7 @@ import {
 export type { ConversationView, PinMutationError, PinRefreshError };
 
 import { BotManagerComponent } from './bot/bot-manager.component';
-import { ChatNavigationComponent } from './chat-navigation.component';
+import { ChatNavigationComponent } from './shell/chat-navigation.component';
 import { ChatSidenavMode } from '@threadplane/chat';
 import { ChatSurfaceComponent } from './chat-surface.component';
 import { ChatAgUiTransport } from './chat-ag-ui-transport';
