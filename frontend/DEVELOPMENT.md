@@ -17,12 +17,35 @@
 
 **應用殼層（app shell）**的 DOM 順序為**導覽軌（navigation rail）→ 情境側欄（contextual sidebar）→ 主內容區（main content area）**。導覽軌放主要功能入口及全域動作，側欄顯示工作區選取、對話清單或 Bot 清單。主內容區呈現目前功能。工作區選取可以在保留目前主內容的情況下開啟。 [根版型](src/app/app.html) · [側欄版型](src/app/shell/chat-navigation.component.html)
 
+以下以左到右（LTR）的對話畫面為例。暫開側欄和模態抽屜位於上層（overlay），左緣與底層（base）的主內容區對齊。
+
+```text
+Desktop · docked
++-----------------+----------------------------+-----------------------------------------------+
+| Navigation rail | Contextual sidebar         | Main content area                             |
+|                 | Title           [Collapse] | Workspace + chat title     [New conversation] |
+| Vertical icons  | Conversation list          | Messages                                      |
+|                 |                            | Composer                                      |
++-----------------+----------------------------+-----------------------------------------------+
+
+Desktop · collapsed
+Base    [Navigation rail] [ Main content area                              ]
+
+Desktop · peek
+Overlay                   [ Sidebar title                 [Pin] ]
+Base    [Navigation rail] [ Main content area · interactive                ]
+
+Narrow · modal drawer open
+Overlay                   [ Drawer title                 [Close] ][ Scrim ]
+Base    [Rail · inert   ] [ Main content area · inert                      ]
+```
+
 | 模式 | 位置與互動 |
 | --- | --- |
 | 桌面停駐（docked sidebar） | 導覽軌靠行內起始側（inline start，LTR 為左），側欄緊接其後，主內容填滿剩餘空間。三區並列時可稱為三欄式應用殼層（three-column app shell）。 |
 | 桌面收合（collapsed sidebar） | 側欄收合後，主內容緊接導覽軌，收回側欄原本佔用的寬度。 |
 | 桌面暫開（sidebar peek） | 側欄從導覽軌之後覆蓋主內容。主內容的起點與寬度維持收合時的幾何，仍可互動。Escape 或外點可關閉，固定可回到停駐。 |
-| 窄版抽屜（modal sidebar drawer） | 窄版開啟側欄時，以有遮罩的模態抽屜呈現。背景導覽軌及主內容進入 `inert`，鍵盤焦點留在抽屜內，關閉後依合約恢復。 |
+| 窄版抽屜（modal sidebar drawer） | 窄版開啟側欄時，以有遮罩（scrim）的模態抽屜呈現。背景導覽軌及主內容進入 `inert`，鍵盤焦點留在抽屜內，關閉後依合約恢復。 |
 
 - **對齊（alignment）**側欄標題靠行內起始側，桌面「收合側欄」或「固定側欄」及窄版「關閉導覽」靠行內結束側（inline end，LTR 為右）。維持具名控制項與現有 44 × 44 CSS px 最小點擊區。以 DOM 順序維持相符的視覺與 Tab 順序。功能專屬動作的位置以其規格為準。 [側欄樣式](src/app/shell/chat-navigation.component.css) · [導覽軌樣式](src/app/app.css)
 - **捲動（scroll）**讓長內容在負責的區域內捲動，保持側欄、主內容及輸入區可用。檢查窄視窗、短視窗、放大文字及長名稱的裁切、橫向溢出和焦點可見性。收合、暫開及跨斷點時，依規格保留對話的閱讀位置。
