@@ -1,5 +1,0 @@
-bot:
-  demo-data:
-    enabled: true
-  gke:
-    execution-mode: SIMULATED

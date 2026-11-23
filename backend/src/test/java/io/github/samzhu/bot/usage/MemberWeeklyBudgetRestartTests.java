@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(properties="bot.test.weekly-restart-isolation=true")
 @Import(TestcontainersConfiguration.class)
 @ActiveProfiles("test")
@@ -37,7 +38,7 @@ class MemberWeeklyBudgetRestartTests {
         assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),allowed.claim(),WorkspaceAdmission.TerminalKind.UNKNOWN)).toCompletableFuture().join());
         weekly.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,actor,WorkspaceAdmission.Partition.REAL,actor,true,"10","0","restart")).toCompletableFuture().join();
         var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
-        try(var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class).web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
+        try(var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class).web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),"spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false").run()) {
             var recovered=context.getBean(io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.class).read(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Read(workspace,actor,WorkspaceAdmission.Partition.REAL,actor,true)).toCompletableFuture().join();
             assertTrue(recovered.enabled()); assertEquals(1,recovered.terminalUnknownCount()); assertEquals(1,recovered.configVersion());

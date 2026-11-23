@@ -25,6 +25,7 @@ import javax.sql.DataSource;
 import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest
 @Import(TestcontainersConfiguration.class)
 @ActiveProfiles("test")
@@ -78,7 +79,7 @@ class WorkspaceStartupInconsistentFactsTests {
 
     private void restart(Class<?> override) {
         var ds=(HikariDataSource)dataSource;
-        try(var ignored=new SpringApplicationBuilder(BotApplication.class,override).web(WebApplicationType.NONE).profiles("test")
+        try(var ignored=new SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class,override).web(WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                         "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false",
                         "bot.execution.startup-coordinator.budget=2s").run()) { }

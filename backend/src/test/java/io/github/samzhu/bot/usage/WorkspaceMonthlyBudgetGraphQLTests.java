@@ -17,6 +17,7 @@ import java.net.http.HttpResponse;
 import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(TestcontainersConfiguration.class)
 @ActiveProfiles("test")
@@ -91,7 +92,7 @@ class WorkspaceMonthlyBudgetGraphQLTests {
         var saved=configure(workspace,"restart-"+java.util.UUID.randomUUID(),"0","7.25");
         assertFalse(saved.has("errors"),saved.toString());
         var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
-        try (var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class)
+        try (var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
                 .web(org.springframework.boot.WebApplicationType.SERVLET).profiles("test")
                 .properties("server.port=0", "spring.datasource.url="+ds.getJdbcUrl(),
                         "spring.datasource.username="+ds.getUsername(), "spring.datasource.password="+ds.getPassword(),
@@ -158,7 +159,7 @@ class WorkspaceMonthlyBudgetGraphQLTests {
         assertFalse(configure(workspace,key,"0","5.0").has("errors"));
         assertFalse(configure(workspace,"later-"+java.util.UUID.randomUUID(),"1","8").has("errors"));
         var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
-        try(var restarted=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class)
+        try(var restarted=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
                 .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                         "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false").run()) {

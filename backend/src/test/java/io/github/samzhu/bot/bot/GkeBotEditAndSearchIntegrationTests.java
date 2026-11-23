@@ -49,6 +49,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * <p>ZERO PAID CALLS PROTECTION:
  * Verified with ControlledChatModel mock bean override; 0 cloud tokens or costs incurred.
  */
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(
         classes = {BotApplication.class, GkeBotEditAndSearchIntegrationTests.PostgresTestConfig.class},
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT

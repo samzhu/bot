@@ -35,6 +35,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import({TestcontainersConfiguration.class, ConversationTitleBudgetHttpIntegrationTests.LoopbackConfig.class})
 @ActiveProfiles("test")

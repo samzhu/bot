@@ -6,6 +6,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.test.context.ActiveProfiles;
 
 @Import(TestcontainersConfiguration.class)
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest
 @ActiveProfiles("test")
 class BotApplicationTests {

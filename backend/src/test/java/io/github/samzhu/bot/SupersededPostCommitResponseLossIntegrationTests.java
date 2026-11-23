@@ -42,6 +42,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties={"bot.run.timeout=2s","bot.budget.effects.initial-delay-ms=100","bot.budget.effects.delay-ms=100",
                 "bot.budget.finalization.initial-delay-ms=100","bot.budget.finalization.delay-ms=100",

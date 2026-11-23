@@ -25,6 +25,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(properties={"bot.pricing.reconcile.initial-delay-ms=0","bot.pricing.reconcile.delay-ms=200","bot.budget.effects.initial-delay-ms=3600000"})
 @Import({TestcontainersConfiguration.class,WorkspacePricingGateTests.ControlledScheduling.class})
 @ActiveProfiles("test")

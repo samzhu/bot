@@ -3,13 +3,9 @@ package io.github.samzhu.bot.execution.internal.capture;
 import io.github.samzhu.bot.usage.UsageLedger;
 
 import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.context.annotation.Profile;
-import org.springframework.stereotype.Component;
 
 import java.util.Optional;
 
-@Component
-@Profile("mock-ai | test")
 public class FakeUsageCaptureAdapter implements UsageCaptureAdapter {
     @Override
     public UsageLedger.Dispatch dispatch(String run, String workspace, String actor) {

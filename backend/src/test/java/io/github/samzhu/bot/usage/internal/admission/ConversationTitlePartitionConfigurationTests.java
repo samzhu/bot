@@ -11,7 +11,7 @@ class ConversationTitlePartitionConfigurationTests {
         var runner = new ApplicationContextRunner().withUserConfiguration(ConversationTitlePartitionConfiguration.class);
         runner.withPropertyValues("bot-google-api-key=synthetic-key-only").run(context ->
                 assertThat(context.getBean(ConversationTitlePartition.class).current()).isEqualTo(WorkspaceAdmission.Partition.SIMULATION));
-        runner.withPropertyValues("bot-ai-provider=gemini").run(context ->
+        runner.withPropertyValues("spring.ai.model.chat=google-genai").run(context ->
                 assertThat(context.getBean(ConversationTitlePartition.class).current()).isEqualTo(WorkspaceAdmission.Partition.REAL));
     }
     @Test void standardGeminiSelectorUsesRealPartition() {

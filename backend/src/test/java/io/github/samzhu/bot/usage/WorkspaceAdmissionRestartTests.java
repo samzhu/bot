@@ -20,6 +20,7 @@ import java.time.ZoneId;
 import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest
 @Import(TestcontainersConfiguration.class)
 @ActiveProfiles("test")
@@ -48,7 +49,7 @@ class WorkspaceAdmissionRestartTests {
         var allowed=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt)).toCompletableFuture().join());
         jdbc.update("insert into workspace_admission_finalization(attempt_id,registration_token,claim_id,terminal_kind,terminal_reason,state) values (?,?,?,'UNKNOWN','CAPTURE_FAILED','PENDING')",attempt,registration.token(),allowed.claim().claimId());
         var ds=(HikariDataSource)dataSource;
-        try(var restarted=new SpringApplicationBuilder(BotApplication.class).web(WebApplicationType.NONE).profiles("test")
+        try(var restarted=new SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class).web(WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                         "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false",
                         "bot.pricing.reconcile.initial-delay-ms=3600000","bot.pricing.reconcile.delay-ms=3600000").run()) {
@@ -87,7 +88,7 @@ class WorkspaceAdmissionRestartTests {
         String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
         jdbc.update("insert into workspace_admission_dispatch(attempt_id,registration_token,state) values (?,?,'PENDING')",attempt,registration.token());
         var ds=(HikariDataSource)dataSource;
-        assertThrows(RuntimeException.class,()->new SpringApplicationBuilder(BotApplication.class).web(WebApplicationType.NONE).profiles("test")
+        assertThrows(RuntimeException.class,()->new SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class).web(WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                         "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false",
                         "bot.execution.startup-coordinator.budget=2s",
@@ -123,7 +124,7 @@ class WorkspaceAdmissionRestartTests {
             jdbc.execute("drop function if exists "+function+"()");
         }
         var ds=(HikariDataSource)dataSource;
-        try(var restarted=new SpringApplicationBuilder(BotApplication.class).web(WebApplicationType.NONE).profiles("test")
+        try(var restarted=new SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class).web(WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                         "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false").run()) {
             assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,restarted.getBean(WorkspaceAdmission.class)
@@ -146,7 +147,7 @@ class WorkspaceAdmissionRestartTests {
         jdbc.update("insert into workspace_admission_finalization(attempt_id,registration_token,claim_id,terminal_kind,state) values (?,?,?,'SUCCEEDED','PENDING')",attempt,registration.token(),claim.claimId());
         jdbc.update("update provider_attempt set execution_outcome='FAILED' where id=?",attempt);
         var ds=(HikariDataSource)dataSource;
-        assertThrows(RuntimeException.class,()->new SpringApplicationBuilder(BotApplication.class).web(WebApplicationType.NONE).profiles("test")
+        assertThrows(RuntimeException.class,()->new SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class).web(WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                         "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false").run());
         assertEquals("FAILED",jdbc.queryForObject("select execution_outcome from provider_attempt where id=?",String.class,attempt));

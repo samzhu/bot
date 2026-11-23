@@ -13,6 +13,7 @@ import java.time.Instant;
 import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest
 @Import({TestcontainersConfiguration.class,WorkspaceStartupMonthBoundaryTests.ClockConfiguration.class})
 @ActiveProfiles("test")

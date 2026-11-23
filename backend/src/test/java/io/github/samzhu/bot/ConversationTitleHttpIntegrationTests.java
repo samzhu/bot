@@ -29,6 +29,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {"bot.conversation.title.execution-timeout=2s", "bot.conversation.title.queue-timeout=200ms"})
 @Import({TestcontainersConfiguration.class, ConversationTitleHttpIntegrationTests.TitleFakeConfig.class})

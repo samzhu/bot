@@ -33,6 +33,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 3. Confirms that no spring.autoconfigure.exclude entries are needed to suppress auto-configurations.
  */
 @Import(TestcontainersConfiguration.class)
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest
 @ActiveProfiles("test")
 class SpringAiProgrammaticConfigurationTests {

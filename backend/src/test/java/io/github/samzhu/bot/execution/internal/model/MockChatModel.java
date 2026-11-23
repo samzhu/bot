@@ -9,15 +9,11 @@ import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.model.StreamingChatModel;
 import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
-import org.springframework.context.annotation.Profile;
-import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 
 import java.time.Duration;
 import java.util.List;
 
-@Component
-@Profile("mock-ai | test")
 public class MockChatModel implements ChatModel, StreamingChatModel {
 
     @Override

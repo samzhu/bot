@@ -21,6 +21,7 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.when;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(properties={"bot.pricing.reconcile.initial-delay-ms=3600000","bot.budget.effects.initial-delay-ms=3600000"})
 @Import(TestcontainersConfiguration.class)
 @ActiveProfiles("test")

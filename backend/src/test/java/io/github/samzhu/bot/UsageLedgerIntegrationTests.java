@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(TestcontainersConfiguration.class)
 @ActiveProfiles("test")
@@ -915,7 +916,7 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
                 jdbc.queryForObject(
                         "select count(*) from ai_session where id='seed-conv-completed-01'",
                         Integer.class);
-        var seed = new io.github.samzhu.bot.bootstrap.LocalUsageSeedInitializer(jdbc, transaction);
+        var seed = new io.github.samzhu.bot.bootstrap.SyntheticUsageSeed(jdbc, transaction);
         seed.run(null);
         seed.run(null);
         assertEquals(

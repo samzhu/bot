@@ -9,10 +9,10 @@ class GoogleUsageCaptureSelectionTests {
         var runner = new ApplicationContextRunner().withUserConfiguration(GoogleUsageCaptureAdapter.class);
         runner.withPropertyValues("spring.profiles.active=local", "bot-google-api-key=synthetic-key-only")
                 .run(context -> assertThat(context).doesNotHaveBean(GoogleUsageCaptureAdapter.class));
-        runner.withPropertyValues("spring.profiles.active=local", "bot-ai-provider=gemini")
+        runner.withPropertyValues("spring.profiles.active=local", "spring.ai.model.chat=google-genai")
                 .run(context -> assertThat(context).hasSingleBean(GoogleUsageCaptureAdapter.class));
         for (String profiles : new String[]{"test", "local,test", "local,mock-ai", "local,prod", "prod"}) {
-            runner.withPropertyValues("spring.profiles.active=" + profiles, "bot-ai-provider=gemini")
+            runner.withPropertyValues("spring.profiles.active=" + profiles, "spring.ai.model.chat=google-genai")
                     .run(context -> assertThat(context).doesNotHaveBean(GoogleUsageCaptureAdapter.class));
         }
     }

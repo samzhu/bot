@@ -20,7 +20,7 @@ class ProviderStartupGuardTests {
             clients.set(0);
             assertThrows(IllegalStateException.class, () -> new SpringApplicationBuilder(SyntheticClientConfiguration.class)
                 .web(WebApplicationType.NONE).listeners(new ProfileGuard())
-                .run("--spring.config.location=optional:classpath:/empty-provider-test/", "--spring.main.banner-mode=off", "--spring.profiles.active=" + profile, "--bot-ai-provider=gemini"));
+                .run("--spring.config.location=optional:classpath:/empty-provider-test/", "--spring.main.banner-mode=off", "--spring.profiles.active=" + profile, "--spring.ai.model.chat=google-genai"));
             assertThat(clients.get()).isZero();
         }
     }
@@ -83,6 +83,15 @@ class ProviderStartupGuardTests {
             .run("--spring.config.location=optional:classpath:/empty-provider-test/", "--spring.main.banner-mode=off",
                 "--spring.profiles.active=local", "--spring.ai.model.chat=google-genai",
                 "--spring.docker.compose.profiles.active[0]=ollama"));
+        assertThat(clients.get()).isZero();
+    }
+    @Test void rejectsRetiredLegacySelectorEvenWithStandardProvider() {
+        clients.set(0);
+        assertThrows(IllegalStateException.class, () -> new SpringApplicationBuilder(SyntheticClientConfiguration.class)
+            .web(WebApplicationType.NONE).listeners(new ProfileGuard())
+            .run("--spring.config.location=optional:classpath:/empty-provider-test/", "--spring.main.banner-mode=off",
+                "--spring.profiles.active=local", "--spring.docker.compose.enabled=false",
+                "--spring.ai.model.chat=google-genai", "--bot-ai-provider=gemini"));
         assertThat(clients.get()).isZero();
     }
 }

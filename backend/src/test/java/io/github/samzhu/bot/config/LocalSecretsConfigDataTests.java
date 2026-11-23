@@ -72,11 +72,11 @@ class LocalSecretsConfigDataTests {
                     .isEqualTo(provider));
         }
     }
-    @Test void legacyLaunchUsesInactiveExplicitComposeProfile(@TempDir Path directory) throws Exception {
+    @Test void localWithoutSelectorUsesInactiveExplicitComposeProfile(@TempDir Path directory) throws Exception {
         Files.copy(Path.of("src/main/resources/application.yaml"), directory.resolve("application.yaml"));
         Files.copy(Path.of("src/main/resources/application-local.yaml"), directory.resolve("application-local.yaml"));
         new ApplicationContextRunner().withInitializer(new ConfigDataApplicationContextInitializer())
-            .withPropertyValues("spring.config.location=" + directory.toUri(), "spring.profiles.active=local,dev", "bot-ai-provider=gemini")
+            .withPropertyValues("spring.config.location=" + directory.toUri(), "spring.profiles.active=local")
             .run(context -> assertThat(context.getEnvironment().getProperty("spring.docker.compose.profiles.active")).isEqualTo("none"));
     }
     @Test void devAlwaysStartsSelectedServicesAndLeavesThemRunning(@TempDir Path directory) throws Exception {

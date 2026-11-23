@@ -24,6 +24,7 @@ import java.util.Map;
 import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT, properties={"bot.pricing.reconcile.initial-delay-ms=3600000"})
 @Import(TestcontainersConfiguration.class)
 @ActiveProfiles("test")

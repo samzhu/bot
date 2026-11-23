@@ -13,6 +13,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.context.ConfigurableApplicationContext;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest
 @Import(TestcontainersConfiguration.class)
 @ActiveProfiles("test")
@@ -44,7 +45,7 @@ class UsageCostRevisionRestartIntegrationTests {
         String username=((HikariDataSource)dataSource).getUsername();
         String password=((HikariDataSource)dataSource).getPassword();
         String beforeCurrent=jdbc.queryForObject("select estimate_id from usage_cost_current where attempt_id=?",String.class,attempt);
-        try(ConfigurableApplicationContext restarted=new SpringApplicationBuilder(BotApplication.class)
+        try(ConfigurableApplicationContext restarted=new SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
                 .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+jdbcUrl,"spring.datasource.username="+username,"spring.datasource.password="+password,
                         "spring.docker.compose.enabled=false","bot.pricing.reconcile.initial-delay-ms=3600000",

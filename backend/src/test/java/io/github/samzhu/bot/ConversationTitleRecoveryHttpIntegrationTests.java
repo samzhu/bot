@@ -70,7 +70,8 @@ class ConversationTitleRecoveryHttpIntegrationTests {
     ConfigurableApplicationContext start() { return start(true); }
     ConfigurableApplicationContext start(boolean titleEnabled) { return start(titleEnabled, "60s"); }
     ConfigurableApplicationContext start(boolean titleEnabled, String executionTimeout) {
-        SpringApplication app = new SpringApplication(BotApplication.class, titleEnabled ? Fakes.class : ChatOnly.class);
+        SpringApplication app = new SpringApplication(BotApplication.class, TestUsageCaptureConfiguration.class,
+                titleEnabled ? Fakes.class : ChatOnly.class);
         app.setAdditionalProfiles("test");
         app.addInitializers(context -> {
             context.getEnvironment().setActiveProfiles("test");
@@ -85,7 +86,7 @@ class ConversationTitleRecoveryHttpIntegrationTests {
         assertNull(context.getEnvironment().getProperty("bot-ai-provider"));
         assertEquals(titleEnabled ? 1 : 0, context.getBeansOfType(ConversationTitleGenerator.class).size());
         assertSame(context.getBean(ControlledChatModel.class), context.getBean(ChatModel.class));
-        assertEquals(2, context.getBeansOfType(ChatModel.class).size());
+        assertEquals(1, context.getBeansOfType(ChatModel.class).size());
         try (var connection = context.getBean(javax.sql.DataSource.class).getConnection()) {
             assertEquals(postgres.getJdbcUrl(), connection.getMetaData().getURL());
         } catch (java.sql.SQLException ex) { throw new IllegalStateException(ex); }

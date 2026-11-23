@@ -21,6 +21,7 @@ import java.util.Map;
 import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import({TestcontainersConfiguration.class,WorkspaceStartupMonthBoundaryTests.ClockConfiguration.class})
 @ActiveProfiles("test")

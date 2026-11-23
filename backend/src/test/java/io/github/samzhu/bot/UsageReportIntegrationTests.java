@@ -24,6 +24,7 @@ import io.github.samzhu.bot.identity.CurrentUserProvider;
 import java.time.Clock;
 import java.time.Instant;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(TestcontainersConfiguration.class)
 @ActiveProfiles("test")

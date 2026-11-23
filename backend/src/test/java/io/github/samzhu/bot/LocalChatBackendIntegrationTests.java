@@ -45,6 +45,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(TestcontainersConfiguration.class)
 @ActiveProfiles("test")
@@ -2173,7 +2174,7 @@ class LocalChatBackendIntegrationTests {
 
     @Test
     void test_LocalDataSeedInitializer_Idempotent_And_SessionTurnPair() {
-        var localDataSeedInitializer = new io.github.samzhu.bot.bootstrap.LocalDataSeedInitializer(
+        var localDataSeedInitializer = new io.github.samzhu.bot.bootstrap.SyntheticConversationSeed(
                 sessionService, workspaceOperations, jdbcTemplate, transactionTemplate
         );
 

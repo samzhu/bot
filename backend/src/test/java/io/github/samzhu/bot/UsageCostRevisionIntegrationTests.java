@@ -23,6 +23,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {"bot.pricing.reconcile.initial-delay-ms=3600000", "bot.pricing.reconcile.delay-ms=3600000"})
 @Import(TestcontainersConfiguration.class)

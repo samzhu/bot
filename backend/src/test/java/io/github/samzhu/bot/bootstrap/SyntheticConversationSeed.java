@@ -11,12 +11,7 @@ import org.springframework.ai.session.SessionAttributes;
 import org.springframework.ai.session.SessionEvent;
 import org.springframework.ai.session.SessionService;
 import org.springframework.boot.ApplicationArguments;
-import org.springframework.boot.ApplicationRunner;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.context.annotation.Profile;
-import org.springframework.core.annotation.Order;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.sql.Timestamp;
@@ -24,20 +19,12 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Local development seed initializer.
- * Isolated in the 'localDevelopment' sourceSet so it is never packaged into production JARs or container images.
- * Idempotently populates three demonstration conversations (COMPLETED, FAILED, CANCELLED) with fixed IDs.
- */
-@Component
-@Profile("local & mock-ai")
-@ConditionalOnProperty(prefix = "bot.demo-data", name = "enabled", havingValue = "true", matchIfMissing = false)
-@Order(20)
-public class LocalDataSeedInitializer implements ApplicationRunner {
+/** Explicit test-owned synthetic conversation fixture; never loaded automatically. */
+public final class SyntheticConversationSeed {
 
     /*
      * WHY / ARCHITECTURAL TRADE-OFF:
-     * LocalDataSeedInitializer is a development-only technical fixture assembly.
+     * SyntheticConversationSeed is a test-only fixture assembly.
      * It interacts with application tables (bot, conversation, chat_run, message) directly via standard SQL
      * to completely isolate fixture setup, guarantee deterministic fixed IDs, avoid executing live AI models,
      * and strictly preserve module boundaries without importing or exposing any package-internal domain entities
@@ -47,14 +34,14 @@ public class LocalDataSeedInitializer implements ApplicationRunner {
      * serialization, optimistic event versioning, and index consistency.
      */
 
-    private static final Logger log = LoggerFactory.getLogger(LocalDataSeedInitializer.class);
+    private static final Logger log = LoggerFactory.getLogger(SyntheticConversationSeed.class);
 
     private final SessionService sessionService;
     private final WorkspaceOperations workspace;
     private final JdbcTemplate jdbcTemplate;
     private final TransactionTemplate transactionTemplate;
 
-    public LocalDataSeedInitializer(
+    public SyntheticConversationSeed(
             SessionService sessionService,
             WorkspaceOperations workspace,
             JdbcTemplate jdbcTemplate,
@@ -65,9 +52,8 @@ public class LocalDataSeedInitializer implements ApplicationRunner {
         this.transactionTemplate = transactionTemplate;
     }
 
-    @Override
     public void run(ApplicationArguments args) {
-        log.info("Starting LocalDataSeedInitializer for demonstration conversations...");
+        log.info("Starting SyntheticConversationSeed for demonstration conversations...");
 
         // 2. Ensure demonstration GKE autonomous agent definition exists for local development simulation
         jdbcTemplate.update("""

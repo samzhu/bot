@@ -37,27 +37,19 @@ public class ProfileGuard implements ApplicationListener<ApplicationEnvironmentP
     private void validate(Environment env) {
         String[] activeProfiles = env.getActiveProfiles();
 
-        String provider = env.getProperty("bot-ai-provider");
+        if (env.containsProperty("bot-ai-provider")) {
+            throw new IllegalStateException("The retired bot-ai-provider selector is not supported.");
+        }
         String standard = env.getProperty("spring.ai.model.chat");
         if (standard != null && !"google-genai".equals(standard) && !"ollama".equals(standard)) {
             throw new IllegalStateException("Unsupported spring.ai.model.chat; select google-genai or ollama explicitly.");
         }
-        if (env.matchesProfiles("dev & !mock-ai & !test & !prod") && standard == null && provider == null) {
+        if (env.matchesProfiles("dev & !mock-ai & !test & !prod") && standard == null) {
             throw new IllegalStateException("Development requires an explicit chat provider selector.");
-        }
-        if (standard != null && provider != null && !("google-genai".equals(standard) && "gemini".equals(provider))) {
-            throw new IllegalStateException("Conflicting chat provider selectors.");
         }
         if (standard != null && !env.matchesProfiles("local & !mock-ai & !test & !prod")) {
             throw new IllegalStateException("Selected provider requires local without mock-ai, test or prod.");
         }
-        if (provider != null && !"gemini".equals(provider)) {
-            throw new IllegalStateException("Unsupported bot-ai-provider; select gemini explicitly or leave it unset.");
-        }
-        if ("gemini".equals(provider) && !env.matchesProfiles("local & !mock-ai & !test & !prod")) {
-            throw new IllegalStateException("Gemini requires local without mock-ai, test or prod.");
-        }
-
         Set<String> composeProfiles = Binder.get(env).bind("spring.docker.compose.profiles.active", Bindable.setOf(String.class)).orElse(Set.of());
         if (env.matchesProfiles("local") && env.getProperty("spring.docker.compose.enabled", Boolean.class, true)
                 && !composeProfiles.equals(Set.of(standard == null ? "none" : standard))) {

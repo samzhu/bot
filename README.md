@@ -13,22 +13,11 @@ A minimal, deterministic, and resilient loopback AI chat platform built with Jav
 
 ---
 
-## 2. Profiles & Configurations
+## 2. Development and test configuration
 
-The application adopts a fail-closed, loopback-only security architecture enforced by `ProfileGuard`.
-An active profile (`local` or `test`) must be explicitly supplied; the application refuses to start if no permitted profile is specified.
+Development uses `dev` and an explicit Spring AI selector. `dev` activates local infrastructure; missing, invalid or conflicting selections fail closed. `spring.ai.model.chat=google-genai` requires the configured Gemini key; `spring.ai.model.chat=ollama` uses the local service. A key alone does not select a provider. The application remains loopback-only; production requires an authorization strategy not provided by this MVP.
 
-| Profile | Purpose | AI Model Provider | Credentials Required |
-| :--- | :--- | :--- | :--- |
-| **`local`** | Local infrastructure and loopback connection | No model selected | None |
-| **`local,mock-ai`** | Local development and demo data | `MockChatModel` (deterministic streaming) | None |
-| **`test`** | Automated testing suite | `MockChatModel` / `ControlledChatModel` | None |
-| **`dev` + `spring.ai.model.chat=google-genai`** | Explicit live cloud model inference | `GoogleGenAiChatModel` (`gemini-3.8-flash`) | Yes (`backend/config/application-secrets.properties`) |
-
-### Fail-Fast Guard Rails
-- **Profile Boundary**: Starting without either `local` or `test` profile immediately triggers `ProfileGuard` and aborts startup with an `IllegalStateException`. The `prod` configuration alone does not authorize deployment; production still requires an appropriate authorization strategy. Gemini requires `local` and cannot run with `mock-ai`, `test`, or `prod`.
-- **Real AI Missing Key / Model**: Selecting `spring.ai.model.chat=google-genai` without a non-blank `bot-google-api-key` or `spring.ai.google.genai.chat.model` fails fast at startup with clear diagnostics.
-- **Secrets Protection**: `backend/config/application-secrets.properties` and profile-specific variants are ignored by Git. The legacy `application-real-ai.yaml` ignore rule remains in place.
+Automated tests provide test-owned Fake models and use isolated Testcontainers where infrastructure is needed. They never require real model credentials or invoke a paid provider. The default Bot is application data and remains initialized independently of test fixtures.
 
 ---
 
@@ -36,56 +25,22 @@ An active profile (`local` or `test`) must be explicitly supplied; the applicati
 
 ### Local Gemini key
 
-Only real AI mode needs a Gemini API key. From the repository root, create a private copy of the empty template without overwriting an existing file:
+Only explicitly selected Gemini needs a key. From the repository root, create a private copy without overwriting an existing file:
 
 ```bash
 (umask 077; set -C; cat backend/config/application-secrets.properties.example > backend/config/application-secrets.properties)
 ```
 
-Privately set `bot-google-api-key` in that file and keep its permissions at `0600`; do not print the key or put it in command history.
+Privately set `bot-google-api-key` and keep permissions at `0600`; do not print the key or put it in command history. From `backend`, Spring Boot loads `config/application-dev.yaml`, whose guarded optional import reads that file. Missing or blank keys fail at startup for Gemini. OS environment variables, Java system properties and command-line properties take precedence over config data. Do not commit secrets.
 
-The `--gemini` command activates `local,dev`; the external `backend/config/application-dev.yaml` conditionally imports the optional secrets file. `dev` also activates `local`, enabling Compose and the secrets import; a key never activates a paid provider. `local` alone and combinations containing `mock-ai`, `test` or `prod` do not import it. The legacy `local,dev` / `bot-ai-provider=gemini` path remains temporarily available; conflicting selectors fail closed. Missing or blank keys fail fast for Gemini. Spring resolves the file relative to the backend process working directory: `dev.sh` sets this directory; when running Gradle manually, first `cd backend`. Existing Compose database settings are unchanged.
-
-Model names stay in YAML. Gemini chat uses `gemini-3.8-flash` from the shared configuration. Local configuration preserves `gemini-3.8-flash-tts` for speech, `gemini-3.5-transcribe` for transcription, and `gpt-5-mini` for OpenAI chat. These three settings are reserved for their integrations. The current app starts the Gemini chat and title clients, so leave `bot-openai-api-key` blank unless you need it for an OpenAI integration.
-
-The startup command selects profiles and explicitly selects Gemini. Spring Boot loads the external `application-dev.yaml` from the backend working directory; imported secrets override the declaring YAML document, while OS environment variables, Java system properties and command-line properties have higher precedence. The project runs Spring Boot 4.2.0. [Profiles](https://docs.spring.io/spring-boot/reference/features/profiles.html) · [Externalized configuration](https://docs.spring.io/spring-boot/reference/features/external-config.html)
-
-### Start Both Servers
-
-With Java 25, Node 26, Docker running, and frontend dependencies installed (`cd frontend && TPLANE_TELEMETRY_DISABLED=1 npm ci --ignore-scripts`), run from the repository root:
+### Backend Development: Gemini
 
 ```bash
-# From the repository root: choose 1 (Mock AI) or 2 (Real AI)
-./dev.sh
-
-# Skip the menu: local mock model, no API key required
-./dev.sh --mock
-
-# Use the local Gemini key configured above
-./dev.sh --gemini
-```
-
-Open `http://localhost:4200`. Output stays in the terminal; **Ctrl+C stops both servers**.
-The script checks ports 8080/4200 and waits for the backend before starting Angular.
-With `dev`, Spring Boot reconciles the selected Compose services at startup and leaves them running after the application exits. Switching provider does not stop an already running Ollama service. From `backend`, run `docker compose --profile ollama stop ollama` to stop only Ollama, or `docker compose --profile ollama stop` to stop all services in that profile, including the unprofiled database and Grafana. These commands retain volumes. For the legacy mock launch without `dev`, Spring Boot retains its existing lifecycle behavior.
-No database data is deleted. Use `./dev.sh --help` for usage.
-
-### Step 1: Start Backend
-
-Spring Boot automatically boots and configures the PostgreSQL container defined in `backend/compose.yaml`.
-
-```bash
-# Terminal 1: Start backend in deterministic mock mode
-cd backend
-./gradlew bootRun --args="--spring.profiles.active=local,mock-ai"
-```
-
-To run with real Google GenAI models:
-```bash
-# Terminal 1: Start backend with explicitly selected Gemini and local dev configuration
 cd backend
 ./gradlew bootRun --args="--spring.profiles.active=dev --spring.ai.model.chat=google-genai"
 ```
+
+Spring Boot starts or connects the Compose database and Grafana. With `dev`, Boot reconciles selected services and leaves them running when the app exits. A provider switch does not stop an already running Ollama service. From `backend`, `docker compose --profile ollama stop ollama` stops only Ollama; `docker compose --profile ollama stop` also stops the unprofiled database and Grafana. Both preserve volumes.
 
 ### Local Ollama
 
@@ -106,18 +61,9 @@ The [Ollama model page](https://ollama.com/library/llama3.2:1b) lists the model 
 
 Local Ollama attempts are recorded separately from Gemini. Spring AI 2.1 does not expose enough raw information to distinguish a missing token count from a real zero, so usage is reported as unavailable/incomplete and cost remains unpriced. Existing budget admission rules still apply.
 
-### Step 2: Start Frontend
+### Frontend Development
 
-```bash
-# Terminal 2: Initial installation and start Angular dev server
-cd frontend
-TPLANE_TELEMETRY_DISABLED=1 npm ci --ignore-scripts
-npm start
-```
-
-Access the UI at `http://localhost:4200`.
-See the [frontend development guide](frontend/DEVELOPMENT.md) for module
-boundaries, app shell layout conventions, and verification requirements.
+The frontend has its own installation, development, build, and verification workflow; see the [frontend README](frontend/README.md) and [frontend development guide](frontend/DEVELOPMENT.md) for commands, module boundaries, app shell layout conventions, and verification requirements.
 
 ---
 
@@ -129,21 +75,31 @@ boundaries, app shell layout conventions, and verification requirements.
 - [GitHub Sub-issue #7 (T1): 乾淨重建後可正常聊天](https://github.com/samzhu/bot/issues/7)
 - [GitHub Sub-issue #8 (T2): local啟動即可查看完整示範](https://github.com/samzhu/bot/issues/8) (Blocked by #7)
 
-### Local Demonstration Seed & Artifact Isolation
-- **SourceSet Isolation**: Demonstration loaders and local fixtures reside in the dedicated `localDevelopment` sourceSet (`src/local/java`), included only in `bootRun` and `test` classpaths.
-- **Production Artifacts**: Neither production `bootJar` nor container images contain demo SQL, seed classes, or private configurations.
-- **Idempotence**: When booting with `local,mock-ai`, `LocalDataSeedInitializer` automatically populates three demonstration scenarios (`COMPLETED`, `FAILED`, `CANCELLED`) with fixed IDs. Subsequent restarts detect existing data and skip initialization without modifying or duplicating records. Real AI does not import demonstration data; existing records are not deleted. The default assistant is initialized independently after schema migration.
+### Test fixtures and artifacts
+
+Tests explicitly provide Fake model boundaries and synthetic data where needed. Normal development startup does not insert demonstration conversations or usage. The application still creates its required default Bot after database migration. Test fixtures and private configuration are excluded from production artifacts.
 
 ### Backend Test Suites
 ```bash
 cd backend
 
-# 1. Full offline unit & integration test suite (isolated PostgreSQL & controlled model)
+# 1. Unit and integration tests (isolated PostgreSQL & controlled model)
 ./gradlew test
 
 # 2. Dedicated fail-fast configuration tests (missing API key, missing model, zero network)
 ./gradlew test --tests RealAiFailFastTests
 ```
+
+### Backend OCI Image
+
+With Docker running, build the backend image from the repository root:
+
+```bash
+cd backend
+./gradlew bootBuildImage
+```
+
+The default local image is `docker.io/library/bot:0.0.1-SNAPSHOT` (also addressable as `bot:0.0.1-SNAPSHOT`), based on the current Gradle project name and version. It is created in the configured Docker daemon and is not published by default. The image contains the backend artifact, not the frontend or test fixtures. Running it requires an explicitly permitted profile and separately configured database connectivity; the image build itself does not start the application or establish a production deployment configuration. See [Spring Boot 4.2.0 OCI packaging](https://docs.spring.io/spring-boot/gradle-plugin/packaging-oci-image.html) (checked 2026-11-23).
 
 ### Frontend Test Suites
 The retained SSE parser tests cover the historical transport utility. Normal chat uses the standard AG-UI client and ThreadPlane adapter.
@@ -170,32 +126,8 @@ running servers. See [frontend browser verification](frontend/README.md#browser-
 
 ### End-to-End Browser Automation
 
-Start both servers with ./dev.sh --mock, then run the current browser suites:
+See [frontend verification details](frontend/README.md) for browser test commands and prerequisites. Do not point generation tests at a real provider.
 
-    cd frontend
-    export BROWSER_URL=http://127.0.0.1:4200
-    export BACKEND_URL=http://127.0.0.1:8080
-    node e2e/threadplane-chat.mjs
-    node e2e/threadplane-navigation.mjs
-    node e2e/threadplane-bot.mjs
-
-The default verification URLs are 4300 / 8181 for an isolated test instance.
-CHROME_PATH selects Chrome; the default is the macOS Chrome installation.
-Both the backend and the frontend proxy must return all three SAFE_MOCK fields.
-Generation requests are guarded individually; Gemini is not an accepted test backend.
-
-The suites retain synthetic fixtures, write results / screenshots / console / network
-evidence to temporary directories, and exit unsuccessfully if any check fails.
-They cover chat and authoritative Run / Message state, native navigation and search,
-and Bot management. Stream failures, selected GraphQL failures, OFF fixtures and IME
-composition events are explicitly injected; these are not physical network outages
-or native operating-system IME tests. Browser assertions use public UI and APIs.
-Backend integration tests additionally verify PostgreSQL and Session consistency.
-
-Historical verify-ticket-*, verify-seed, verify-draft, verify-native-ui,
-verify-clipboard, verify-pinning* and issue16/18/22 layout scripts are retired
-and fail immediately. Their preserved assertions document the old layout and do
-not count as current validation. See [frontend verification details](frontend/README.md).
 
 ---
 

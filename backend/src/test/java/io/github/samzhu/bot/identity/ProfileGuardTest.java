@@ -39,7 +39,7 @@ class ProfileGuardTest {
     void explicitGeminiCannotRunAlongsideMock() {
         MockEnvironment env = new MockEnvironment();
         env.setActiveProfiles("local", "mock-ai");
-        env.setProperty("bot-ai-provider", "gemini");
+        env.setProperty("spring.ai.model.chat", "google-genai");
         assertThrows(IllegalStateException.class, () -> new ProfileGuard(env).validateActiveProfiles());
     }
     @Test
@@ -47,7 +47,7 @@ class ProfileGuardTest {
         for (String[] profiles : new String[][]{{"prod"}, {"local", "prod"}, {"test"}, {"local", "test"}, {"local", "mock-ai"}}) {
             MockEnvironment env = new MockEnvironment();
             env.setActiveProfiles(profiles);
-            env.setProperty("bot-ai-provider", "gemini");
+            env.setProperty("spring.ai.model.chat", "google-genai");
             assertThrows(IllegalStateException.class, () -> new ProfileGuard(env).validateActiveProfiles());
         }
         for (String value : new String[]{"", "other", "GEMINI"}) {
@@ -56,7 +56,7 @@ class ProfileGuardTest {
             assertThrows(IllegalStateException.class, () -> new ProfileGuard(env).validateActiveProfiles());
         }
         MockEnvironment valid = new MockEnvironment(); valid.setActiveProfiles("local");
-        valid.setProperty("bot-ai-provider", "gemini");
+        valid.setProperty("spring.ai.model.chat", "google-genai");
         valid.setProperty("spring.docker.compose.enabled", "false");
         assertDoesNotThrow(() -> new ProfileGuard(valid).validateActiveProfiles());
     }

@@ -12,6 +12,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @org.junit.jupiter.api.TestMethodOrder(org.junit.jupiter.api.MethodOrderer.OrderAnnotation.class)
 // This suite explicitly covers dispatch before any catalog exists.
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(properties={"spring.config.location=optional:classpath:/no-catalog-test/", "bot.budget.monthly.default-cap-usd=10"})
 @Import(TestcontainersConfiguration.class)
 @ActiveProfiles("test")

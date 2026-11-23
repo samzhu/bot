@@ -30,6 +30,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(
         classes = {BotApplication.class, GkeBotOffIntegrationTests.PostgresTestConfig.class},
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT

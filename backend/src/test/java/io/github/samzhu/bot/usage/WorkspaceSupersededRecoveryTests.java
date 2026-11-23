@@ -19,6 +19,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(properties={"bot.budget.finalization.initial-delay-ms=50", "bot.budget.finalization.delay-ms=100", "bot.budget.effect.initial-delay-ms=3600000"})
 @Import({TestcontainersConfiguration.class, WorkspaceSupersededRecoveryTests.Scheduling.class})
 @ActiveProfiles("test")

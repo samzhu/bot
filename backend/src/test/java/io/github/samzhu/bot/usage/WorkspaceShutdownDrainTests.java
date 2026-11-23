@@ -19,6 +19,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest
 @Import(TestcontainersConfiguration.class)
 @ActiveProfiles("test")
@@ -28,7 +29,7 @@ class WorkspaceShutdownDrainTests {
 
     @Test void contextShutdownDrainsAcceptedLaneWorkBeforeDatasourceCloses() throws Exception {
         var ds=(HikariDataSource)dataSource;
-        var context=new SpringApplicationBuilder(BotApplication.class).web(WebApplicationType.NONE).profiles("test")
+        var context=new SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class).web(WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                         "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false").run();
         var admission=context.getBean(WorkspaceAdmission.class);
@@ -74,7 +75,7 @@ class WorkspaceShutdownDrainTests {
 
     @Test void drainTimeoutPreservesTerminalIntentForAutomaticRestartRecovery() throws Exception {
         var ds=(HikariDataSource)dataSource;
-        var context=new SpringApplicationBuilder(BotApplication.class).web(WebApplicationType.NONE).profiles("test")
+        var context=new SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class).web(WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                         "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false").run();
         var admission=context.getBean(WorkspaceAdmission.class); var conversations=context.getBean(ConversationOperations.class);
@@ -113,7 +114,7 @@ class WorkspaceShutdownDrainTests {
             if (context.isActive()) context.close();
             if (closing!=null) closing.handle((value,error)->null).get(15,TimeUnit.SECONDS);
         }
-        try(var restored=new SpringApplicationBuilder(BotApplication.class).web(WebApplicationType.NONE).profiles("test")
+        try(var restored=new SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class).web(WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                         "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false").run()) {
             assertEquals("SETTLED",jdbc.queryForObject("select state from workspace_admission_finalization where attempt_id=?",String.class,attempt));
@@ -124,7 +125,7 @@ class WorkspaceShutdownDrainTests {
     @org.junit.jupiter.params.provider.ValueSource(booleans={false,true})
     void shutdownWaitsForAcceptedCompletionCallbackBeforeClosingDatasource(boolean fallback) throws Exception {
         var ds=(HikariDataSource)dataSource;
-        var context=new SpringApplicationBuilder(BotApplication.class).web(WebApplicationType.NONE).profiles("test")
+        var context=new SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class).web(WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                         "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false").run();
         var localDs=(HikariDataSource)context.getBean(DataSource.class);

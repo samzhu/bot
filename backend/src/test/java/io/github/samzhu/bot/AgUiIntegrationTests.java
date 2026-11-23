@@ -23,6 +23,7 @@ import java.net.http.*;
 import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {"bot.budget.effects.initial-delay-ms=100", "bot.budget.effects.delay-ms=100",
                 "bot.execution.completion-sweep.initial-delay-ms=100", "bot.execution.completion-sweep.delay-ms=100",

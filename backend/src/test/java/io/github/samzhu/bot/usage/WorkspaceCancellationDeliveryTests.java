@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(properties={"bot.budget.effects.initial-delay-ms=100","bot.budget.effects.delay-ms=100"})
 @Import({TestcontainersConfiguration.class, WorkspaceCancellationDeliveryTests.Scheduling.class})
 @ActiveProfiles("test")

@@ -22,6 +22,7 @@ import java.time.ZoneId;
 import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest
 @Import(TestcontainersConfiguration.class)
 @ActiveProfiles("test")
@@ -52,7 +53,7 @@ class WorkspaceStartupCoordinatorIntegrationTests {
                 new WorkspaceAdmission.FinalizeAttempt(registration,attempt,claim,WorkspaceAdmission.TerminalKind.UNKNOWN)).toCompletableFuture().join());
         jdbc.update("update chat_run set status='FAILED' where id=?",run);
         var ds=(HikariDataSource)dataSource;
-        try(var restarted=new SpringApplicationBuilder(BotApplication.class).web(WebApplicationType.NONE).profiles("test")
+        try(var restarted=new SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class).web(WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                         "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false").run()) {
             assertEquals("TERMINAL",jdbc.queryForObject("select status from workspace_admission_registration where token=?",String.class,registration.token()));
@@ -78,7 +79,7 @@ class WorkspaceStartupCoordinatorIntegrationTests {
         jdbc.update("update chat_run set status='FAILED' where id=?",run);
         var ds=(HikariDataSource)dataSource;
         long start=System.nanoTime();
-        assertThrows(RuntimeException.class,()->new SpringApplicationBuilder(BotApplication.class).web(WebApplicationType.NONE).profiles("test")
+        assertThrows(RuntimeException.class,()->new SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class).web(WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                         "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false",
                         "bot.execution.startup-coordinator.budget=2s").run());

@@ -16,6 +16,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest
 @Import({TestcontainersConfiguration.class, WorkspaceAdmissionLaneTests.Scheduling.class})
 @ActiveProfiles("test")

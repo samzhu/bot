@@ -31,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT, properties={"bot.run.timeout=1s", "bot.execution.completion-sweep.initial-delay-ms=100", "bot.execution.completion-sweep.delay-ms=100"})
 @Import({TestcontainersConfiguration.class, AgUiIntegrationTests.Scheduling.class})
 @ActiveProfiles("test")
@@ -242,7 +243,7 @@ class PromptFailureTimeoutIntegrationTests {
             assertEquals("RUNNING",jdbc.queryForObject("select status from chat_run where id=?",String.class,run));
             assertEquals("SETTLED",jdbc.queryForObject("select f.state from workspace_admission_finalization f join provider_attempt a on a.id=f.attempt_id where a.run_id=?",String.class,run));
             var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
-            try(var fresh=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class)
+            try(var fresh=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
                     .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
                     .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                             "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false").run()) {

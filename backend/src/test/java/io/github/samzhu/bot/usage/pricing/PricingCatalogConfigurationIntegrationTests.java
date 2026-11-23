@@ -10,6 +10,7 @@ import org.springframework.test.context.ActiveProfiles;
 import static org.junit.jupiter.api.Assertions.*;
 
 /** Isolated synthetic configuration; these rates are not a production price list. */
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(properties = {
     "bot.pricing.catalog.revision=synthetic-config-v1",
     "bot.pricing.catalog.source-reference=synthetic-only",

@@ -33,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(properties={"bot.budget.finalization.initial-delay-ms=100","bot.budget.finalization.delay-ms=100",
         "bot.execution.completion-sweep.initial-delay-ms=100","bot.execution.completion-sweep.delay-ms=100",
         "bot.budget.effects.initial-delay-ms=3600000","bot.pricing.reconcile.initial-delay-ms=3600000"})
@@ -145,7 +146,7 @@ class SupersededExecutionIntegrationTests {
             assertEquals("PENDING",jdbc.queryForObject("select status from chat_run where id=?",String.class,fixture.registration().runId()));
             var ds=(HikariDataSource)dataSource;
             // A fresh context on the same isolated PG while the test context remains alive; not an OS restart.
-            try(var fresh=new SpringApplicationBuilder(BotApplication.class).web(WebApplicationType.NONE).profiles("test")
+            try(var fresh=new SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class).web(WebApplicationType.NONE).profiles("test")
                     .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                             "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false").run()) {
                 awaitConvergence(fixture,RunStatus.FAILED,"SYSTEM_RESTART_ORPHAN");

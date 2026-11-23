@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest
 @Import(TestcontainersConfiguration.class)
 @ActiveProfiles("test")
@@ -70,7 +71,7 @@ class WorkspaceAdmissionMonthBoundaryTests {
         assertInstanceOf(WorkspaceAdmission.EffectAcceptance.Stale.class,admission.prepareCancellationEffect(effect).toCompletableFuture().join());
         assertInstanceOf(WorkspaceAdmission.ProviderStartResult.Ready.class,admission.authorizeProviderStart(allowed.claim()).toCompletableFuture().join());
         var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
-        try (var restarted=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class)
+        try (var restarted=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
                 .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                         "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false",

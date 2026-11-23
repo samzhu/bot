@@ -52,8 +52,6 @@ bot:
             output: "7.50"
             thoughts: "7.50"
             tool_input: "1.50"
-  demo-data:
-    enabled: false
   conversation:
     window-turns: 10
   run:

@@ -20,6 +20,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.test.context.ActiveProfiles;
 import static org.junit.jupiter.api.Assertions.*;
 
+@io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {"bot.pricing.reconcile.initial-delay-ms=100", "bot.pricing.reconcile.delay-ms=200"})
 @Import({TestcontainersConfiguration.class, OfficialGeminiCatalogGraphQLTests.Scheduling.class})
@@ -91,7 +92,7 @@ class OfficialGeminiCatalogGraphQLTests {
         var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
         String revision="negative-"+UUID.randomUUID();
         var error=assertThrows(Exception.class, () -> {
-            try (var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class)
+            try (var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
                     .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
                     .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                             "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false")
@@ -125,7 +126,7 @@ class OfficialGeminiCatalogGraphQLTests {
         var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
         String revision="metadata-missing-"+UUID.randomUUID();
         var error=assertThrows(Exception.class, () -> {
-            try (var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class)
+            try (var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
                     .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
                     .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                             "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false")
@@ -153,7 +154,7 @@ class OfficialGeminiCatalogGraphQLTests {
         var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
         String revision="overlap-"+UUID.randomUUID();
         var error=assertThrows(Exception.class, () -> {
-            try (var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class)
+            try (var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
                     .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
                     .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                             "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false")
@@ -205,7 +206,7 @@ class OfficialGeminiCatalogGraphQLTests {
         var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
         String revision="missing-"+UUID.randomUUID();
         var error=assertThrows(Exception.class, () -> {
-            try (var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class)
+            try (var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
                     .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
                     .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                             "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false")
@@ -238,7 +239,7 @@ class OfficialGeminiCatalogGraphQLTests {
         var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
         String revision="gemini-standard-2026-11-16";
         String id=jdbc.queryForObject("select id from pricing_catalog_revision where source_revision=?",String.class,revision);
-        try (var restarted=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class)
+        try (var restarted=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
                 .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                         "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false").run()) {
@@ -246,7 +247,7 @@ class OfficialGeminiCatalogGraphQLTests {
             assertEquals(id,jdbc.queryForObject("select id from pricing_catalog_revision where source_revision=?",String.class,revision));
         }
         var error=assertThrows(Exception.class,() -> {
-            try (var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class)
+            try (var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
                     .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
                     .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                             "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false")
@@ -326,7 +327,7 @@ class OfficialGeminiCatalogGraphQLTests {
         java.nio.file.Files.writeString(config,yaml.replace("storage-rate: \"0.50\"","storage-rate: \"0.51\""));
         var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
         var error=assertThrows(Exception.class,() -> {
-            try(var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class)
+            try(var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
                     .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
                     .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                             "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false")
@@ -364,7 +365,7 @@ class OfficialGeminiCatalogGraphQLTests {
         jdbc.update("insert into pricing_catalog_revision(id,source_reference,source_revision,content_hash) values (?,'legacy-source',?,'b7d8a998e7050db252188e6b7c219ce0ca7154eeb2c05f10398224143e63e02d')",id,revision);
         jdbc.update("insert into pricing_catalog_entry(id,revision_id,provider,endpoint,model,channel,price_revision,effective_from,effective_until,rates) values (?,?,'FAKE','fixture','model','FAKE','old-price','2020-01-01T00:00:00Z','2030-01-01T00:00:00Z','{\"input\":\"1\"}'::jsonb)",entry,id);
         var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
-        try(var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class)
+        try(var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
                 .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                         "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false")

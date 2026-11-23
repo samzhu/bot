@@ -15,14 +15,14 @@ class GeminiConversationTitleConfigurationTests {
         }
         for (String[] profiles : new String[][]{{"test"}, {"local", "mock-ai"}, {"local", "test"}, {"local", "prod"}}) {
             new ApplicationContextRunner().withUserConfiguration(GeminiConversationTitleConfiguration.class)
-                .withPropertyValues("bot-ai-provider=gemini", "bot-google-api-key=synthetic-key-only")
+                .withPropertyValues("spring.ai.model.chat=google-genai", "bot-google-api-key=synthetic-key-only")
                 .withInitializer(context -> context.getEnvironment().setActiveProfiles(profiles))
                 .run(context -> assertTrue(context.getBeansOfType(ConversationTitleGenerator.class).isEmpty()));
         }
     }
     @Test void geminiTitleClientUsesCanonicalKeyWithoutProviderCall() {
         new ApplicationContextRunner().withUserConfiguration(GeminiConversationTitleConfiguration.class)
-            .withPropertyValues("bot-ai-provider=gemini", "bot-google-api-key=synthetic-key-only")
+            .withPropertyValues("spring.ai.model.chat=google-genai", "bot-google-api-key=synthetic-key-only")
             .withInitializer(context -> context.getEnvironment().setActiveProfiles("local"))
             .run(context -> {
                 assertNull(context.getStartupFailure());
@@ -32,7 +32,7 @@ class GeminiConversationTitleConfigurationTests {
     }
     @Test void geminiTitleClientRejectsMissingCanonicalKey() {
         new ApplicationContextRunner().withUserConfiguration(GeminiConversationTitleConfiguration.class)
-            .withPropertyValues("bot-ai-provider=gemini")
+            .withPropertyValues("spring.ai.model.chat=google-genai")
             .withInitializer(context -> context.getEnvironment().setActiveProfiles("local"))
             .run(context -> {
                 assertNotNull(context.getStartupFailure());
