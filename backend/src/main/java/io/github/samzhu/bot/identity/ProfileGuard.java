@@ -1,6 +1,8 @@
 package io.github.samzhu.bot.identity;
 
 import org.springframework.boot.context.event.ApplicationEnvironmentPreparedEvent;
+import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.boot.context.properties.bind.Bindable;
 import org.springframework.context.ApplicationListener;
 import org.springframework.core.env.Environment;
 
@@ -37,23 +39,29 @@ public class ProfileGuard implements ApplicationListener<ApplicationEnvironmentP
 
         String provider = env.getProperty("bot-ai-provider");
         String standard = env.getProperty("spring.ai.model.chat");
-        if (standard != null && !"google-genai".equals(standard)) {
-            throw new IllegalStateException("Unsupported spring.ai.model.chat; select google-genai explicitly.");
+        if (standard != null && !"google-genai".equals(standard) && !"ollama".equals(standard)) {
+            throw new IllegalStateException("Unsupported spring.ai.model.chat; select google-genai or ollama explicitly.");
         }
         if (env.matchesProfiles("dev & !mock-ai & !test & !prod") && standard == null && provider == null) {
             throw new IllegalStateException("Development requires an explicit chat provider selector.");
         }
-        if (standard != null && provider != null && !"gemini".equals(provider)) {
+        if (standard != null && provider != null && !("google-genai".equals(standard) && "gemini".equals(provider))) {
             throw new IllegalStateException("Conflicting chat provider selectors.");
         }
         if (standard != null && !env.matchesProfiles("local & !mock-ai & !test & !prod")) {
-            throw new IllegalStateException("Gemini requires local without mock-ai, test or prod.");
+            throw new IllegalStateException("Selected provider requires local without mock-ai, test or prod.");
         }
         if (provider != null && !"gemini".equals(provider)) {
             throw new IllegalStateException("Unsupported bot-ai-provider; select gemini explicitly or leave it unset.");
         }
         if ("gemini".equals(provider) && !env.matchesProfiles("local & !mock-ai & !test & !prod")) {
             throw new IllegalStateException("Gemini requires local without mock-ai, test or prod.");
+        }
+
+        Set<String> composeProfiles = Binder.get(env).bind("spring.docker.compose.profiles.active", Bindable.setOf(String.class)).orElse(Set.of());
+        if (env.matchesProfiles("local") && env.getProperty("spring.docker.compose.enabled", Boolean.class, true)
+                && !composeProfiles.equals(Set.of(standard == null ? "none" : standard))) {
+            throw new IllegalStateException("Compose profile conflicts with chat provider selector.");
         }
 
         boolean allowed = Arrays.stream(activeProfiles)

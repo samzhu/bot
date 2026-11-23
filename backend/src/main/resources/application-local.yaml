@@ -6,7 +6,12 @@ spring:
   docker:
     compose:
       enabled: true
+      profiles:
+        active: ${spring.ai.model.chat:none}
   ai:
+    ollama:
+      chat:
+        model: llama3.2:1b
     google:
       genai:
         tts:

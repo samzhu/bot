@@ -49,4 +49,40 @@ class ProviderStartupGuardTests {
             assertThat(clients.get()).isZero();
         }
     }
+    @Test void acceptsExplicitLocalOllamaWithoutSelectingGemini() {
+        clients.set(0);
+        try (var context = new SpringApplicationBuilder(SyntheticClientConfiguration.class)
+                .web(WebApplicationType.NONE).listeners(new ProfileGuard())
+                .run("--spring.config.location=optional:classpath:/empty-provider-test/", "--spring.main.banner-mode=off",
+                     "--spring.profiles.active=local", "--spring.docker.compose.enabled=false", "--spring.ai.model.chat=ollama", "--bot-google-api-key=synthetic-key-only")) {
+            assertThat(context.isActive()).isTrue();
+            assertThat(clients.get()).isEqualTo(1);
+        }
+    }
+    @Test void rejectsOllamaAndLegacyGeminiBeforeBeanCreation() {
+        clients.set(0);
+        assertThrows(IllegalStateException.class, () -> new SpringApplicationBuilder(SyntheticClientConfiguration.class)
+            .web(WebApplicationType.NONE).listeners(new ProfileGuard())
+            .run("--spring.config.location=optional:classpath:/empty-provider-test/", "--spring.main.banner-mode=off",
+                "--spring.profiles.active=local", "--spring.ai.model.chat=ollama", "--bot-ai-provider=gemini"));
+        assertThat(clients.get()).isZero();
+    }
+    @Test void rejectsComposeProfileConflictBeforeBeanCreation() {
+        clients.set(0);
+        assertThrows(IllegalStateException.class, () -> new SpringApplicationBuilder(SyntheticClientConfiguration.class)
+            .web(WebApplicationType.NONE).listeners(new ProfileGuard())
+            .run("--spring.config.location=optional:classpath:/empty-provider-test/", "--spring.main.banner-mode=off",
+                "--spring.profiles.active=local", "--spring.ai.model.chat=google-genai",
+                "--spring.docker.compose.profiles.active=ollama"));
+        assertThat(clients.get()).isZero();
+    }
+    @Test void rejectsIndexedComposeProfileConflictBeforeBeanCreation() {
+        clients.set(0);
+        assertThrows(IllegalStateException.class, () -> new SpringApplicationBuilder(SyntheticClientConfiguration.class)
+            .web(WebApplicationType.NONE).listeners(new ProfileGuard())
+            .run("--spring.config.location=optional:classpath:/empty-provider-test/", "--spring.main.banner-mode=off",
+                "--spring.profiles.active=local", "--spring.ai.model.chat=google-genai",
+                "--spring.docker.compose.profiles.active[0]=ollama"));
+        assertThat(clients.get()).isZero();
+    }
 }

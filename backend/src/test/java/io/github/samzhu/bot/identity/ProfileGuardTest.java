@@ -21,6 +21,7 @@ class ProfileGuardTest {
     void shouldPassWhenLocalProfileIsActive() {
         MockEnvironment env = new MockEnvironment();
         env.setActiveProfiles("local");
+        env.setProperty("spring.docker.compose.enabled", "false");
         ProfileGuard guard = new ProfileGuard(env);
 
         assertDoesNotThrow(guard::validateActiveProfiles);
@@ -56,6 +57,7 @@ class ProfileGuardTest {
         }
         MockEnvironment valid = new MockEnvironment(); valid.setActiveProfiles("local");
         valid.setProperty("bot-ai-provider", "gemini");
+        valid.setProperty("spring.docker.compose.enabled", "false");
         assertDoesNotThrow(() -> new ProfileGuard(valid).validateActiveProfiles());
     }
 }

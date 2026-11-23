@@ -61,4 +61,45 @@ class LocalSecretsConfigDataTests {
                 assertThat(context.getEnvironment().getProperty("bot-google-api-key")).isNull();
             });
     }
+    @Test void composeProfileFollowsExplicitProvider(@TempDir Path directory) throws Exception {
+        Files.copy(Path.of("src/main/resources/application.yaml"), directory.resolve("application.yaml"));
+        Files.copy(Path.of("src/main/resources/application-local.yaml"), directory.resolve("application-local.yaml"));
+        for (String provider : new String[]{"ollama", "google-genai"}) {
+            new ApplicationContextRunner().withInitializer(new ConfigDataApplicationContextInitializer())
+                .withPropertyValues("spring.config.location=" + directory.toUri(), "spring.profiles.active=dev",
+                    "spring.ai.model.chat=" + provider)
+                .run(context -> assertThat(context.getEnvironment().getProperty("spring.docker.compose.profiles.active"))
+                    .isEqualTo(provider));
+        }
+    }
+    @Test void legacyLaunchUsesInactiveExplicitComposeProfile(@TempDir Path directory) throws Exception {
+        Files.copy(Path.of("src/main/resources/application.yaml"), directory.resolve("application.yaml"));
+        Files.copy(Path.of("src/main/resources/application-local.yaml"), directory.resolve("application-local.yaml"));
+        new ApplicationContextRunner().withInitializer(new ConfigDataApplicationContextInitializer())
+            .withPropertyValues("spring.config.location=" + directory.toUri(), "spring.profiles.active=local,dev", "bot-ai-provider=gemini")
+            .run(context -> assertThat(context.getEnvironment().getProperty("spring.docker.compose.profiles.active")).isEqualTo("none"));
+    }
+    @Test void devAlwaysStartsSelectedServicesAndLeavesThemRunning(@TempDir Path directory) throws Exception {
+        Files.copy(Path.of("src/main/resources/application.yaml"), directory.resolve("application.yaml"));
+        Files.copy(Path.of("src/main/resources/application-local.yaml"), directory.resolve("application-local.yaml"));
+        String dev = Files.readString(Path.of("config/application-dev.yaml"))
+            .replace("file:./config/application-secrets.properties", "classpath:/no-secrets-test.properties");
+        Files.writeString(directory.resolve("application-dev.yaml"), dev);
+        for (String provider : new String[]{"ollama", "google-genai"}) {
+            new ApplicationContextRunner().withInitializer(new ConfigDataApplicationContextInitializer())
+                .withPropertyValues("spring.config.location=" + directory.toUri(), "spring.profiles.active=dev", "spring.ai.model.chat=" + provider)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context.getEnvironment().getProperty("spring.docker.compose.start.skip")).isEqualTo("never");
+                    assertThat(context.getEnvironment().getProperty("spring.docker.compose.lifecycle-management")).isEqualTo("start-only");
+                });
+        }
+        new ApplicationContextRunner().withInitializer(new ConfigDataApplicationContextInitializer())
+            .withPropertyValues("spring.config.location=" + directory.toUri(), "spring.profiles.active=local")
+            .run(context -> {
+                assertThat(context).hasNotFailed();
+                assertThat(context.getEnvironment().getProperty("spring.docker.compose.start.skip")).isNull();
+                assertThat(context.getEnvironment().getProperty("spring.docker.compose.lifecycle-management")).isNull();
+            });
+    }
 }

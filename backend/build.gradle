@@ -72,6 +72,7 @@ dependencies {
 	implementation 'org.springframework.ai:spring-ai-openai'
 	// implementation 'org.springframework.ai:spring-ai-starter-model-google-genai'
 	implementation 'org.springframework.ai:spring-ai-google-genai'
+	implementation 'org.springframework.ai:spring-ai-ollama'
 	// implementation 'org.springframework.ai:spring-ai-starter-model-google-genai-embedding'
 	implementation 'org.springframework.ai:spring-ai-google-genai-embedding'
 	// implementation 'org.springframework.ai:spring-ai-starter-tool-search-advisor'

@@ -639,6 +639,8 @@ class ConversationTitleBudgetHttpIntegrationTests {
             assertEquals(1,jdbc.update("update workspace_monthly_budget set enabled=true,cap_usd=3 where workspace_id=? and partition='SIMULATION'",scope));
             int subscribers=chatModel().currentSubscribers();
             var emission=chatModel().tryEmitChunk("visible response");
+            // Keep chat open until title admission has dispatched; otherwise its unknown usage can close the budget first.
+            assertTrue(loopback.entered.await(5,TimeUnit.SECONDS), "title provider did not receive the request before chat completion");
             var completion=chatModel().tryComplete();
             var response=stream.get(8,TimeUnit.SECONDS);
             String diagnostic="status="+response.statusCode()+", body="+response.body()+", subscribers="+subscribers

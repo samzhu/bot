@@ -7,6 +7,14 @@ management:
       exposure:
         include: health,info
 
+spring:
+  docker:
+    compose:
+      # Always reconcile the selected profile, but do not stop services that predate this app.
+      start:
+        skip: never
+      lifecycle-management: start-only
+
 ---
 spring:
   config:

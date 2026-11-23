@@ -67,7 +67,7 @@ With Java 25, Node 26, Docker running, and frontend dependencies installed (`cd 
 
 Open `http://localhost:4200`. Output stays in the terminal; **Ctrl+C stops both servers**.
 The script checks ports 8080/4200 and waits for the backend before starting Angular.
-Spring Boot manages Compose services; containers already running before startup remain running on exit.
+With `dev`, Spring Boot reconciles the selected Compose services at startup and leaves them running after the application exits. Switching provider does not stop an already running Ollama service. From `backend`, run `docker compose --profile ollama stop ollama` to stop only Ollama, or `docker compose --profile ollama stop` to stop all services in that profile, including the unprofiled database and Grafana. These commands retain volumes. For the legacy mock launch without `dev`, Spring Boot retains its existing lifecycle behavior.
 No database data is deleted. Use `./dev.sh --help` for usage.
 
 ### Step 1: Start Backend
@@ -86,6 +86,25 @@ To run with real Google GenAI models:
 cd backend
 ./gradlew bootRun --args="--spring.profiles.active=dev --spring.ai.model.chat=google-genai"
 ```
+
+### Local Ollama
+
+Choose local Ollama with standard Spring settings:
+
+```bash
+cd backend
+./gradlew bootRun --args="--spring.profiles.active=dev --spring.ai.model.chat=ollama"
+```
+
+Spring Boot starts or connects the Compose database and Ollama service. Ollama listens only on `127.0.0.1:11434`; the named `ollama-models` volume persists downloaded models. The Compose service disables Ollama cloud features with `OLLAMA_NO_CLOUD=1`; if you connect an independently managed loopback Ollama daemon, configure it for local-only operation as well. The configured model is `llama3.2:1b`. It is **not downloaded automatically**: after the service is running, explicitly obtain it when you choose to do so:
+
+```bash
+docker compose exec ollama ollama pull llama3.2:1b
+```
+
+The [Ollama model page](https://ollama.com/library/llama3.2:1b) lists the model at approximately 1.3 GB (checked 2026-11-23). Allow additional disk space and memory for inference; requirements depend on context and runtime. Initial image and model downloads need network access. If the service or model is unavailable, requests fail rather than switching provider or silently fetching a model. Actual model availability and hardware performance have not been validated by the automated tests.
+
+Local Ollama attempts are recorded separately from Gemini. Spring AI 2.1 does not expose enough raw information to distinguish a missing token count from a real zero, so usage is reported as unavailable/incomplete and cost remains unpriced. Existing budget admission rules still apply.
 
 ### Step 2: Start Frontend
 

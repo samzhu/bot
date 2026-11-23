@@ -15,3 +15,14 @@ services:
       - "org.springframework.boot.service-connection=postgres"
     ports:
       - '5432:5432'
+  ollama:
+    image: 'ollama/ollama:0.40.17@sha256:ccc42bcd3d5fcf7ab0d532b300382154e1a4da56fc666bdb313b78ebdd912754'
+    profiles: ['ollama']
+    environment:
+      OLLAMA_NO_CLOUD: '1'
+    ports:
+      - '127.0.0.1:11434:11434'
+    volumes:
+      - 'ollama-models:/root/.ollama'
+volumes:
+  ollama-models:
