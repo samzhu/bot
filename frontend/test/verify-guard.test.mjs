@@ -299,7 +299,7 @@ describe('Verification Guard Harness (Issue #14)', () => {
     assert.equal(generationRequests.length, 0);
   });
 
-  it('GREEN STEP: verified-backend mode permits generation only on verified mock backend, blocks on real-ai (404)', async () => {
+  it('GREEN STEP: verified-backend mode permits generation only on verified mock backend, blocks on Gemini (404)', async () => {
     installNodeFetchGuard({ mode: 'verified-backend' });
 
     // Case 1: Backend is verified safe mock -> generation allowed
@@ -320,7 +320,7 @@ describe('Verification Guard Harness (Issue #14)', () => {
     // Reset trap history
     trapReceivedRequests = [];
 
-    // Case 2: Backend returns 404 (simulating real-ai active or production JAR without endpoint)
+    // Case 2: Backend returns 404 (simulating Gemini active or production JAR without endpoint)
     verificationMarkerStatus = 404;
 
     await assert.rejects(
@@ -328,7 +328,7 @@ describe('Verification Guard Harness (Issue #14)', () => {
         await fetch(`${trapUrl}/api/conversations/conv-real/runs`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: 'Unsafe prompt targeting real-ai backend' })
+          body: JSON.stringify({ message: 'Unsafe prompt targeting Gemini backend' })
         });
       },
       err => {
@@ -340,7 +340,7 @@ describe('Verification Guard Harness (Issue #14)', () => {
 
     // Authoritative proof: In Case 2, ZERO generation requests reached the backend!
     const unsafeGenRequests = trapReceivedRequests.filter(r => r.url === '/api/conversations/conv-real/runs');
-    assert.equal(unsafeGenRequests.length, 0, 'Unverified / real-ai backend must NEVER receive generation runs');
+    assert.equal(unsafeGenRequests.length, 0, 'Unverified / Gemini backend must NEVER receive generation runs');
   });
 
   it('GREEN STEP: Request matcher and extractor accurately identify generation endpoints across shapes', () => {

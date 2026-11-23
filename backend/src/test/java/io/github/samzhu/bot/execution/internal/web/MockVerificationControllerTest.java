@@ -19,7 +19,7 @@ import static org.mockito.Mockito.when;
 class MockVerificationControllerTest {
 
     @Test
-    @DisplayName("Returns 200 with SAFE_MOCK marker when environment is local without real-ai and ChatModel is MockChatModel")
+    @DisplayName("Returns 200 with SAFE_MOCK marker when environment is local mock without a paid provider and ChatModel is MockChatModel")
     void returnsSafeMockWhenLocalAndMockChatModel() {
         MockEnvironment env = new MockEnvironment();
         env.setActiveProfiles("local", "mock-ai");
@@ -40,10 +40,11 @@ class MockVerificationControllerTest {
     }
 
     @Test
-    @DisplayName("Fails closed (404) when real-ai profile is active even if local is also active")
-    void returns404WhenRealAiProfileActive() {
+    @DisplayName("Fails closed (404) when Gemini is selected even if local mock is also active")
+    void returns404WhenGeminiIsSelected() {
         MockEnvironment env = new MockEnvironment();
-        env.setActiveProfiles("local", "real-ai");
+        env.setActiveProfiles("local", "mock-ai");
+        env.setProperty("bot-ai-provider", "gemini");
 
         @SuppressWarnings("unchecked")
         ObjectProvider<ChatModel> provider = mock(ObjectProvider.class);

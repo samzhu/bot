@@ -3,10 +3,10 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: ./dev.sh [--mock | --real-ai]
+Usage: ./dev.sh [--mock | --gemini]
 
 Without arguments: choose 1 (Mock AI) or 2 (Real AI).
---mock: local,mock-ai profiles. --real-ai: local,real-ai profiles.
+--mock: local,mock-ai profiles. --gemini: local,dev profiles, explicit Gemini provider.
 Requires Java 25, Node 26, npm dependencies, and a running Docker engine.
 BACKEND_STARTUP_TIMEOUT: backend readiness timeout in seconds (default 900).
 Press Ctrl+C to stop both servers.
@@ -15,20 +15,21 @@ EOF
 
 if (( $# > 1 )); then usage >&2; exit 1; fi
 profiles=local,mock-ai
+provider=''
 case "${1:-}" in
   --help|-h) usage; exit 0 ;;
   --mock) profiles=local,mock-ai ;;
-  --real-ai) profiles=local,real-ai ;;
+  --gemini) profiles=local,dev; provider=gemini ;;
   '')
-    printf '選擇 AI 模式：\n  1. local + mock-ai（本機假模型）\n  2. local + real-ai（Gemini）\n'
+    printf '選擇 AI 模式：\n  1. local + mock-ai（本機假模型）\n  2. local + Gemini（真實模型）\n'
     while :; do
       if ! read -r -p '請輸入 1 或 2（Enter 預設 1）：' choice; then
-        printf '\n未取得選擇，請使用 --mock 或 --real-ai。\n' >&2
+        printf '\n未取得選擇，請使用 --mock 或 --gemini。\n' >&2
         exit 1
       fi
       case "$choice" in
         1|'') profiles=local,mock-ai; break ;;
-        2) profiles=local,real-ai; break ;;
+        2) profiles=local,dev; provider=gemini; break ;;
         *) printf '請輸入 1 或 2。\n' >&2 ;;
       esac
     done
@@ -114,11 +115,14 @@ set -m
 printf 'Starting backend (profiles: %s)...\n' "$profiles"
 (
   cd "$root_dir/backend"
-  # Boot 4.1.2 manages Compose readiness and shutdown. Previously running containers
+  # Boot 4.2.0 manages Compose readiness and shutdown. Previously running containers
   # remain running under its default ownership rules; no data/volumes are deleted.
   # https://docs.spring.io/spring-boot/reference/features/dev-services.html
-  exec ./gradlew --no-daemon --console=plain bootRun \
-    "--args=--spring.profiles.active=$profiles --server.address=127.0.0.1 --server.port=8080"
+  backend_args="--spring.profiles.active=$profiles --server.address=127.0.0.1 --server.port=8080"
+  if [[ "$provider" == gemini ]]; then
+    backend_args="$backend_args --bot-ai-provider=gemini"
+  fi
+  exec ./gradlew --no-daemon --console=plain bootRun "--args=$backend_args"
 ) </dev/null &
 backend_pid=$!
 # First startup can include Gradle dependencies and Docker image downloads.

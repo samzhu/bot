@@ -20,11 +20,11 @@ import java.util.Map;
  *
  * Isolated in 'localDevelopment' sourceSet so it is NEVER packaged into production bootJar or container images.
  * Placed within execution.internal.web to respect Modulith module boundaries without exposing internal models.
- * Fails closed (HTTP 404) if 'real-ai' profile is active or if ChatModel is not MockChatModel.
+ * Fails closed (HTTP 404) if a provider is selected or ChatModel is not MockChatModel.
  */
 @RestController
 @RequestMapping("/api/internal/verification")
-@Profile("local & mock-ai & !real-ai")
+@Profile("local & mock-ai")
 public class MockVerificationController {
 
     private final ObjectProvider<ChatModel> chatModelProvider;
@@ -37,7 +37,8 @@ public class MockVerificationController {
 
     @GetMapping(value = "/status", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> getStatus() {
-        if (!environment.matchesProfiles("local & mock-ai & !real-ai")) {
+        if (!environment.matchesProfiles("local & mock-ai & !test & !prod")
+                || environment.containsProperty("bot-ai-provider")) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
         }
         ChatModel chatModel = chatModelProvider.getIfAvailable();

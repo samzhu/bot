@@ -22,14 +22,14 @@ import org.springframework.test.context.ActiveProfiles;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Verification for Spring AI 2.1.0-RC2 programmatic configuration and auto-configuration isolation.
+ * Verification for Spring AI 2.1.0 programmatic configuration and auto-configuration isolation.
  *
  * WHY / ARCHITECTURAL INVARIANT:
  * 1. Confirms that shared Spring AI interfaces (ChatModel, StreamingChatModel, SessionService, SessionRepository)
  *    are cleanly resolved to deterministic local implementations (MockChatModel, DefaultSessionService, JdbcSessionRepository).
  * 2. Confirms that replacing starters with raw modules (spring-ai-pgvector-store, spring-ai-google-genai-tts)
  *    prevents any accidental auto-configured beans (GoogleGenAiChatModel, VectorStore, TextToSpeechModel, TranscriptionModel)
- *    from entering the application context in the non-real-ai profile.
+ *    from entering the application context in the unselected-provider configuration.
  * 3. Confirms that no spring.autoconfigure.exclude entries are needed to suppress auto-configurations.
  */
 @Import(TestcontainersConfiguration.class)

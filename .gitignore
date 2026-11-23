@@ -13,6 +13,8 @@ Thumbs.db
 credentials.json
 client_secret*.json
 application-real-ai.yaml
+/backend/config/application-secrets.properties
+/backend/config/application-secrets-*.properties
 
 # Gradle / Java Backend
 HELP.md

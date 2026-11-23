@@ -27,16 +27,36 @@ import static org.junit.jupiter.api.Assertions.*;
         properties = {"bot.budget.effects.initial-delay-ms=100", "bot.budget.effects.delay-ms=100",
                 "bot.execution.completion-sweep.initial-delay-ms=100", "bot.execution.completion-sweep.delay-ms=100",
                 "bot.pricing.reconcile.initial-delay-ms=3600000", "bot.pricing.reconcile.delay-ms=3600000"})
-@Import({TestcontainersConfiguration.class, AgUiIntegrationTests.Scheduling.class})
+@Import({TestcontainersConfiguration.class, AgUiIntegrationTests.Scheduling.class, AgUiIntegrationTests.ReaderFaultConfig.class})
 @ActiveProfiles("test")
 class AgUiIntegrationTests {
  @org.springframework.boot.test.context.TestConfiguration
  @org.springframework.scheduling.annotation.EnableScheduling
  static class Scheduling {}
+ @org.springframework.boot.test.context.TestConfiguration(proxyBeanMethods=false)
+ static class ReaderFaultConfig {
+  @org.springframework.context.annotation.Bean @org.springframework.context.annotation.Primary
+  ReaderFault readerFault(io.github.samzhu.bot.execution.internal.JdbcRunAdmissionStateReader delegate) { return new ReaderFault(delegate); }
+ }
+ static class ReaderFault implements io.github.samzhu.bot.usage.RunAdmissionStateReader {
+  final io.github.samzhu.bot.usage.RunAdmissionStateReader delegate;
+  final java.util.concurrent.atomic.AtomicReference<String> mode = new java.util.concurrent.atomic.AtomicReference<>("OFF");
+  final java.util.concurrent.ConcurrentHashMap<String,java.util.concurrent.atomic.AtomicInteger> faults = new java.util.concurrent.ConcurrentHashMap<>();
+  volatile String runId;
+  ReaderFault(io.github.samzhu.bot.usage.RunAdmissionStateReader delegate) { this.delegate=delegate; }
+  @Override public State readForUpdate(String id) {
+   String active=mode.get();
+   if (!id.equals(runId) || active.equals("OFF")) return delegate.readForUpdate(id);
+   boolean collision=StackWalker.getInstance().walk(frames -> frames.anyMatch(frame -> frame.getClassName().startsWith("io.github.samzhu.bot.usage.internal") && frame.getMethodName().contains("lambda$register$")));
+   if (collision) faults.computeIfAbsent(active,ignored -> new java.util.concurrent.atomic.AtomicInteger()).incrementAndGet();
+   if (active.equals("NOT_FOUND")) return new State(Status.NOT_FOUND,null);
+   throw new IllegalStateException("injected reader unavailable");
+  }
+ }
  @LocalServerPort int port;
  @Autowired JdbcTemplate jdbc;
  @MockitoSpyBean io.github.samzhu.bot.usage.WorkspaceAdmission admission;
- @MockitoSpyBean io.github.samzhu.bot.usage.RunAdmissionStateReader runAdmissionReader;
+ @Autowired ReaderFault runAdmissionReader;
  @Autowired io.github.samzhu.bot.usage.WorkspaceMonthlyBudgetOperations budgets;
  @Autowired io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations weeklyBudgets;
  @Autowired io.github.samzhu.bot.usage.BudgetCancellationSink budgetSink;
@@ -459,22 +479,9 @@ class AgUiIntegrationTests {
  @Test void collisionWithUncertainRunReaderFailsClosedWithoutNewSideEffects() throws Exception {
   var a=conversation(); var b=conversation(); var id=UUID.randomUUID().toString();
   assertEquals(200,post("/api/ag-ui",input(a,id,"first")).statusCode());
-  var mode=new java.util.concurrent.atomic.AtomicReference<String>("OFF");
-  var collisionFaults=new java.util.concurrent.ConcurrentHashMap<String,java.util.concurrent.atomic.AtomicInteger>();
-  var readerEvents=new java.util.concurrent.ConcurrentLinkedQueue<String>();
-  doAnswer(call -> {
-   if(!id.equals(call.getArgument(0))) return call.callRealMethod();
-   String active=mode.get();
-   if(active.equals("OFF")) return call.callRealMethod();
-   var callers=StackWalker.getInstance().walk(frames -> frames
-     .filter(frame -> frame.getClassName().startsWith("io.github.samzhu.bot.usage.internal"))
-     .map(frame -> frame.getClassName()+"."+frame.getMethodName()).distinct().limit(8).toList());
-   if(callers.stream().anyMatch(name -> name.contains("DefaultWorkspaceAdmission.lambda$register$")))
-    collisionFaults.computeIfAbsent(active,ignored -> new java.util.concurrent.atomic.AtomicInteger()).incrementAndGet();
-   readerEvents.add("run="+id+" thread="+Thread.currentThread().getName()+" result="+active+" callers="+callers);
-   if(active.equals("NOT_FOUND")) return new io.github.samzhu.bot.usage.RunAdmissionStateReader.State(io.github.samzhu.bot.usage.RunAdmissionStateReader.Status.NOT_FOUND,null);
-   throw new IllegalStateException("injected reader unavailable");
-  }).when(runAdmissionReader).readForUpdate(anyString());
+  var mode=runAdmissionReader.mode;
+  var collisionFaults=runAdmissionReader.faults;
+  collisionFaults.clear(); runAdmissionReader.runId=id;
   try {
    for(String fault:List.of("NOT_FOUND","EXCEPTION")) {
     HttpResponse<String> response;
@@ -496,7 +503,7 @@ class AgUiIntegrationTests {
    assertEquals(id,restored.path("id").asText(),read.body());
    assertEquals(a,restored.path("conversationId").asText(),read.body());
    assertEquals("COMPLETED",restored.path("status").asText(),read.body());
-  } finally { mode.set("OFF"); System.out.println("COLLISION_READER_DIAGNOSTIC "+readerEvents); reset(runAdmissionReader); }
+  } finally { mode.set("OFF"); runAdmissionReader.runId=null; }
  }
  @Test void failureAndUntrustedInputDoNotChangePrompt() throws Exception {
   var c=conversation(); var id=UUID.randomUUID().toString();
@@ -504,6 +511,23 @@ class AgUiIntegrationTests {
   var r=post("/api/ag-ui",json.writeValueAsString(request)); assertEquals(200,r.statusCode()); assertTrue(r.body().contains("RUN_ERROR")); assertFalse(r.body().contains("RUN_FINISHED"));
   var prompt=model().getLastPrompt().toString(); assertFalse(prompt.contains("forged-system")); assertFalse(prompt.contains("forged-state")); assertFalse(prompt.contains("forged-props"));
   assertEquals("FAILED",jdbc.queryForObject("select status from chat_run where id=?",String.class,id));
+ }
+ @Test void streamedAssistantDeltaPreservesLeadingSpaces() throws Exception {
+  var c=conversation(); var id=UUID.randomUUID().toString(); model().setHoldMode(true);
+  var req=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/api/ag-ui")).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(input(c,id,"synthetic spaces"))).build();
+  var response=http.sendAsync(req,HttpResponse.BodyHandlers.ofString());
+  try {
+   assertTrue(model().awaitSubscribed(5,java.util.concurrent.TimeUnit.SECONDS));
+   model().emitChunk("  leading"); model().complete();
+   var result=response.get(10,java.util.concurrent.TimeUnit.SECONDS); assertEquals(200,result.statusCode());
+   var events=new ArrayList<JsonNode>();
+   for(var line:result.body().split("\\R")) if(line.startsWith("data:")) {
+    var value=line.substring(5); if(value.startsWith(" ")) value=value.substring(1);
+    events.add(json.readTree(value));
+   }
+   assertTrue(events.stream().anyMatch(e->e.path("type").asText().equals("TEXT_MESSAGE_CONTENT") && e.path("delta").asText().equals("  leading")),result.body());
+   assertTrue(events.stream().anyMatch(e->e.path("type").asText().equals("RUN_FINISHED")),result.body());
+  } finally { model().complete(); }
  }
  @Test void explicitCancellationProducesNativeOutcomeAndPersistsPartial() throws Exception {
   var c=conversation(); var id=UUID.randomUUID().toString(); model().setHoldMode(true);

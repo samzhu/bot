@@ -113,6 +113,14 @@ public class ControlledChatModel implements ChatModel, StreamingChatModel {
         return finishedLatch.await(timeout, unit);
     }
 
+    public int currentSubscribers() { return sink.currentSubscriberCount(); }
+
+    public Sinks.EmitResult tryEmitChunk(String text) {
+        return sink.tryEmitNext(new ChatResponse(List.of(new Generation(new AssistantMessage(text)))));
+    }
+
+    public Sinks.EmitResult tryComplete() { return sink.tryEmitComplete(); }
+
     public void emitChunk(String text) {
         sink.tryEmitNext(new ChatResponse(List.of(new Generation(new AssistantMessage(text)))));
     }

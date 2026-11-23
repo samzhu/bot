@@ -33,16 +33,23 @@ class LocalSeedProfilesTests {
 
     @Test
     void publicConfigSelectsOnlyExplicitMockAndRetainsDefaultBot(@TempDir Path config) throws Exception {
+        // Exercise the public config with an isolated missing secrets path, never the developer's file.
+        Files.copy(Path.of("src/main/resources/application.yaml"), config.resolve("application.yaml"));
+        String localConfig = Files.readString(Path.of("src/main/resources/application-local.yaml"));
+        Files.writeString(config.resolve("application-local.yaml"), localConfig);
         for (String name : new String[]{"application-dev.yaml", "application-prod.yaml", "application-mock-ai.yaml"}) {
             Path source = Path.of("config", name);
-            if (Files.exists(source)) Files.copy(source, config.resolve(name));
+            if (Files.exists(source)) {
+                String contents = Files.readString(source).replace("file:./config/application-secrets.properties", "file:" + config.resolve("absent-secrets.properties"));
+                Files.writeString(config.resolve(name), contents);
+            }
         }
-        for (String profiles : new String[]{"local", "local,dev,mock-ai", "local,dev,real-ai", "prod"}) {
+        for (String profiles : new String[]{"local", "local,dev,mock-ai", "local,dev", "prod"}) {
             boolean mockMode = profiles.contains("mock-ai");
             boolean local = profiles.contains("local");
             new ApplicationContextRunner()
                     .withInitializer(new ConfigDataApplicationContextInitializer())
-                    .withPropertyValues("spring.config.location=classpath:/," + config.toUri(), "spring.profiles.active=" + profiles)
+                    .withPropertyValues("spring.config.location=" + config.toUri(), "spring.profiles.active=" + profiles)
                     .withUserConfiguration(Seeds.class, MockChatModel.class, FakeUsageCaptureAdapter.class, MockVerificationController.class)
                     .withBean(JdbcTemplate.class, () -> mock(JdbcTemplate.class))
                     .withBean(SessionService.class, () -> mock(SessionService.class))
@@ -66,9 +73,10 @@ class LocalSeedProfilesTests {
     @Test
     void conflictingModelProfilesAreRejected() {
         MockEnvironment env = new MockEnvironment();
-        env.setActiveProfiles("local", "mock-ai", "real-ai");
+        env.setActiveProfiles("local", "mock-ai");
+        env.setProperty("bot-ai-provider", "gemini");
         assertThatThrownBy(() -> new ProfileGuard(env).validateActiveProfiles())
-                .isInstanceOf(IllegalStateException.class).hasMessageContaining("mock-ai").hasMessageContaining("real-ai");
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("mock-ai");
     }
 
     @Test
@@ -82,7 +90,7 @@ class LocalSeedProfilesTests {
     }
 
     @Test
-    void testProfileEnablesFakeButRealAiCannotEnableDemoEvenWithPropertyOverride() {
+    void testProfileEnablesFakeButNotDemo() {
         ApplicationContextRunner runner = new ApplicationContextRunner()
                 .withUserConfiguration(Seeds.class, MockChatModel.class, FakeUsageCaptureAdapter.class)
                 .withBean(JdbcTemplate.class, () -> mock(JdbcTemplate.class))
@@ -94,10 +102,6 @@ class LocalSeedProfilesTests {
                     assertThat(context).hasSingleBean(MockChatModel.class).hasSingleBean(FakeUsageCaptureAdapter.class);
                     assertThat(context).doesNotHaveBean(LocalDataSeedInitializer.class).doesNotHaveBean(LocalUsageSeedInitializer.class);
                 });
-        runner.withPropertyValues("spring.profiles.active=local,mock-ai,real-ai", "bot.demo-data.enabled=true")
-                .run(context -> {
-                    assertThat(context).doesNotHaveBean(MockChatModel.class).doesNotHaveBean(FakeUsageCaptureAdapter.class);
-                    assertThat(context).doesNotHaveBean(LocalDataSeedInitializer.class).doesNotHaveBean(LocalUsageSeedInitializer.class);
-                });
+
     }
 }

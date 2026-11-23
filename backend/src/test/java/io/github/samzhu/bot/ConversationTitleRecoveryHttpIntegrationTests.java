@@ -82,7 +82,7 @@ class ConversationTitleRecoveryHttpIntegrationTests {
         });
         var context = app.run();
         try {
-        assertFalse(context.getEnvironment().acceptsProfiles(org.springframework.core.env.Profiles.of("real-ai")));
+        assertNull(context.getEnvironment().getProperty("bot-ai-provider"));
         assertEquals(titleEnabled ? 1 : 0, context.getBeansOfType(ConversationTitleGenerator.class).size());
         assertSame(context.getBean(ControlledChatModel.class), context.getBean(ChatModel.class));
         assertEquals(2, context.getBeansOfType(ChatModel.class).size());

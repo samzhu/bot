@@ -16,38 +16,38 @@ class RealAiFailFastTests {
             .withUserConfiguration(GoogleGenAiManualConfig.class);
 
     @Test
-    @DisplayName("Fail-fast: Starting with real-ai profile but missing API key must abort with clear diagnostic")
+    @DisplayName("Fail-fast: Starting with Gemini selector but missing API key must abort with clear diagnostic")
     void missingApiKey_abortsStartupWithClearDiagnostic() {
-        runner.withPropertyValues("spring.profiles.active=real-ai")
-                .withPropertyValues("spring.ai.google.genai.api-key=")
+        runner.withPropertyValues("spring.profiles.active=local", "bot-ai-provider=gemini")
+                .withPropertyValues("bot-google-api-key=")
                 .withPropertyValues("spring.ai.google.genai.chat.model=gemini-3.8-flash")
                 .run(context -> {
                     assertThat(context).hasFailed();
                     assertThat(context.getStartupFailure())
                             .hasRootCauseInstanceOf(IllegalStateException.class)
-                            .hasRootCauseMessage("Fail-fast: 'real-ai' profile requires spring.ai.google.genai.api-key");
+                            .hasRootCauseMessage("Fail-fast: Gemini requires bot-google-api-key");
                 });
     }
 
     @Test
-    @DisplayName("Fail-fast: Starting with real-ai profile and blank model must abort with clear diagnostic")
+    @DisplayName("Fail-fast: Starting with Gemini selector and blank model must abort with clear diagnostic")
     void missingModel_abortsStartupWithClearDiagnostic() {
-        runner.withPropertyValues("spring.profiles.active=real-ai")
-                .withPropertyValues("spring.ai.google.genai.api-key=dummy-test-key-not-real")
+        runner.withPropertyValues("spring.profiles.active=local", "bot-ai-provider=gemini")
+                .withPropertyValues("bot-google-api-key=dummy-test-key-not-real")
                 .withPropertyValues("spring.ai.google.genai.chat.model=")
                 .run(context -> {
                     assertThat(context).hasFailed();
                     assertThat(context.getStartupFailure())
                             .hasRootCauseInstanceOf(IllegalStateException.class)
-                            .hasRootCauseMessage("Fail-fast: 'real-ai' profile requires explicit spring.ai.google.genai.chat.model in YAML configuration.");
+                            .hasRootCauseMessage("Fail-fast: Gemini requires explicit spring.ai.google.genai.chat.model in YAML configuration.");
                 });
     }
 
     @Test
-    @DisplayName("Success: Starting with real-ai profile, dummy key and explicit model successfully registers genuine ChatModel bean")
+    @DisplayName("Success: Starting with Gemini selector, dummy key and explicit model successfully registers genuine ChatModel bean")
     void validDummyConfig_registersGenuineChatModelBean() {
-        runner.withPropertyValues("spring.profiles.active=real-ai")
-                .withPropertyValues("spring.ai.google.genai.api-key=dummy-test-key-not-real")
+        runner.withPropertyValues("spring.profiles.active=local", "bot-ai-provider=gemini")
+                .withPropertyValues("bot-google-api-key=dummy-test-key-not-real")
                 .withPropertyValues("spring.ai.google.genai.chat.model=gemini-3.8-flash")
                 .run(context -> {
                     assertThat(context).hasNotFailed();
@@ -58,9 +58,29 @@ class RealAiFailFastTests {
     }
 
     @Test
-    @DisplayName("Default / Test profile: Real AI beans are NOT loaded when real-ai profile is inactive")
-    void nonRealAiProfile_doesNotLoadGoogleGenAiBeans() {
+    void canonicalKeyAllowsGeminiConfigurationWithoutCallingProvider() {
+        runner.withPropertyValues("spring.profiles.active=local", "bot-ai-provider=gemini")
+                .withPropertyValues("bot-google-api-key=synthetic-key-only")
+                .withPropertyValues("spring.ai.google.genai.chat.model=gemini-3.8-flash")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(ChatModel.class);
+                });
+    }
+
+    @Test
+    @DisplayName("Default / Test profile: Real AI beans are NOT loaded when Gemini selector is inactive")
+    void unselectedProviderDoesNotLoadGoogleGenAiBeans() {
         runner.withPropertyValues("spring.profiles.active=test")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).doesNotHaveBean(Client.class);
+                    assertThat(context).doesNotHaveBean(ChatModel.class);
+                });
+    }
+    @Test
+    void syntheticKeyAloneNeverCreatesChatClient() {
+        runner.withPropertyValues("spring.profiles.active=local", "bot-google-api-key=synthetic-key-only", "spring.ai.google.genai.chat.model=gemini-3.8-flash")
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context).doesNotHaveBean(Client.class);

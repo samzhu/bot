@@ -30,7 +30,7 @@ import java.util.Map;
  * Idempotently populates three demonstration conversations (COMPLETED, FAILED, CANCELLED) with fixed IDs.
  */
 @Component
-@Profile("local & mock-ai & !real-ai")
+@Profile("local & mock-ai")
 @ConditionalOnProperty(prefix = "bot.demo-data", name = "enabled", havingValue = "true", matchIfMissing = false)
 @Order(20)
 public class LocalDataSeedInitializer implements ApplicationRunner {

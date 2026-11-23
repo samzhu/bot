@@ -9,6 +9,6 @@ import org.springframework.core.env.Environment;
 @Configuration(proxyBeanMethods = false)
 class ConversationTitlePartitionConfiguration {
     @Bean ConversationTitlePartition activeTitlePartition(Environment environment) {
-        return () -> environment.matchesProfiles("real-ai") ? WorkspaceAdmission.Partition.REAL : WorkspaceAdmission.Partition.SIMULATION;
+        return () -> "gemini".equals(environment.getProperty("bot-ai-provider")) ? WorkspaceAdmission.Partition.REAL : WorkspaceAdmission.Partition.SIMULATION;
     }
 }

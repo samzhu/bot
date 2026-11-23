@@ -17,7 +17,7 @@ import java.time.Duration;
 import java.util.List;
 
 @Component
-@Profile("(mock-ai | test) & !real-ai")
+@Profile("mock-ai | test")
 public class MockChatModel implements ChatModel, StreamingChatModel {
 
     @Override

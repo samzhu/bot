@@ -1,6 +1,6 @@
 # Herdr Bot (Local Chat MVP)
 
-A minimal, deterministic, and resilient loopback AI chat platform built with Java 25, Spring Boot 4.1.2, Spring AI 2.1.0-RC2, Angular 22, and ThreadPlane 0.3.7. Chat uses the ThreadPlane AG-UI adapter; the backend remains Spring Boot / Spring AI.
+A minimal, deterministic, and resilient loopback AI chat platform built with Java 25, Spring Boot 4.2.0, Spring AI 2.1.0, Angular 22, and ThreadPlane 0.3.7. Chat uses the ThreadPlane AG-UI adapter; the backend remains Spring Boot / Spring AI.
 
 ---
 
@@ -23,16 +23,32 @@ An active profile (`local` or `test`) must be explicitly supplied; the applicati
 | **`local`** | Local infrastructure and loopback connection | No model selected | None |
 | **`local,mock-ai`** | Local development and demo data | `MockChatModel` (deterministic streaming) | None |
 | **`test`** | Automated testing suite | `MockChatModel` / `ControlledChatModel` | None |
-| **`local,real-ai`** | Live cloud model inference | `GoogleGenAiChatModel` (`gemini-3.8-flash`) | Yes (`backend/config/application-real-ai.yaml`) |
+| **`local,dev` + `bot-ai-provider=gemini`** | Explicit live cloud model inference | `GoogleGenAiChatModel` (`gemini-3.8-flash`) | Yes (`backend/config/application-secrets.properties`) |
 
 ### Fail-Fast Guard Rails
-- **Profile Boundary**: Starting without either `local` or `test` profile immediately triggers `ProfileGuard` and aborts startup with an `IllegalStateException`. The `prod` configuration alone does not authorize deployment; production still requires an appropriate authorization strategy. `mock-ai` and `real-ai` cannot be active together.
-- **Real AI Missing Key / Model**: Activating `real-ai` without a non-blank `spring.ai.google.genai.api-key` or `spring.ai.google.genai.chat.model` fails fast at startup with clear diagnostics.
-- **Secrets Protection**: `backend/config/application-real-ai.yaml` is strictly ignored by version control (`.gitignore`).
+- **Profile Boundary**: Starting without either `local` or `test` profile immediately triggers `ProfileGuard` and aborts startup with an `IllegalStateException`. The `prod` configuration alone does not authorize deployment; production still requires an appropriate authorization strategy. Gemini requires `local` and cannot run with `mock-ai`, `test`, or `prod`.
+- **Real AI Missing Key / Model**: Selecting `bot-ai-provider=gemini` without a non-blank `bot-google-api-key` or `spring.ai.google.genai.chat.model` fails fast at startup with clear diagnostics.
+- **Secrets Protection**: `backend/config/application-secrets.properties` and profile-specific variants are ignored by Git. The legacy `application-real-ai.yaml` ignore rule remains in place.
 
 ---
 
 ## 3. Getting Started
+
+### Local Gemini key
+
+Only real AI mode needs a Gemini API key. From the repository root, create a private copy of the empty template without overwriting an existing file:
+
+```bash
+(umask 077; set -C; cat backend/config/application-secrets.properties.example > backend/config/application-secrets.properties)
+```
+
+Privately set `bot-google-api-key` in that file and keep its permissions at `0600`; do not print the key or put it in command history.
+
+The `--gemini` command activates `local,dev`; the external `backend/config/application-dev.yaml` conditionally imports the optional secrets file. `local,dev` can load the key without selecting Gemini; a key never activates a paid provider. `dev` alone, `local` alone, and combinations containing `mock-ai`, `test` or `prod` do not import it. Missing or blank keys fail fast for Gemini. Spring resolves the file relative to the backend process working directory: `dev.sh` sets this directory; when running Gradle manually, first `cd backend`. Existing Compose database settings are unchanged.
+
+Model names stay in YAML. Gemini chat uses `gemini-3.8-flash` from the shared configuration. Local configuration preserves `gemini-3.8-flash-tts` for speech, `gemini-3.5-transcribe` for transcription, and `gpt-5-mini` for OpenAI chat. These three settings are reserved for their integrations. The current app starts the Gemini chat and title clients, so leave `bot-openai-api-key` blank unless you need it for an OpenAI integration.
+
+The startup command selects profiles and explicitly selects Gemini. Spring Boot loads the external `application-dev.yaml` from the backend working directory; imported secrets override the declaring YAML document, while OS environment variables, Java system properties and command-line properties have higher precedence. The project runs Spring Boot 4.2.0. [Profiles](https://docs.spring.io/spring-boot/reference/features/profiles.html) · [Externalized configuration](https://docs.spring.io/spring-boot/reference/features/external-config.html)
 
 ### Start Both Servers
 
@@ -45,8 +61,8 @@ With Java 25, Node 26, Docker running, and frontend dependencies installed (`cd 
 # Skip the menu: local mock model, no API key required
 ./dev.sh --mock
 
-# Use the existing backend/config/application-real-ai.yaml through Spring Boot
-./dev.sh --real-ai
+# Use the local Gemini key configured above
+./dev.sh --gemini
 ```
 
 Open `http://localhost:4200`. Output stays in the terminal; **Ctrl+C stops both servers**.
@@ -66,9 +82,9 @@ cd backend
 
 To run with real Google GenAI models:
 ```bash
-# Terminal 1: Start backend in real AI mode (reads backend/config/application-real-ai.yaml)
+# Terminal 1: Start backend with explicitly selected Gemini and local dev configuration
 cd backend
-./gradlew bootRun --args="--spring.profiles.active=local,real-ai"
+./gradlew bootRun --args="--spring.profiles.active=local,dev --bot-ai-provider=gemini"
 ```
 
 ### Step 2: Start Frontend
@@ -108,9 +124,6 @@ cd backend
 
 # 2. Dedicated fail-fast configuration tests (missing API key, missing model, zero network)
 ./gradlew test --tests RealAiFailFastTests
-
-# 3. Dedicated opt-in real model live smoke test (requires Docker + backend/config/application-real-ai.yaml)
-./gradlew realAiSmokeTest
 ```
 
 ### Frontend Test Suites
@@ -150,7 +163,7 @@ Start both servers with ./dev.sh --mock, then run the current browser suites:
 The default verification URLs are 4300 / 8181 for an isolated test instance.
 CHROME_PATH selects Chrome; the default is the macOS Chrome installation.
 Both the backend and the frontend proxy must return all three SAFE_MOCK fields.
-Generation requests are guarded individually; real-ai is not an accepted test backend.
+Generation requests are guarded individually; Gemini is not an accepted test backend.
 
 The suites retain synthetic fixtures, write results / screenshots / console / network
 evidence to temporary directories, and exit unsuccessfully if any check fails.

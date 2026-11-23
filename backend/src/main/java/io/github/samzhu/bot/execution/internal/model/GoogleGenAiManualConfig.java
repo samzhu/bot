@@ -10,12 +10,14 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 
 @Configuration
-@Profile("real-ai")
+@Profile("local & !mock-ai & !test & !prod")
+@ConditionalOnProperty(name = "bot-ai-provider", havingValue = "gemini")
 public class GoogleGenAiManualConfig {
 
-    @Value("${spring.ai.google.genai.api-key:}")
+    @Value("${bot-google-api-key:}")
     private String apiKey;
 
     @Value("${spring.ai.google.genai.chat.model:}")
@@ -27,14 +29,14 @@ public class GoogleGenAiManualConfig {
      *    Spring manages its lifecycle and invokes client.close() when destroying the googleGenAiClient bean
      *    (configured via destroyMethod = "close").
      * 2. org.springframework.ai.google.genai.GoogleGenAiChatModel implements DisposableBean,
-     *    but its destroy() implementation is a no-op (verified via Spring AI 2.1.0-RC2 bytecode: '0: return').
+     *    but its destroy() implementation is a no-op (verified via Spring AI 2.1.0 bytecode: '0: return').
      *    It does NOT call client.close(), so managing the client lifecycle as a dedicated Spring bean
      *    guarantees proper channel cleanup without risking double-close or connection leaks.
      */
     @Bean(destroyMethod = "close")
     public Client googleGenAiClient() {
         if (apiKey == null || apiKey.isBlank()) {
-            throw new IllegalStateException("Fail-fast: 'real-ai' profile requires spring.ai.google.genai.api-key");
+            throw new IllegalStateException("Fail-fast: Gemini requires bot-google-api-key");
         }
         return Client.builder()
                 .apiKey(apiKey.trim())
@@ -50,7 +52,7 @@ public class GoogleGenAiManualConfig {
     @Bean
     public ChatModel googleGenAiChatModel(Client client) {
         if (modelName == null || modelName.isBlank()) {
-            throw new IllegalStateException("Fail-fast: 'real-ai' profile requires explicit spring.ai.google.genai.chat.model in YAML configuration.");
+            throw new IllegalStateException("Fail-fast: Gemini requires explicit spring.ai.google.genai.chat.model in YAML configuration.");
         }
 
         GoogleGenAiChatOptions options = GoogleGenAiChatOptions.builder()

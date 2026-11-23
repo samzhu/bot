@@ -20,7 +20,7 @@
 ## 2. 現有專案基線與路徑現況
 
 - **程式碼結構**：
-  - 後端：`backend/build.gradle` 基於 Spring Boot 4.1.2、Spring AI BOM 2.1.0-RC2（舊 2.0.1 決策標為歷史參考）、Java toolchain 27。最新架構決策落實抽象介面與手動配置（Google GenAI 改用 `spring-ai-google-genai` 核心模組，以 Java Config 集中管理 bean，業務層僅依賴 `ChatModel`/`StreamingChatModel`）；音訊依賴宣告 `spring-ai-google-genai-transcription:2.1.0-RC2` 與 `spring-ai-starter-model-google-genai-tts:2.1.0-RC2`（語音功能列為後續提案，MVP 暫不實作，語音介面為標準抽象 `TextToSpeechModel` 與 `TranscriptionModel`，TTS 於 local 關閉之精確官方 property 唯一為 `spring.ai.model.audio.speech=none`，註記僅關閉 speech model 且尚未實測）；MVP 徹底不使用 Liquibase、Security、MCP、Modulith，以應用層 Loopback 固定身分與編號 SQL 初始化完成極簡純淨閉環。
+  - 後端：`backend/build.gradle` 使用 Spring Boot 4.2.0、Spring AI BOM 2.1.0、Spring Modulith BOM 2.2.0 與 Java 25。Google GenAI、Session JDBC 與語音依賴採用原始模組及手動配置；Modulith starters 和 Native 建置維持停用。
   - 後端配置與資源：`backend/compose.yaml`（提供開發用 PostgreSQL/pgvector 及 Grafana OTEL LGTM）、`backend/src/main/resources/application.yaml`（目前僅設定應用名稱）。
   - 後端原始碼：`backend/src/main` 僅有啟動類別 `BotApplication.java`；`backend/src/test` 具備 context-load 與 Testcontainers 範本。
   - 前端：`frontend/` 目錄目前為空目錄，尚未建立骨架。
@@ -58,8 +58,8 @@ Spring Boot WebMVC + Virtual Threads + Spring Modulith
 
 | 項目 | 目前方向 | 驗證或限制 |
 | --- | --- | --- |
-| Java／建置 | Java 27、Gradle 9.8.2、Spring Boot 4.1.2 | Spring Boot 4.1.2 官方支援至 Java 27，Gradle 官方自 9.8 支援 Java 27；仍須驗證所有實際 plugins、driver、GraalVM 與 CI。[Boot](https://docs.spring.io/spring-boot/system-requirements.html)、[Gradle](https://docs.gradle.org/9.8.0/release-notes.html) |
-| Spring AI | 2.1.0-RC2、Google GenAI（2.0.1 標為歷史參考） | 已宣告 2.1.0-RC2 BOM 與語音依賴；參考 2.1 官方文件。[版本支援](https://docs.spring.io/spring-ai/reference/index.html) |
+| Java／建置 | Java 25、Gradle 9.8.2、Spring Boot 4.2.0 | Spring Boot 4.2.0 官方支援至 Java 27，Gradle 官方自 9.8 支援 Java 27；仍須驗證所有實際 plugins、driver、GraalVM 與 CI。[Boot](https://docs.spring.io/spring-boot/system-requirements.html)、[Gradle](https://docs.gradle.org/9.8.0/release-notes.html) |
+| Spring AI | 2.1.0、Google GenAI（2.0.1 標為歷史參考） | 已宣告 2.1.0 BOM 與語音依賴；參考 2.1 官方文件。[版本支援](https://docs.spring.io/spring-ai/reference/index.html) |
 | Web | MVC server，預計啟用 virtual threads | 明確配置 `spring.threads.virtual.enabled=true` 並驗證實際 request、GraphQL 與阻塞工作執行緒；不代表所有 Reactor 任務都自動切換。[官方設定](https://docs.spring.io/spring-boot/3.4/reference/features/spring-application.html) |
 | Streaming | Spring AI `ChatClient.stream()` + SSE | 文件指出串流需要 reactive stack；即使服務選 MVC 仍需核對所選 Spring AI 版本與依賴樹，不能盲排 WebFlux/Reactor。MVC 支援 SSE；需驗證中斷、錯誤、代理緩衝。[Spring AI](https://docs.spring.io/spring-ai/reference/api/chatclient.html)、[Spring MVC](https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-ann-async.html) |
 | GraphQL | Spring Boot GraphQL starter | 保留現有 Spring 模型，沒有預先加入 Netflix DGS；選 MVC 時由 WebMVC 提供傳輸。授權檢查必須綁定使用者及工作區。 |
@@ -109,7 +109,7 @@ Spring Boot WebMVC + Virtual Threads + Spring Modulith
 2. 定義 GraphQL 查詢與 mutation、POST + SSE 事件格式：run ID、開始、文字增量、完成、失敗、取消；加入斷線與取消處理。建立服務端授權與跨使用者隔離。
 3. 建立 Angular 前端並串接 CopilotKit ChatView 與自有 ChatService；不安裝或依賴 Copilot Runtime。接入 Spring AI 模型，明確區分 UI 對話歷史與上下文記憶。
 
-驗收：兩個獨立使用者的對話不可互讀；重新整理可讀取自己的歷史；回答可逐段顯示；停止、失敗、斷線狀態可見；模型金鑰不進入瀏覽器。測試以 mock 模型為基礎，另以隔離環境執行一條真實模型 smoke test。
+驗收：兩個獨立使用者的對話不可互讀；重新整理可讀取自己的歷史；回答可逐段顯示；停止、失敗、斷線狀態可見；模型金鑰不進入瀏覽器。測試以 mock 模型為基礎。
 
 ### Phase 2：工具與安全
 

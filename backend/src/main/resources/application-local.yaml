@@ -6,3 +6,14 @@ spring:
   docker:
     compose:
       enabled: true
+  ai:
+    google:
+      genai:
+        tts:
+          model: gemini-3.8-flash-tts
+        transcription:
+          model: gemini-3.5-transcribe
+    openai:
+      api-key: ${bot-openai-api-key:}
+      chat:
+        model: gpt-5-mini

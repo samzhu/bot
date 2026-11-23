@@ -6,3 +6,10 @@ management:
     web:
       exposure:
         include: health,info
+
+---
+spring:
+  config:
+    activate:
+      on-profile: "local & !mock-ai & !test & !prod"
+    import: "optional:file:./config/application-secrets.properties"

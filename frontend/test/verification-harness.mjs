@@ -7,7 +7,6 @@
  *
  * Guarantees zero un-opted paid model invocations during all ordinary verification.
  * Ordinary verification scripts have NO bypass flags or live paid model opt-ins.
- * Live paid smoke testing is reserved exclusively for backend RealModelSmokeIntegrationTest.
  */
 
 const guardStats = {
@@ -143,13 +142,13 @@ export function createSyntheticSseResponse(options = {}) {
  * This endpoint is isolated in the backend's 'localDevelopment' sourceSet (never packaged in production)
  * and returns HTTP 200 only when:
  * 1. Profile includes 'local'
- * 2. Profile does NOT include 'real-ai'
+ * 2. No AI provider is selected
  * 3. ChatModel bean is genuinely MockChatModel
  *
  * Always revalidates in real-time without process-global permanent trust caching,
  * ensuring any negative transition or configuration switch is reliably detected.
  *
- * If the target backend returns 404 or any non-mock marker (e.g. running real-ai),
+ * If the target backend returns 404 or any non-mock marker (e.g. running Gemini),
  * throws [PAID_MODEL_BLOCKED] to abort generation before any network traffic is sent.
  */
 export async function assertSafeBackendOrigin(baseUrl, fetchFn = originalNodeFetch || globalThis.fetch) {
@@ -193,7 +192,7 @@ export async function assertSafeBackendOrigin(baseUrl, fetchFn = originalNodeFet
 /**
  * Resolves non-secret verification origins.
  * Allows pointing ordinary verification to isolated test instances (e.g. port 4300/8181)
- * while defaulting to 4200/8080 (which immediately fail-closed if 8080 is running real-ai).
+ * while defaulting to 4200/8080 (which immediately fail-closed if 8080 is running Gemini).
  */
 export function getVerificationOrigins() {
   const frontendUrl = process.env.VERIFICATION_FRONTEND_URL || 'http://localhost:4200';
@@ -205,7 +204,7 @@ export function getVerificationOrigins() {
  * Preflight gate check executed at the very entry of every verification script
  * BEFORE creating any conversation, dispatching any run, or launching long UI timeouts.
  *
- * If target backend is NOT a verified mock backend (e.g. running real-ai yielding 404),
+ * If target backend is NOT a verified mock backend (e.g. running Gemini yielding 404),
  * immediately logs a clean diagnostic and terminates with exit code 1 (no UI timeout waiting).
  */
 export async function assertSafeExecutionEnvironment(backendUrl = getVerificationOrigins().backendUrl) {

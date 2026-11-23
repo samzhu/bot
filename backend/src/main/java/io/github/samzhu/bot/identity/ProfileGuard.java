@@ -35,8 +35,12 @@ public class ProfileGuard implements ApplicationListener<ApplicationEnvironmentP
     private void validate(Environment env) {
         String[] activeProfiles = env.getActiveProfiles();
 
-        if (env.matchesProfiles("mock-ai & real-ai")) {
-            throw new IllegalStateException("Conflicting AI profiles: mock-ai and real-ai cannot be active together.");
+        String provider = env.getProperty("bot-ai-provider");
+        if (provider != null && !"gemini".equals(provider)) {
+            throw new IllegalStateException("Unsupported bot-ai-provider; select gemini explicitly or leave it unset.");
+        }
+        if ("gemini".equals(provider) && !env.matchesProfiles("local & !mock-ai & !test & !prod")) {
+            throw new IllegalStateException("Gemini requires local without mock-ai, test or prod.");
         }
 
         boolean allowed = Arrays.stream(activeProfiles)

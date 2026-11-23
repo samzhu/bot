@@ -7,12 +7,14 @@ import io.github.samzhu.bot.usage.UsageLedger;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.util.Optional;
 
 @Component
-@Profile("real-ai")
+@Profile("local & !mock-ai & !test & !prod")
+@ConditionalOnProperty(name = "bot-ai-provider", havingValue = "gemini")
 public class GoogleUsageCaptureAdapter implements UsageCaptureAdapter {
     private final String model;
 
@@ -33,7 +35,7 @@ public class GoogleUsageCaptureAdapter implements UsageCaptureAdapter {
                 "generateContent",
                 model,
                 "GEMINI_API",
-                "2.1.0-RC2",
+                "2.1.0",
                 false,
                 "UNKNOWN");
     }
@@ -63,7 +65,7 @@ public class GoogleUsageCaptureAdapter implements UsageCaptureAdapter {
                         "CUMULATIVE",
                         "SDK_NATIVE",
                         "1",
-                        "2.1.0-RC2",
+                        "2.1.0",
                         "1",
                         "INCOMPLETE",
                         nativeObject.toJson()));

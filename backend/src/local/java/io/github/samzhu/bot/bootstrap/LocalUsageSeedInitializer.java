@@ -11,7 +11,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /** Local-only synthetic usage; the values are examples, not tokenizer or provider measurements. */
 @Component
-@Profile("local & mock-ai & !real-ai")
+@Profile("local & mock-ai")
 @ConditionalOnProperty(prefix = "bot.demo-data", name = "enabled", havingValue = "true", matchIfMissing = false)
 @Order(30)
 public class LocalUsageSeedInitializer implements ApplicationRunner {

@@ -92,11 +92,11 @@ class ConversationTitleBudgetHttpIntegrationTests {
     @TestConfiguration(proxyBeanMethods = false)
     static class LoopbackConfig {
         @Bean Loopback loopback(Environment environment) throws Exception {
-            if (!environment.matchesProfiles("test & !real-ai")) throw new IllegalStateException("test profile required");
+            if (!environment.matchesProfiles("test") || environment.getProperty("bot-ai-provider") != null) throw new IllegalStateException("test profile required");
             return new Loopback();
         }
         @Bean(destroyMethod = "close") Client localInteractionClient(Loopback loopback, Environment environment) {
-            if (!environment.matchesProfiles("test & !real-ai")) throw new IllegalStateException("test profile required");
+            if (!environment.matchesProfiles("test") || environment.getProperty("bot-ai-provider") != null) throw new IllegalStateException("test profile required");
             int port = loopback.server.getAddress().getPort();
             var http = io.github.samzhu.bot.execution.internal.model.TitleHttpTransport.builder()
                     .proxy(Proxy.NO_PROXY).callTimeout(java.time.Duration.ofSeconds(15)).addInterceptor(chain -> {
@@ -163,7 +163,7 @@ class ConversationTitleBudgetHttpIntegrationTests {
                 .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body))).build();
     }
     @Test void budgetDenialAfterChatAdmissionMakesNoTitleProviderRequest() throws Exception {
-        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        assertTrue(environment.matchesProfiles("test") && environment.getProperty("bot-ai-provider") == null);
         try (var connection = dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(), connection.getMetaData().getURL()); }
         loopback.requests.set(0);
         assertEquals(0, loopback.requests.get());
@@ -201,7 +201,7 @@ class ConversationTitleBudgetHttpIntegrationTests {
         } finally { chatModel().complete(); }
     }
     @Test void concurrentTitlesReserveSharedBudgetBeforeSending() throws Exception {
-        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        assertTrue(environment.matchesProfiles("test") && environment.getProperty("bot-ai-provider") == null);
         try (var connection = dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(), connection.getMetaData().getURL()); }
         chatModel().reset(); chatModel().setHoldMode(true);
         loopback.requests.set(0); loopback.hold = true; loopback.entered = new CountDownLatch(1); loopback.release = new CountDownLatch(1);
@@ -256,7 +256,7 @@ class ConversationTitleBudgetHttpIntegrationTests {
     }
 
     @Test void completedTitleHasDistinctDurableUsageAttempt() throws Exception {
-        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        assertTrue(environment.matchesProfiles("test") && environment.getProperty("bot-ai-provider") == null);
         try (var connection = dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(), connection.getMetaData().getURL()); }
         chatModel().reset(); chatModel().setHoldMode(true);
         loopback.requests.set(0); titleAdapterInvocations.set(0); loopback.validRequest = false; loopback.success = true; loopback.hold = true; loopback.entered = new CountDownLatch(1); loopback.release = new CountDownLatch(1);
@@ -364,7 +364,7 @@ class ConversationTitleBudgetHttpIntegrationTests {
     }
 
     @Test void activeUnreservedRealChatDefersTitleUntilChatHasKnownCost() throws Exception {
-        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        assertTrue(environment.matchesProfiles("test") && environment.getProperty("bot-ai-provider") == null);
         try (var connection = dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(), connection.getMetaData().getURL()); }
         REAL_FIXTURE.set(true); chatModel().reset(); chatModel().setHoldMode(true);
         loopback.requests.set(0); loopback.hold = true; loopback.success = true; loopback.entered = new CountDownLatch(1); loopback.release = new CountDownLatch(1);
@@ -426,7 +426,7 @@ class ConversationTitleBudgetHttpIntegrationTests {
     }
 
     private void checkProviderFailure(String failureMode) throws Exception {
-        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        assertTrue(environment.matchesProfiles("test") && environment.getProperty("bot-ai-provider") == null);
         try (var connection = dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(), connection.getMetaData().getURL()); }
         chatModel().reset(); chatModel().setHoldMode(true);
         loopback.requests.set(0); loopback.success=false; loopback.hold=false; loopback.failureMode=failureMode; loopback.entered=new CountDownLatch(1);
@@ -463,7 +463,7 @@ class ConversationTitleBudgetHttpIntegrationTests {
     }
 
     @Test void outstandingTitleHoldContributesToNewChatMonthAndWeekAdmission() throws Exception {
-        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        assertTrue(environment.matchesProfiles("test") && environment.getProperty("bot-ai-provider") == null);
         try (var connection=dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(),connection.getMetaData().getURL()); }
         for (boolean weekly : new boolean[]{false,true}) {
             REAL_FIXTURE.set(false); chatModel().reset(); chatModel().setHoldMode(true);
@@ -506,7 +506,7 @@ class ConversationTitleBudgetHttpIntegrationTests {
     }
 
     @Test void heldTitleDoesNotBlockAnotherAdmissibleChat() throws Exception {
-        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        assertTrue(environment.matchesProfiles("test") && environment.getProperty("bot-ai-provider") == null);
         try (var connection=dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(),connection.getMetaData().getURL()); }
         for (boolean weekly : new boolean[]{false}) {
             REAL_FIXTURE.set(false); chatModel().reset(); chatModel().setHoldMode(true);
@@ -554,7 +554,7 @@ class ConversationTitleBudgetHttpIntegrationTests {
     }
 
     @Test void revokedMemberCannotDispatchTitleAfterChatStarted() throws Exception {
-        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        assertTrue(environment.matchesProfiles("test") && environment.getProperty("bot-ai-provider") == null);
         try (var connection=dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(),connection.getMetaData().getURL()); }
         chatModel().reset(); chatModel().setHoldMode(true); loopback.requests.set(0); loopback.hold=false; loopback.success=false;
         String scope="title-revoked-"+UUID.randomUUID();
@@ -583,7 +583,7 @@ class ConversationTitleBudgetHttpIntegrationTests {
     }
 
     @Test void stopFinishesWhileTitleHttpIsHeldThenTitleCommits() throws Exception {
-        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        assertTrue(environment.matchesProfiles("test") && environment.getProperty("bot-ai-provider") == null);
         try (var connection=dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(),connection.getMetaData().getURL()); }
         chatModel().reset(); chatModel().setHoldMode(true); loopback.requests.set(0); loopback.success=true; loopback.hold=true; loopback.entered=new CountDownLatch(1); loopback.release=new CountDownLatch(1);
         String scope="title-stop-"+UUID.randomUUID();
@@ -621,7 +621,7 @@ class ConversationTitleBudgetHttpIntegrationTests {
     }
 
     @Test void invalidTitleKeepsDefaultAfterUsageSettles() throws Exception {
-        assertTrue(environment.matchesProfiles("test & !real-ai"));
+        assertTrue(environment.matchesProfiles("test") && environment.getProperty("bot-ai-provider") == null);
         try (var connection=dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(),connection.getMetaData().getURL()); }
         chatModel().reset(); chatModel().setHoldMode(true); loopback.requests.set(0); loopback.success=true; loopback.invalidTitle=true; loopback.hold=false; loopback.entered=new CountDownLatch(1);
         String scope="title-invalid-"+UUID.randomUUID();
@@ -637,8 +637,17 @@ class ConversationTitleBudgetHttpIntegrationTests {
         try {
             assertTrue(chatModel().awaitSubscribed(8,TimeUnit.SECONDS));
             assertEquals(1,jdbc.update("update workspace_monthly_budget set enabled=true,cap_usd=3 where workspace_id=? and partition='SIMULATION'",scope));
-            chatModel().emitChunk("visible response"); chatModel().complete();
-            assertTrue(stream.get(8,TimeUnit.SECONDS).body().contains("RUN_FINISHED")); assertTrue(loopback.entered.await(5,TimeUnit.SECONDS));
+            int subscribers=chatModel().currentSubscribers();
+            var emission=chatModel().tryEmitChunk("visible response");
+            var completion=chatModel().tryComplete();
+            var response=stream.get(8,TimeUnit.SECONDS);
+            String diagnostic="status="+response.statusCode()+", body="+response.body()+", subscribers="+subscribers
+                    +", emission="+emission+", completion="+completion+", loopbackRequests="+loopback.requests.get()
+                    +", enteredCount="+loopback.entered.getCount()+", work="+jdbc.queryForList("select state from conversation_title_work where conversation_id=?",id)
+                    +", reservation="+jdbc.queryForList("select state from workspace_title_reservation where conversation_id=?",id);
+            assertEquals(200,response.statusCode(),diagnostic);
+            assertTrue(response.body().contains("RUN_FINISHED"),diagnostic);
+            assertTrue(loopback.entered.await(5,TimeUnit.SECONDS),diagnostic+", enteredCountAfterWait="+loopback.entered.getCount());
             long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(8); String state="";
             while (System.nanoTime()<end) { state=jdbc.queryForObject("select state from conversation_title_work where conversation_id=?",String.class,id); if ("FAILED".equals(state)) break; Thread.sleep(20); }
             assertEquals("FAILED",state); assertEquals(1,loopback.requests.get());
