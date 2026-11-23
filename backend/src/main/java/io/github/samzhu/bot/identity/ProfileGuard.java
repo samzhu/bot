@@ -36,6 +36,19 @@ public class ProfileGuard implements ApplicationListener<ApplicationEnvironmentP
         String[] activeProfiles = env.getActiveProfiles();
 
         String provider = env.getProperty("bot-ai-provider");
+        String standard = env.getProperty("spring.ai.model.chat");
+        if (standard != null && !"google-genai".equals(standard)) {
+            throw new IllegalStateException("Unsupported spring.ai.model.chat; select google-genai explicitly.");
+        }
+        if (env.matchesProfiles("dev & !mock-ai & !test & !prod") && standard == null && provider == null) {
+            throw new IllegalStateException("Development requires an explicit chat provider selector.");
+        }
+        if (standard != null && provider != null && !"gemini".equals(provider)) {
+            throw new IllegalStateException("Conflicting chat provider selectors.");
+        }
+        if (standard != null && !env.matchesProfiles("local & !mock-ai & !test & !prod")) {
+            throw new IllegalStateException("Gemini requires local without mock-ai, test or prod.");
+        }
         if (provider != null && !"gemini".equals(provider)) {
             throw new IllegalStateException("Unsupported bot-ai-provider; select gemini explicitly or leave it unset.");
         }

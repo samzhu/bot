@@ -38,7 +38,8 @@ public class MockVerificationController {
     @GetMapping(value = "/status", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> getStatus() {
         if (!environment.matchesProfiles("local & mock-ai & !test & !prod")
-                || environment.containsProperty("bot-ai-provider")) {
+                || environment.containsProperty("bot-ai-provider")
+                || environment.containsProperty("spring.ai.model.chat")) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
         }
         ChatModel chatModel = chatModelProvider.getIfAvailable();

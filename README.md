@@ -23,11 +23,11 @@ An active profile (`local` or `test`) must be explicitly supplied; the applicati
 | **`local`** | Local infrastructure and loopback connection | No model selected | None |
 | **`local,mock-ai`** | Local development and demo data | `MockChatModel` (deterministic streaming) | None |
 | **`test`** | Automated testing suite | `MockChatModel` / `ControlledChatModel` | None |
-| **`local,dev` + `bot-ai-provider=gemini`** | Explicit live cloud model inference | `GoogleGenAiChatModel` (`gemini-3.8-flash`) | Yes (`backend/config/application-secrets.properties`) |
+| **`dev` + `spring.ai.model.chat=google-genai`** | Explicit live cloud model inference | `GoogleGenAiChatModel` (`gemini-3.8-flash`) | Yes (`backend/config/application-secrets.properties`) |
 
 ### Fail-Fast Guard Rails
 - **Profile Boundary**: Starting without either `local` or `test` profile immediately triggers `ProfileGuard` and aborts startup with an `IllegalStateException`. The `prod` configuration alone does not authorize deployment; production still requires an appropriate authorization strategy. Gemini requires `local` and cannot run with `mock-ai`, `test`, or `prod`.
-- **Real AI Missing Key / Model**: Selecting `bot-ai-provider=gemini` without a non-blank `bot-google-api-key` or `spring.ai.google.genai.chat.model` fails fast at startup with clear diagnostics.
+- **Real AI Missing Key / Model**: Selecting `spring.ai.model.chat=google-genai` without a non-blank `bot-google-api-key` or `spring.ai.google.genai.chat.model` fails fast at startup with clear diagnostics.
 - **Secrets Protection**: `backend/config/application-secrets.properties` and profile-specific variants are ignored by Git. The legacy `application-real-ai.yaml` ignore rule remains in place.
 
 ---
@@ -44,7 +44,7 @@ Only real AI mode needs a Gemini API key. From the repository root, create a pri
 
 Privately set `bot-google-api-key` in that file and keep its permissions at `0600`; do not print the key or put it in command history.
 
-The `--gemini` command activates `local,dev`; the external `backend/config/application-dev.yaml` conditionally imports the optional secrets file. `local,dev` can load the key without selecting Gemini; a key never activates a paid provider. `dev` alone, `local` alone, and combinations containing `mock-ai`, `test` or `prod` do not import it. Missing or blank keys fail fast for Gemini. Spring resolves the file relative to the backend process working directory: `dev.sh` sets this directory; when running Gradle manually, first `cd backend`. Existing Compose database settings are unchanged.
+The `--gemini` command activates `local,dev`; the external `backend/config/application-dev.yaml` conditionally imports the optional secrets file. `dev` also activates `local`, enabling Compose and the secrets import; a key never activates a paid provider. `local` alone and combinations containing `mock-ai`, `test` or `prod` do not import it. The legacy `local,dev` / `bot-ai-provider=gemini` path remains temporarily available; conflicting selectors fail closed. Missing or blank keys fail fast for Gemini. Spring resolves the file relative to the backend process working directory: `dev.sh` sets this directory; when running Gradle manually, first `cd backend`. Existing Compose database settings are unchanged.
 
 Model names stay in YAML. Gemini chat uses `gemini-3.8-flash` from the shared configuration. Local configuration preserves `gemini-3.8-flash-tts` for speech, `gemini-3.5-transcribe` for transcription, and `gpt-5-mini` for OpenAI chat. These three settings are reserved for their integrations. The current app starts the Gemini chat and title clients, so leave `bot-openai-api-key` blank unless you need it for an OpenAI integration.
 
@@ -84,7 +84,7 @@ To run with real Google GenAI models:
 ```bash
 # Terminal 1: Start backend with explicitly selected Gemini and local dev configuration
 cd backend
-./gradlew bootRun --args="--spring.profiles.active=local,dev --bot-ai-provider=gemini"
+./gradlew bootRun --args="--spring.profiles.active=dev --spring.ai.model.chat=google-genai"
 ```
 
 ### Step 2: Start Frontend

@@ -10,11 +10,11 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Conditional;
 
 @Configuration
 @Profile("local & !mock-ai & !test & !prod")
-@ConditionalOnProperty(name = "bot-ai-provider", havingValue = "gemini")
+@Conditional(GeminiSelectedCondition.class)
 public class GoogleGenAiManualConfig {
 
     @Value("${bot-google-api-key:}")

@@ -11,12 +11,12 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Conditional;
 
 /** Separate title client: no retries or redirects may repeat an uncertain provider request. */
 @Configuration(proxyBeanMethods = false)
 @Profile("local & !mock-ai & !test & !prod")
-@ConditionalOnProperty(name = "bot-ai-provider", havingValue = "gemini")
+@Conditional(GeminiSelectedCondition.class)
 class GeminiConversationTitleConfiguration {
     @Bean(name = "conversationTitleClient", destroyMethod = "close", defaultCandidate = false)
     Client conversationTitleClient(@Value("${bot-google-api-key:}") String key) {

@@ -63,6 +63,9 @@ bot:
     execution-mode: 'OFF'
 
 spring:
+  profiles:
+    group:
+      dev: local
   docker:
     compose:
       enabled: false

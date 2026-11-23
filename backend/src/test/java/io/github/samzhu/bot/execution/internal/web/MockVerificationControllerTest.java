@@ -111,4 +111,12 @@ class MockVerificationControllerTest {
         runner.withPropertyValues("spring.profiles.active=prod")
                 .run(context -> assertThat(context).doesNotHaveBean(MockVerificationController.class));
     }
+    @Test void returns404WhenStandardSelectorIsPresent() {
+        MockEnvironment env = new MockEnvironment();
+        env.setActiveProfiles("local", "mock-ai");
+        env.setProperty("spring.ai.model.chat", "google-genai");
+        @SuppressWarnings("unchecked") ObjectProvider<ChatModel> provider = mock(ObjectProvider.class);
+        when(provider.getIfAvailable()).thenReturn(new MockChatModel());
+        assertThat(new MockVerificationController(provider, env).getStatus().getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+    }
 }

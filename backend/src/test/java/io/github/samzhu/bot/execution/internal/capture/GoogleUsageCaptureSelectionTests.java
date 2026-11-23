@@ -16,4 +16,9 @@ class GoogleUsageCaptureSelectionTests {
                     .run(context -> assertThat(context).doesNotHaveBean(GoogleUsageCaptureAdapter.class));
         }
     }
+    @Test void standardGeminiSelectorCreatesCaptureAdapter() {
+        new ApplicationContextRunner().withUserConfiguration(GoogleUsageCaptureAdapter.class)
+            .withPropertyValues("spring.profiles.active=local", "spring.ai.model.chat=google-genai")
+            .run(context -> assertThat(context).hasSingleBean(GoogleUsageCaptureAdapter.class));
+    }
 }

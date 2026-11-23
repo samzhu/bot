@@ -16,6 +16,17 @@ class RealAiFailFastTests {
             .withUserConfiguration(GoogleGenAiManualConfig.class);
 
     @Test
+    void standardSelectorCreatesExactlyOneGeminiChatModel() {
+        runner.withPropertyValues("spring.profiles.active=local", "spring.ai.model.chat=google-genai",
+                        "bot-google-api-key=synthetic-key-only", "spring.ai.google.genai.chat.model=gemini-3.8-flash")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(ChatModel.class);
+                    assertThat(context.getBean(ChatModel.class)).isInstanceOf(GoogleGenAiChatModel.class);
+                });
+    }
+
+    @Test
     @DisplayName("Fail-fast: Starting with Gemini selector but missing API key must abort with clear diagnostic")
     void missingApiKey_abortsStartupWithClearDiagnostic() {
         runner.withPropertyValues("spring.profiles.active=local", "bot-ai-provider=gemini")
@@ -86,5 +97,18 @@ class RealAiFailFastTests {
                     assertThat(context).doesNotHaveBean(Client.class);
                     assertThat(context).doesNotHaveBean(ChatModel.class);
                 });
+    }
+    @Test void standardSelectorWithoutKeyFailsClosed() {
+        runner.withPropertyValues("spring.profiles.active=local", "spring.ai.model.chat=google-genai",
+                "bot-google-api-key=", "spring.ai.google.genai.chat.model=gemini-3.8-flash")
+            .run(context -> {
+                assertThat(context).hasFailed();
+                assertThat(context.getStartupFailure()).hasRootCauseMessage("Fail-fast: Gemini requires bot-google-api-key");
+            });
+    }
+    @Test void equivalentSelectorsCreateOnlyOneModel() {
+        runner.withPropertyValues("spring.profiles.active=local", "spring.ai.model.chat=google-genai", "bot-ai-provider=gemini",
+                "bot-google-api-key=synthetic-key-only", "spring.ai.google.genai.chat.model=gemini-3.8-flash")
+            .run(context -> assertThat(context).hasSingleBean(ChatModel.class));
     }
 }

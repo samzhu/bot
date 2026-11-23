@@ -9,6 +9,6 @@ import org.springframework.core.env.Environment;
 @Configuration(proxyBeanMethods = false)
 class ConversationTitlePartitionConfiguration {
     @Bean ConversationTitlePartition activeTitlePartition(Environment environment) {
-        return () -> "gemini".equals(environment.getProperty("bot-ai-provider")) ? WorkspaceAdmission.Partition.REAL : WorkspaceAdmission.Partition.SIMULATION;
+        return () -> ("google-genai".equals(environment.getProperty("spring.ai.model.chat")) || "gemini".equals(environment.getProperty("bot-ai-provider"))) ? WorkspaceAdmission.Partition.REAL : WorkspaceAdmission.Partition.SIMULATION;
     }
 }

@@ -38,4 +38,10 @@ class GeminiConversationTitleConfigurationTests {
                 assertNotNull(context.getStartupFailure());
             });
     }
+    @Test void standardSelectorCreatesTitleGenerator() {
+        new ApplicationContextRunner().withUserConfiguration(GeminiConversationTitleConfiguration.class)
+            .withPropertyValues("spring.ai.model.chat=google-genai", "bot-google-api-key=synthetic-key-only")
+            .withInitializer(context -> context.getEnvironment().setActiveProfiles("local"))
+            .run(context -> assertEquals(1, context.getBeansOfType(ConversationTitleGenerator.class).size()));
+    }
 }

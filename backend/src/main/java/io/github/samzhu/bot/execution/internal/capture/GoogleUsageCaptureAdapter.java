@@ -7,14 +7,15 @@ import io.github.samzhu.bot.usage.UsageLedger;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Conditional;
+import io.github.samzhu.bot.execution.internal.model.GeminiSelectedCondition;
 import org.springframework.stereotype.Component;
 
 import java.util.Optional;
 
 @Component
 @Profile("local & !mock-ai & !test & !prod")
-@ConditionalOnProperty(name = "bot-ai-provider", havingValue = "gemini")
+@Conditional(GeminiSelectedCondition.class)
 public class GoogleUsageCaptureAdapter implements UsageCaptureAdapter {
     private final String model;
 
