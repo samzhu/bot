@@ -165,6 +165,7 @@ export async function assertSafeBackendOrigin(baseUrl, fetchFn = originalNodeFet
   try {
     response = await fetchFn(statusUrl, {
       method: 'GET',
+      redirect: 'manual',
       headers: { 'Accept': 'application/json' }
     });
   } catch (err) {

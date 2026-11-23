@@ -12,7 +12,8 @@
     "test:layout": "npm run test:unit -- --include=src/app/app.spec.ts --include=src/app/app-threadplane.spec.ts --include=src/app/shell/chat-navigation.component.spec.ts",
     "test:layout:browser": "node e2e/app-shell-layout.mjs",
     "test:parser": "node --test src/app/sse-parser.spec.mjs",
-    "test:guard": "node --test test/*.test.mjs"
+    "test:guard": "node --test test/*.test.mjs",
+    "test:owned-browser": "node test/owned-browser-flow.mjs"
   },
   "private": true,
   "packageManager": "npm@11.13.0",

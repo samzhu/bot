@@ -146,3 +146,9 @@ dependencyManagement {
 tasks.named('test') {
 	useJUnitPlatform()
 }
+
+// The browser fixture is test-only and must never select the production main class.
+tasks.named('bootTestRun') {
+	mainClass = 'io.github.samzhu.bot.BrowserFixtureApplication'
+	doFirst { println("BROWSER_FIXTURE_DAEMON ${ProcessHandle.current().pid()}") }
+}

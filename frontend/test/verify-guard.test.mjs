@@ -413,3 +413,14 @@ test('safe backend requires all three markers', async () => {
   }
   assert.equal(await assertSafeBackendOrigin('http://localhost:1', async () => new Response(JSON.stringify({ status: 'SAFE_MOCK', mock: true, modelClass: 'MockChatModel' }), { status: 200 })), true);
 });
+
+it('rejects a redirected verification response before generation', async () => {
+  let providerCalls = 0;
+  const redirectingFetch = async (_url, options) => {
+    if (options.redirect === 'manual') return new Response(null, { status: 302, headers: { Location: 'http://provider.invalid/' } });
+    providerCalls++;
+    return new Response(JSON.stringify({ status: 'SAFE_MOCK', mock: true, modelClass: 'MockChatModel' }), { status: 200 });
+  };
+  await assert.rejects(assertSafeBackendOrigin('http://127.0.0.1:49123', redirectingFetch), /PAID_MODEL_BLOCKED/);
+  assert.equal(providerCalls, 0);
+});
