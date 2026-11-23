@@ -25,7 +25,7 @@ Automated tests provide test-owned Fake models and use isolated Testcontainers w
 
 ### Local Gemini key
 
-Only explicitly selected Gemini needs a key. From the repository root, create a private copy without overwriting an existing file:
+Gemini needs a key. If `backend/config/application-secrets.properties` already exists, use that file. Otherwise, from the repository root, create a private copy without overwriting an existing file:
 
 ```bash
 (umask 077; set -C; cat backend/config/application-secrets.properties.example > backend/config/application-secrets.properties)
@@ -33,7 +33,21 @@ Only explicitly selected Gemini needs a key. From the repository root, create a 
 
 Privately set `bot-google-api-key` and keep permissions at `0600`; do not print the key or put it in command history. From `backend`, Spring Boot loads `config/application-dev.yaml`, whose guarded optional import reads that file. Missing or blank keys fail at startup for Gemini. OS environment variables, Java system properties and command-line properties take precedence over config data. Do not commit secrets.
 
-### Backend Development: Gemini
+### Backend Development
+
+With Java 25 and Docker running, start the backend from the repository root (or invoke the script by path from another directory):
+
+```bash
+./dev.sh
+```
+
+The backend-only launcher selects the `dev` profile and defaults `SPRING_AI_MODEL_CHAT` to `google-genai` when the variable is unset. It uses the existing Gemini key file described above. To use local Ollama instead:
+
+```bash
+SPRING_AI_MODEL_CHAT=ollama ./dev.sh
+```
+
+The launcher accepts no arguments; use `SPRING_AI_MODEL_CHAT` to select a model. An explicitly set selector is passed through to Spring, including invalid or empty values. The launcher runs in the backend directory, keeps output in the terminal, and forwards process control through `exec`. For other Spring configuration, run Gradle directly from `backend`; for example:
 
 ```bash
 cd backend
