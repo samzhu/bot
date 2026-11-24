@@ -207,9 +207,12 @@ class AgUiBudgetCohortAndMonthIntegrationTests {
                     new WorkspaceAdmission.Register(targetWorkspace,realRun,"dev-user",realConversation,WorkspaceAdmission.Partition.REAL)).toCompletableFuture().get(10,TimeUnit.SECONDS)).registration();
             // REAL uses a synthetic Run and fake ledger metadata; it never invokes a paid provider.
             jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'synthetic','PENDING')",realRun,realConversation,UUID.randomUUID().toString());
+            String ownerToken=UUID.randomUUID().toString();
+            jdbc.update("insert into run_ownership(run_id,owner_token,generation,lease_until) values (?,?,1,clock_timestamp()+interval '1 hour')",realRun,ownerToken);
+            var owner=new io.github.samzhu.bot.usage.RunOwnershipGuard.Fence(realRun,ownerToken,1);
             assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(real).toCompletableFuture().get(10,TimeUnit.SECONDS));
-            String realAttempt=ledger.begin(new UsageLedger.Dispatch(realRun,targetWorkspace,"dev-user","FAKE","test","model","FAKE","1",false,"VERIFIED"));
-            var realClaim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(real,realAttempt)).toCompletableFuture().get(10,TimeUnit.SECONDS)).claim();
+            String realAttempt=ledger.begin(new UsageLedger.Dispatch(realRun,targetWorkspace,"dev-user","FAKE","test","model","FAKE","1",false,"VERIFIED"),owner);
+            var realClaim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(real,realAttempt,owner)).toCompletableFuture().get(10,TimeUnit.SECONDS)).claim();
             pre=start(preConversation,preRun);
             assertTrue(publicationEntered.await(8,TimeUnit.SECONDS));
             published=start(publishedConversation,publishedRun);
@@ -283,7 +286,7 @@ class AgUiBudgetCohortAndMonthIntegrationTests {
             assertEquals("PENDING",jdbc.queryForObject("select status from chat_run where id=?",String.class,realRun));
             assertEquals(0,jdbc.queryForObject("select count(*) from workspace_admission_effect_outbox where registration_token=?",Integer.class,real.token()));
             assertEquals(0,jdbc.queryForObject("select count(*) from workspace_admission_effect_outbox where target_run_id=?",Integer.class,otherRun));
-            assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(real,realAttempt,realClaim,WorkspaceAdmission.TerminalKind.UNKNOWN)).toCompletableFuture().get(10,TimeUnit.SECONDS));
+            assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(real,realAttempt,realClaim,WorkspaceAdmission.TerminalKind.UNKNOWN,null,owner)).toCompletableFuture().get(10,TimeUnit.SECONDS));
             jdbc.update("update chat_run set status='FAILED' where id=? and status='PENDING'",realRun);
             var cleaned=admission.completeTerminalRun(realRun).toCompletableFuture().get(10,TimeUnit.SECONDS);
             assertTrue(cleaned==WorkspaceAdmission.TerminalRunCompletion.COMPLETED || cleaned==WorkspaceAdmission.TerminalRunCompletion.ALREADY_COMPLETED,cleaned.toString());

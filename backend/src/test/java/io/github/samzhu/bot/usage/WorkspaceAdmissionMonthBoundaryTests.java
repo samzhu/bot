@@ -1,5 +1,7 @@
 package io.github.samzhu.bot;
 
+import io.github.samzhu.bot.usage.SyntheticRunOwner;
+
 import io.github.samzhu.bot.conversation.ConversationOperations;
 import io.github.samzhu.bot.usage.BudgetCancellationSink;
 import io.github.samzhu.bot.usage.UsageLedger;
@@ -52,6 +54,7 @@ class WorkspaceAdmissionMonthBoundaryTests {
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,
                 admission.register(new WorkspaceAdmission.Register(workspace,run,actor,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        var runOwner=SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
         var pending=jdbc.queryForMap("select pending_id,pending_epoch,pending_period_start,pending_period_end from workspace_admission_registration where token=?",registration.token());
         String id=UUID.randomUUID().toString(), receipt=UUID.randomUUID().toString();
@@ -62,8 +65,8 @@ class WorkspaceAdmissionMonthBoundaryTests {
                 """,id,registration.token(),workspace,run,pending.get("pending_id"),pending.get("pending_epoch"),pending.get("pending_period_start"),pending.get("pending_period_end"),receipt);
         var before=assertInstanceOf(WorkspaceAdmission.EffectInspection.Found.class,admission.inspectCancellationEffect(id).toCompletableFuture().join()).effect();
         ((MutableClock)clock).now.set(Instant.parse("2026-11-30T16:00:01Z"));
-        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
-        var allowed=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt)).toCompletableFuture().join());
+        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),runOwner);
+        var allowed=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt,runOwner)).toCompletableFuture().join());
         assertEquals(Instant.parse("2026-11-30T16:00:00Z"),allowed.claim().periodStart());
         var after=assertInstanceOf(WorkspaceAdmission.EffectInspection.Found.class,admission.inspectCancellationEffect(id).toCompletableFuture().join()).effect();
         assertEquals(before.target(),after.target());

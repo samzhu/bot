@@ -51,6 +51,9 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
     private static final Logger log = LoggerFactory.getLogger(RunExecutionServiceImpl.class);
 
     private final ChatRunRepository runRepository;
+    private final RunOwnership ownership;
+    private final io.github.samzhu.bot.usage.RunStartGuard runStartGuard;
+    private final io.github.samzhu.bot.usage.RunRecoveryEvidence recoveryEvidence;
     private final ConversationOperations conversationOperations;
     private final io.github.samzhu.bot.conversation.ConversationTitleDispatch titleDispatch;
     private final ConversationRecoveryReader conversationRecoveryReader;
@@ -71,6 +74,9 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
 
     public RunExecutionServiceImpl(
             ChatRunRepository runRepository,
+            RunOwnership ownership,
+            io.github.samzhu.bot.usage.RunStartGuard runStartGuard,
+            io.github.samzhu.bot.usage.RunRecoveryEvidence recoveryEvidence,
             ConversationOperations conversationOperations,
             io.github.samzhu.bot.conversation.ConversationTitleDispatch titleDispatch,
             ConversationRecoveryReader conversationRecoveryReader,
@@ -89,6 +95,9 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
             RunProperties runProperties,
             @Value("${bot.conversation.window-turns:10}") int windowTurns) {
         this.runRepository = runRepository;
+        this.ownership = ownership;
+        this.runStartGuard = runStartGuard;
+        this.recoveryEvidence = recoveryEvidence;
         this.conversationOperations = conversationOperations;
         this.titleDispatch = titleDispatch;
         this.conversationRecoveryReader = conversationRecoveryReader;
@@ -205,6 +214,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         ChatRun newRun = new ChatRun(runId, conversationId, clientRequestId, message, RunStatus.RUNNING.name(), actualExecutionMode, null, now, now);
 
         final String[] userMsgHolder = new String[1];
+        final RunOwnership.Fence[] owner = new RunOwnership.Fence[1];
         SseEmitter emitter;
         RunHandle handle;
         var lifecycleGate = runRegistry.lifecycleGate(runId);
@@ -212,9 +222,12 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         try {
             try {
                 transactionTemplate.executeWithoutResult(status -> {
+                    if (!runStartGuard.lockAndCheck(registration)) throw new IllegalStateException("Run start lease expired");
                     jdbcAggregateTemplate.insert(newRun);
+                    owner[0] = ownership.create(runId,registration.token());
                     var uMsg = conversationOperations.appendMessage(conversationId, "USER", message, runId, false);
                     userMsgHolder[0] = uMsg.id();
+                    if (!runStartGuard.lockAndCheck(registration)) throw new IllegalStateException("Run start lease expired");
                 });
             } catch (Exception ex) {
                 // Check if this is specifically a unique constraint collision on chat_run active or client_request
@@ -248,6 +261,8 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                 throw new RuntimeException("Failed to start run due to unexpected database error", ex);
             }
 
+            ownership.maintain(owner[0]);
+
             // 4. Create SseEmitter with 0L timeout (lifecycle strictly managed by app deadline and heartbeat)
             emitter = new SseEmitter(0L);
             handle = new RunHandle(
@@ -260,7 +275,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                     new RunHandle.TerminalCallback() {
                         @Override
                         public RunHandle.TerminalResult commitTerminal(String rId, String convId, RunStatus targetStatus, String errorMessage, String assistantContent, boolean interrupted, String userPrompt) {
-                            return commitTerminalInternal(rId, convId, targetStatus, errorMessage, assistantContent, interrupted, userPrompt, agUi ? assistantId : null);
+                            return commitTerminalInternal(rId, convId, targetStatus, errorMessage, assistantContent, interrupted, userPrompt, agUi ? assistantId : null, owner[0]);
                         }
 
                         @Override
@@ -273,13 +288,14 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                         public RunHandle.TerminalResult commitBudgetCancellation(String rId, String convId, String partial,
                                 io.github.samzhu.bot.usage.BudgetCancellationSink.Effect effect) {
                             return commitTerminalInternal(rId, convId, RunStatus.CANCELLED, "Monthly budget reached",
-                                    partial, true, null, agUi ? assistantId : null, effect);
+                                    partial, true, null, agUi ? assistantId : null, owner[0], effect);
                         }
                     }
             );
 
             if (agUi) handle.onFirstVisibleReply(() -> titleDispatch.afterFirstVisibleReply(conversationId));
             handle.setAdmissionRegistration(registration);
+            handle.setOwnershipFence(owner[0]);
             runRegistry.register(runId, handle);
 
             // 5. Send run.started event (seq = 1) BEFORE starting scheduled tasks
@@ -324,7 +340,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
         final UsageInvocation.Attempt usageAttempt;
         try {
             // Persist the attempt before Session mutation or any provider invocation.
-            usageAttempt = usageInvocation.begin(dispatchMetadata, registration);
+            usageAttempt = usageInvocation.begin(dispatchMetadata, registration, owner[0]);
             usageInvocation.bindCompletion(usageAttempt, handle);
         } catch (RuntimeException ex) {
             handle.fail("Usage ledger unavailable");
@@ -340,10 +356,14 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
 
             // Why standard SessionService: Spring AI 2.1 deprecated legacy ChatMemory;
             // findOrCreate initializes the conversation session with standard principal metadata.
-            sessionService.findOrCreate(CreateSessionRequest.builder()
-                    .id(conversationId)
-                    .metadata(Map.of(SessionAttributes.PRINCIPAL_NAME, userId))
-                    .build());
+            transactionTemplate.executeWithoutResult(status -> {
+                runRepository.findForAdmission(runId).orElseThrow();
+                if (!ownership.lockOwner(owner[0])) throw new IllegalStateException("Run ownership lost");
+                sessionService.findOrCreate(CreateSessionRequest.builder()
+                        .id(conversationId)
+                        .metadata(Map.of(SessionAttributes.PRINCIPAL_NAME, userId))
+                        .build());
+            });
 
             List<org.springframework.ai.chat.messages.Message> activeMessages = sessionService.getActiveMessages(conversationId);
             if (activeMessages != null && !activeMessages.isEmpty()) {
@@ -455,7 +475,7 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
 
     /** Reconciles a usage-verified settled prompt failure without holding a stripe across I/O. */
     boolean completeSettledPromptFailure(WorkspaceAdmission.PromptFailureFact fact) {
-        return fact!=null && completeDurableRecovery(fact.registration(),"Failed to build prompt context");
+        return fact!=null && completeDurableRecovery(fact.registration(),"Failed to build prompt context",() -> recoveryEvidence.lockPromptFailure(fact));
     }
 
     /** A ready disposition already proves the entire Run has no claim and all attempts are settled. */
@@ -472,10 +492,10 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                 || registration.partition()!=effect.partition() || !Objects.equals(registration.runId(),effect.runId())
                 || !Objects.equals(fence.token(),effect.token()) || !Objects.equals(fence.workspaceId(),effect.workspaceId())
                 || fence.partition()!=effect.partition()) return false;
-        return completeDurableRecovery(registration,"BUDGET_CANCELLATION_SUPERSEDED");
+        return completeDurableRecovery(registration,"BUDGET_CANCELLATION_SUPERSEDED",() -> recoveryEvidence.lockSuperseded(fact));
     }
 
-    private boolean completeDurableRecovery(WorkspaceAdmission.Registration registration,String reason) {
+    private boolean completeDurableRecovery(WorkspaceAdmission.Registration registration,String reason,java.util.function.BooleanSupplier evidence) {
         try {
             var initial=transactionTemplate.execute(status -> recoveryRun(registration,false));
             if (initial==null) return false;
@@ -491,25 +511,33 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
                 return true;
             }
             if (handle!=null) {
-                if (!handle.failSettledRecovery(() -> commitDurableRecovery(registration,reason))) return false;
+                if (!handle.failSettledRecovery(() -> commitDurableRecovery(registration,reason,handle.ownershipFence(),evidence))) return false;
                 // Local terminal state can follow an indeterminate DB write; only the row advances recovery.
                 var verified=transactionTemplate.execute(status -> recoveryRun(registration,false));
                 return verified!=null && isTerminal(verified);
             }
-            return commitDurableRecovery(registration,reason)!=null;
+            return commitDurableRecovery(registration,reason,null,evidence)!=null;
         } catch (RuntimeException unknown) {
             return false;
         }
     }
 
-    private RunHandle.TerminalResult commitDurableRecovery(WorkspaceAdmission.Registration registration,String reason) {
-        return transactionTemplate.execute(status -> {
+    private RunHandle.TerminalResult commitDurableRecovery(WorkspaceAdmission.Registration registration,String reason, RunOwnership.Fence localFence,java.util.function.BooleanSupplier evidence) {
+        var result=transactionTemplate.execute(status -> {
+            if (!evidence.getAsBoolean()) return null;
             var current=recoveryRun(registration,true);
             if (current==null) return null;
             if (isTerminal(current)) return new RunHandle.TerminalResult(false,RunStatus.valueOf(current.status()),null);
-            int changed=runRepository.failDurableRecovery(registration.runId(),registration.conversationId(),reason,Instant.now());
-            return changed==1 ? new RunHandle.TerminalResult(true,RunStatus.FAILED,null,reason) : null;
+            // Only receipt recovery may consult the original local capability after a registry miss.
+            var fence=localFence != null ? localFence : ownership.localForReceipt(registration.runId(),registration.token());
+            if (fence==null) fence=ownership.takeExpired(registration.runId());
+            if (fence==null || !registration.runId().equals(fence.runId())
+                    || (localFence!=null && !registration.token().equals(fence.token()))
+                    || !ownership.failTakenRun(fence,registration.conversationId(),reason)) return null;
+            return new RunHandle.TerminalResult(true,RunStatus.FAILED,null,reason);
         });
+        if (result!=null && result.casSuccess()) ownership.forget(localFence!=null ? localFence : ownership.localForReceipt(registration.runId(),registration.token()));
+        return result;
     }
 
     private ChatRun recoveryRun(WorkspaceAdmission.Registration registration,boolean lockRun) {
@@ -551,15 +579,15 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
             String errorMessage,
             String assistantContent,
             boolean interrupted,
-            String userPrompt, String assistantId) {
+            String userPrompt, String assistantId, RunOwnership.Fence fence) {
 
         return commitTerminalInternal(runId, conversationId, targetStatus, errorMessage, assistantContent,
-                interrupted, userPrompt, assistantId, null);
+                interrupted, userPrompt, assistantId, fence, null);
     }
 
     private RunHandle.TerminalResult commitTerminalInternal(
             String runId, String conversationId, RunStatus targetStatus, String errorMessage,
-            String assistantContent, boolean interrupted, String userPrompt, String assistantId,
+            String assistantContent, boolean interrupted, String userPrompt, String assistantId, RunOwnership.Fence fence,
             io.github.samzhu.bot.usage.BudgetCancellationSink.Effect budgetEffect) {
 
         try {
@@ -567,6 +595,8 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
             // and Session Memory append must succeed atomically. Model streaming occurs entirely
             // outside DB transactions to prevent connection pool exhaustion.
             return transactionTemplate.execute(status -> {
+                runRepository.findForAdmission(runId).orElseThrow();
+                if (!ownership.lockOwner(fence)) throw new IllegalStateException("Run ownership lost");
                 // CAS status update: only updates if current status is PENDING or RUNNING.
                 int rows = runRepository.updateTerminalStatus(runId, targetStatus.name(), errorMessage, Instant.now());
                 if (rows == 0) {
@@ -617,13 +647,15 @@ public class RunExecutionServiceImpl implements ExecutionOperations {
             if (budgetEffect != null) throw new IllegalStateException("Budget cancellation outcome unknown", ex);
             log.error("Transaction rolled back for run {} during terminal commit: {}", runId, ex.getMessage(), ex);
             // In a new independent short transaction, mark as FAILED with interrupted assistant partial (no Session pair)
-            return fallbackToFailed(runId, conversationId, assistantContent, "Terminal commit failure: " + ex.getMessage(), assistantId);
+            return fallbackToFailed(runId, conversationId, assistantContent, "Terminal commit failure: " + ex.getMessage(), assistantId, fence);
         }
     }
 
-    private RunHandle.TerminalResult fallbackToFailed(String runId, String conversationId, String assistantContent, String error, String assistantId) {
+    private RunHandle.TerminalResult fallbackToFailed(String runId, String conversationId, String assistantContent, String error, String assistantId, RunOwnership.Fence fence) {
         try {
             return transactionTemplate.execute(status -> {
+                runRepository.findForAdmission(runId).orElseThrow();
+                if (!ownership.lockOwner(fence)) throw new IllegalStateException("Run ownership lost");
                 int rows = runRepository.updateTerminalStatus(runId, RunStatus.FAILED.name(), error, Instant.now());
                 if (rows == 0) {
                     status.setRollbackOnly();

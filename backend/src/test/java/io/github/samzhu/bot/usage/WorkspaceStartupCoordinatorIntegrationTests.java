@@ -2,6 +2,8 @@ package io.github.samzhu.bot;
 
 import com.zaxxer.hikari.HikariDataSource;
 import io.github.samzhu.bot.conversation.ConversationOperations;
+import io.github.samzhu.bot.usage.RunOwnershipGuard;
+import io.github.samzhu.bot.usage.SyntheticRunOwner;
 import io.github.samzhu.bot.usage.UsageLedger;
 import io.github.samzhu.bot.usage.WorkspaceAdmission;
 import io.github.samzhu.bot.usage.WorkspaceMonthlyBudgetOperations;
@@ -46,11 +48,12 @@ class WorkspaceStartupCoordinatorIntegrationTests {
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(
                 new WorkspaceAdmission.Register(workspace,run,actor,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        var fence=SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
-        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
-        var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt)).toCompletableFuture().join()).claim();
+        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),fence);
+        var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt,fence)).toCompletableFuture().join()).claim();
         assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(
-                new WorkspaceAdmission.FinalizeAttempt(registration,attempt,claim,WorkspaceAdmission.TerminalKind.UNKNOWN)).toCompletableFuture().join());
+                new WorkspaceAdmission.FinalizeAttempt(registration,attempt,claim,WorkspaceAdmission.TerminalKind.UNKNOWN,null,fence)).toCompletableFuture().join());
         jdbc.update("update chat_run set status='FAILED' where id=?",run);
         var ds=(HikariDataSource)dataSource;
         try(var restarted=new SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class).web(WebApplicationType.NONE).profiles("test")
@@ -73,8 +76,9 @@ class WorkspaceStartupCoordinatorIntegrationTests {
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(
                 new WorkspaceAdmission.Register(workspace,run,actor,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        var fence=SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
-        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
+        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),fence);
         jdbc.update("insert into workspace_admission_dispatch(attempt_id,registration_token,state) values (?,?,'PENDING')",attempt,registration.token());
         jdbc.update("update chat_run set status='FAILED' where id=?",run);
         var ds=(HikariDataSource)dataSource;

@@ -26,9 +26,16 @@ class SupersededBudgetCompletionScanner {
     @Scheduled(initialDelayString="${bot.execution.completion-sweep.initial-delay-ms:1000}",
             fixedDelayString="${bot.execution.completion-sweep.delay-ms:1000}")
     public void scan() {
-        if (!enabled || !running.compareAndSet(false,true)) return;
+        if (!enabled) return;
+        scanBatch(Long.MAX_VALUE);
+    }
+
+    void scanStartupBatch(long deadlineNanos) { scanBatch(deadlineNanos); }
+
+    private void scanBatch(long deadlineNanos) {
+        if (deadlineNanos-System.nanoTime()<=0 || !running.compareAndSet(false,true)) return;
         try {
-            var result=admission.scanSupersededNotDispatched(after,upper,PAGE_SIZE).toCompletableFuture().get(2,TimeUnit.SECONDS);
+            var result=admission.scanSupersededNotDispatched(after,upper,PAGE_SIZE).toCompletableFuture().get(Math.min(TimeUnit.SECONDS.toNanos(2), Math.max(0,deadlineNanos-System.nanoTime())),TimeUnit.NANOSECONDS);
             if (!(result instanceof WorkspaceAdmission.SupersededPage.Page page)) return;
             if (upper==null) upper=page.upperToken();
             if (upper==null) { after=null; return; }

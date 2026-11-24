@@ -26,7 +26,9 @@ public interface WorkspaceAdmission {
     record ClaimFence(String token, String claimId, String attemptId, String workspaceId,
                       Partition partition, Instant periodStart, Instant periodEnd,
                       long policyGeneration) {}
-    record Dispatch(Registration registration, String attemptId) {}
+    record Dispatch(Registration registration, String attemptId, io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner) {
+        public Dispatch(Registration registration, String attemptId) { this(registration, attemptId, null); }
+    }
 
     sealed interface Decision {
         record Allowed(Instant startedAt, ClaimFence claim) implements Decision {}
@@ -65,9 +67,13 @@ public interface WorkspaceAdmission {
     }
     /** Trusted full-cycle scan of dispositions whose attempts are all durably settled; Unknown never advances the cursor. */
     CompletionStage<SupersededPage> scanSupersededNotDispatched(String afterExclusive, String upperInclusive, int limit);
-    record FinalizeAttempt(Registration registration, String attemptId, ClaimFence claim, TerminalKind kind, TerminalReason reason) {
+    record FinalizeAttempt(Registration registration, String attemptId, ClaimFence claim, TerminalKind kind, TerminalReason reason,
+                           io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner) {
+        public FinalizeAttempt(Registration registration, String attemptId, ClaimFence claim, TerminalKind kind, TerminalReason reason) {
+            this(registration, attemptId, claim, kind, reason, null);
+        }
         public FinalizeAttempt(Registration registration, String attemptId, ClaimFence claim, TerminalKind kind) {
-            this(registration, attemptId, claim, kind, null);
+            this(registration, attemptId, claim, kind, null, null);
         }
     }
     enum CancellationState { NONE, REQUESTED, TERMINAL, UNKNOWN }
@@ -107,6 +113,7 @@ public interface WorkspaceAdmission {
     CompletionStage<ClaimInspection> inspectClaim(Registration registration, String attemptId);
     /** Resolve an ambiguous dispatch after the workspace lane has finished its durable decision. */
     CompletionStage<ClaimInspection> recoverClaim(Registration registration, String attemptId);
+    CompletionStage<ClaimInspection> recoverClaim(Registration registration, String attemptId, io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner);
     /** Settles durable attempt evidence through the same workspace lane; uncertain results remain recoverable. */
     CompletionStage<FinalizationResult> finalizeAttempt(FinalizeAttempt command);
     /** Retry the previously committed terminal intent; never issues a new provider claim. */

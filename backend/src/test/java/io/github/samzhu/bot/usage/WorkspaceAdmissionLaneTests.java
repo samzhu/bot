@@ -1,5 +1,7 @@
 package io.github.samzhu.bot;
 
+import io.github.samzhu.bot.usage.SyntheticRunOwner;
+
 import io.github.samzhu.bot.conversation.ConversationOperations;
 import io.github.samzhu.bot.usage.UsageLedger;
 import io.github.samzhu.bot.usage.WorkspaceAdmission;
@@ -31,13 +33,13 @@ class WorkspaceAdmissionLaneTests {
     @Autowired io.github.samzhu.bot.usage.WorkspaceMonthlyBudgetOperations budgets;
     @Autowired JdbcTemplate jdbc;
     @Autowired DataSource dataSource;
-    record Fixture(WorkspaceAdmission.Registration registration,String attempt) {}
+    record Fixture(WorkspaceAdmission.Registration registration,String attempt, io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner) {}
     @Autowired io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations weekly;
     @Test void weeklyCapDeniesLaterDispatchWithoutCancellingRegistration() {
         String actor="weekly-user-"+UUID.randomUUID(),workspace=workspaces.personal(actor).id();
         var f=fixture(actor,workspace);
         weekly.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,actor,WorkspaceAdmission.Partition.REAL,actor,true,"0","0","weekly-key")).toCompletableFuture().join();
-        var decision=assertInstanceOf(WorkspaceAdmission.Decision.Denied.class,admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt())).toCompletableFuture().join());
+        var decision=assertInstanceOf(WorkspaceAdmission.Decision.Denied.class,admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt(),f.owner())).toCompletableFuture().join());
         assertEquals("WEEK_CAP",decision.reason().name());
         assertNull(jdbc.queryForObject("select started_at from provider_attempt where id=?",java.sql.Timestamp.class,f.attempt()));
         assertEquals(0,jdbc.queryForObject("select count(*) from workspace_admission_effect_outbox where registration_token=?",Integer.class,f.registration().token()));
@@ -45,8 +47,8 @@ class WorkspaceAdmissionLaneTests {
     @Test void terminalUnknownBlocksOnlyItsMemberWithWeeklyLimit() {
         String actor="weekly-unknown-"+UUID.randomUUID(),workspace=workspaces.personal(actor).id();
         var f=fixture(actor,workspace);
-        var allowed=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt())).toCompletableFuture().join());
-        assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),allowed.claim(),WorkspaceAdmission.TerminalKind.UNKNOWN)).toCompletableFuture().join());
+        var allowed=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt(),f.owner())).toCompletableFuture().join());
+        assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),allowed.claim(),WorkspaceAdmission.TerminalKind.UNKNOWN,null,f.owner())).toCompletableFuture().join());
         weekly.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,actor,WorkspaceAdmission.Partition.REAL,actor,true,"10","0","unknown")).toCompletableFuture().join();
         var denied=assertInstanceOf(WorkspaceAdmission.RegisterResult.Denied.class,admission.register(new WorkspaceAdmission.Register(workspace,UUID.randomUUID().toString(),actor,f.registration().conversationId(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join());
         assertEquals("WEEK_UNKNOWN",denied.reason().name());
@@ -54,10 +56,10 @@ class WorkspaceAdmissionLaneTests {
     @Test void weeklyCapDoesNotCancelClaimedAttemptButRejectsNextAttempt() {
         String actor="weekly-next-"+UUID.randomUUID(),workspace=workspaces.personal(actor).id();
         var f=fixture(actor,workspace);
-        assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt())).toCompletableFuture().join());
+        assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt(),f.owner())).toCompletableFuture().join());
         weekly.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,actor,WorkspaceAdmission.Partition.REAL,actor,true,"0","0","next-attempt")).toCompletableFuture().join();
-        String next=ledger.begin(new UsageLedger.Dispatch(f.registration().runId(),workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
-        var denied=assertInstanceOf(WorkspaceAdmission.Decision.Denied.class,admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),next)).toCompletableFuture().join());
+        String next=ledger.begin(new UsageLedger.Dispatch(f.registration().runId(),workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),f.owner());
+        var denied=assertInstanceOf(WorkspaceAdmission.Decision.Denied.class,admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),next,f.owner())).toCompletableFuture().join());
         assertEquals("WEEK_CAP",denied.reason().name());
         assertEquals("CLAIMED",jdbc.queryForObject("select status from workspace_admission_claim where attempt_id=?",String.class,f.attempt()));
         assertEquals(0,jdbc.queryForObject("select count(*) from workspace_admission_effect_outbox where registration_token=?",Integer.class,f.registration().token()));
@@ -68,7 +70,7 @@ class WorkspaceAdmissionLaneTests {
         var f=fixture(actor,workspace);
         jdbc.execute("alter table member_weekly_budget rename to member_weekly_budget_injected_failure");
         try {
-            var decision=admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt())).toCompletableFuture().join();
+            var decision=admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt(),f.owner())).toCompletableFuture().join();
             assertInstanceOf(WorkspaceAdmission.Decision.Denied.class,decision);
             assertEquals("RECOVERY_REQUIRED",((WorkspaceAdmission.Decision.Denied)decision).reason().name());
             assertNull(jdbc.queryForObject("select started_at from provider_attempt where id=?",java.sql.Timestamp.class,f.attempt()));
@@ -90,7 +92,7 @@ class WorkspaceAdmissionLaneTests {
                 if(waiting) break; Thread.yield();
             }
             assertTrue(waiting,"configuration must reach the database lock before dispatch is queued");
-            var dispatch=admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt())).toCompletableFuture();
+            var dispatch=admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt(),f.owner())).toCompletableFuture();
             connection.commit();
             assertEquals("APPLIED",config.get(5,TimeUnit.SECONDS).outcome());
             assertEquals("WEEK_CAP",assertInstanceOf(WorkspaceAdmission.Decision.Denied.class,dispatch.get(5,TimeUnit.SECONDS)).reason().name());
@@ -104,7 +106,7 @@ class WorkspaceAdmissionLaneTests {
             try(var statement=connection.prepareStatement("select id from provider_attempt where id=? for update")) {
                 statement.setString(1,f.attempt()); statement.executeQuery().close();
             }
-            var dispatch=admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt())).toCompletableFuture();
+            var dispatch=admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt(),f.owner())).toCompletableFuture();
             long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5); boolean waiting=false;
             while(System.nanoTime()<deadline) {
                 waiting=Boolean.TRUE.equals(jdbc.queryForObject("select exists(select 1 from pg_stat_activity where wait_event_type='Lock' and query like 'select run_id,workspace_id,actor_id,simulation,started_at,execution_outcome from provider_attempt%')",Boolean.class));
@@ -125,9 +127,10 @@ class WorkspaceAdmissionLaneTests {
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,
                 admission.register(new WorkspaceAdmission.Register(workspace,run,actor,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        var owner=SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
-        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
-        return new Fixture(registration,attempt);
+        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),owner);
+        return new Fixture(registration,attempt,owner);
     }
     @Test void cancellingReturnedStageDoesNotCancelClaimJob() throws Exception {
         String actor="lane-user-"+UUID.randomUUID(),workspace=workspaces.personal(actor).id();
@@ -138,7 +141,7 @@ class WorkspaceAdmissionLaneTests {
                 lock.setString(1,fixture.registration().token());
                 lock.executeQuery().close();
             }
-            var returned=admission.dispatch(new WorkspaceAdmission.Dispatch(fixture.registration(),fixture.attempt())).toCompletableFuture();
+            var returned=admission.dispatch(new WorkspaceAdmission.Dispatch(fixture.registration(),fixture.attempt(),fixture.owner())).toCompletableFuture();
             assertTrue(returned.cancel(true));
             connection.commit();
         }
@@ -155,14 +158,14 @@ class WorkspaceAdmissionLaneTests {
         var first=fixture(actor,workspace); var second=fixture(actor,workspace);
         var entered=new CountDownLatch(1); var release=new CountDownLatch(1);
         try {
-            var blocked=admission.dispatch(new WorkspaceAdmission.Dispatch(first.registration(),first.attempt())).thenApply(result -> {
+            var blocked=admission.dispatch(new WorkspaceAdmission.Dispatch(first.registration(),first.attempt(),first.owner())).thenApply(result -> {
                 entered.countDown();
                 try { if (!release.await(10,TimeUnit.SECONDS)) throw new AssertionError("callback timeout"); }
                 catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new RuntimeException(e); }
                 return result;
             });
             assertTrue(entered.await(5,TimeUnit.SECONDS));
-            var next=admission.dispatch(new WorkspaceAdmission.Dispatch(second.registration(),second.attempt())).toCompletableFuture().get(5,TimeUnit.SECONDS);
+            var next=admission.dispatch(new WorkspaceAdmission.Dispatch(second.registration(),second.attempt(),second.owner())).toCompletableFuture().get(5,TimeUnit.SECONDS);
             assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,next);
             release.countDown();
             assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,blocked.toCompletableFuture().get(5,TimeUnit.SECONDS));
@@ -172,7 +175,7 @@ class WorkspaceAdmissionLaneTests {
         String actor="saturation-user-"+UUID.randomUUID(),workspace=workspaces.personal(actor).id();
         var fixture=fixture(actor,workspace);
         var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(
-                new WorkspaceAdmission.Dispatch(fixture.registration(),fixture.attempt())).toCompletableFuture().join()).claim();
+                new WorkspaceAdmission.Dispatch(fixture.registration(),fixture.attempt(),fixture.owner())).toCompletableFuture().join()).claim();
         var entered=new CountDownLatch(4); var release=new CountDownLatch(1);
         try {
             for (int i=0;i<4;i++) admission.cancellationState(fixture.registration()).thenApply(result -> {
@@ -184,7 +187,7 @@ class WorkspaceAdmissionLaneTests {
             assertTrue(entered.await(5,TimeUnit.SECONDS));
             for (int i=0;i<256;i++) admission.cancellationState(fixture.registration());
             var result=admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(fixture.registration(),fixture.attempt(),claim,
-                    WorkspaceAdmission.TerminalKind.UNKNOWN)).toCompletableFuture();
+                    WorkspaceAdmission.TerminalKind.UNKNOWN,null,fixture.owner())).toCompletableFuture();
             boolean durable;
             try {
                 var value=result.get(2,TimeUnit.SECONDS);
@@ -222,7 +225,7 @@ class WorkspaceAdmissionLaneTests {
         } finally { release.countDown(); }
         java.util.concurrent.CompletableFuture.allOf(queued.toArray(java.util.concurrent.CompletableFuture[]::new)).get(10,TimeUnit.SECONDS);
         assertEquals(WorkspaceAdmission.CancellationState.NONE,admission.cancellationState(other.registration()).toCompletableFuture().get(5,TimeUnit.SECONDS).state());
-        assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(other.registration(),other.attempt())).toCompletableFuture().get(5,TimeUnit.SECONDS));
+        assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(other.registration(),other.attempt(),other.owner())).toCompletableFuture().get(5,TimeUnit.SECONDS));
     }
 
     @Test void acceptedFinalizationsRemainRecoverableWhenCriticalNotificationsAlsoSaturate() throws Exception {
@@ -231,13 +234,13 @@ class WorkspaceAdmissionLaneTests {
         for (int i=0;i<69;i++) {
             var f=fixture(actor,workspace); items.add(f);
             fences.add(assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(
-                    new WorkspaceAdmission.Dispatch(f.registration(),f.attempt())).toCompletableFuture().join()).claim());
+                    new WorkspaceAdmission.Dispatch(f.registration(),f.attempt(),f.owner())).toCompletableFuture().join()).claim());
         }
         var entered=new CountDownLatch(4); var release=new CountDownLatch(1);
         try {
             for (int i=0;i<4;i++) {
                 var f=items.get(i); var claim=fences.get(i);
-                admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),claim,WorkspaceAdmission.TerminalKind.UNKNOWN)).thenApply(result -> {
+                admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),claim,WorkspaceAdmission.TerminalKind.UNKNOWN,null,f.owner())).thenApply(result -> {
                     entered.countDown();
                     try { if (!release.await(30,TimeUnit.SECONDS)) throw new AssertionError("callback timeout"); }
                     catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new RuntimeException(e); }
@@ -246,10 +249,10 @@ class WorkspaceAdmissionLaneTests {
             }
             assertTrue(entered.await(10,TimeUnit.SECONDS));
             for (int i=4;i<68;i++) {
-                var f=items.get(i); admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),fences.get(i),WorkspaceAdmission.TerminalKind.UNKNOWN));
+                var f=items.get(i); admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),fences.get(i),WorkspaceAdmission.TerminalKind.UNKNOWN,null,f.owner()));
             }
             var last=items.get(68);
-            var result=admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(last.registration(),last.attempt(),fences.get(68),WorkspaceAdmission.TerminalKind.UNKNOWN)).toCompletableFuture();
+            var result=admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(last.registration(),last.attempt(),fences.get(68),WorkspaceAdmission.TerminalKind.UNKNOWN,null,last.owner())).toCompletableFuture();
             boolean persisted;
             try {
                 var outcome=result.get(2,TimeUnit.SECONDS);
@@ -268,13 +271,13 @@ class WorkspaceAdmissionLaneTests {
         for (int i=0;i<69;i++) {
             var f=fixture(actor,workspace); items.add(f);
             fences.add(assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(
-                    new WorkspaceAdmission.Dispatch(f.registration(),f.attempt())).toCompletableFuture().join()).claim());
+                    new WorkspaceAdmission.Dispatch(f.registration(),f.attempt(),f.owner())).toCompletableFuture().join()).claim());
         }
         var entered=new CountDownLatch(4); var release=new CountDownLatch(1);
         try {
             for (int i=0;i<4;i++) {
                 var f=items.get(i); var claim=fences.get(i);
-                admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),claim,WorkspaceAdmission.TerminalKind.UNKNOWN)).thenApply(result -> {
+                admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),claim,WorkspaceAdmission.TerminalKind.UNKNOWN,null,f.owner())).thenApply(result -> {
                     entered.countDown();
                     try { if (!release.await(30,TimeUnit.SECONDS)) throw new AssertionError("callback timeout"); }
                     catch (InterruptedException ex) { Thread.currentThread().interrupt(); throw new RuntimeException(ex); }
@@ -284,7 +287,7 @@ class WorkspaceAdmissionLaneTests {
             assertTrue(entered.await(10,TimeUnit.SECONDS));
             for (int i=4;i<69;i++) {
                 var f=items.get(i);
-                admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),fences.get(i),WorkspaceAdmission.TerminalKind.UNKNOWN));
+                admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),fences.get(i),WorkspaceAdmission.TerminalKind.UNKNOWN,null,f.owner()));
             }
             assertEquals("PENDING",jdbc.queryForObject("select state from workspace_admission_finalization where attempt_id=?",String.class,items.get(68).attempt()));
         } finally { release.countDown(); }
@@ -302,7 +305,7 @@ class WorkspaceAdmissionLaneTests {
         String actor="late-begin-user-"+UUID.randomUUID(),workspace=workspaces.personal(actor).id();
         var f=fixture(actor,workspace);
         admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),null,
-                WorkspaceAdmission.TerminalKind.NOT_DISPATCHED)).toCompletableFuture().join();
+                WorkspaceAdmission.TerminalKind.NOT_DISPATCHED,null,f.owner())).toCompletableFuture().join();
         jdbc.update("update chat_run set status='FAILED' where id=?",f.registration().runId());
         assertEquals(WorkspaceAdmission.TerminalRunCompletion.COMPLETED,
                 admission.completeTerminalRun(f.registration().runId()).toCompletableFuture().join());
@@ -315,11 +318,11 @@ class WorkspaceAdmissionLaneTests {
         String actor="intake-failure-"+UUID.randomUUID(),workspace=workspaces.personal(actor).id();
         var f=fixture(actor,workspace);
         var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(
-                new WorkspaceAdmission.Dispatch(f.registration(),f.attempt())).toCompletableFuture().join()).claim();
+                new WorkspaceAdmission.Dispatch(f.registration(),f.attempt(),f.owner())).toCompletableFuture().join()).claim();
         String function="fail_intake_"+UUID.randomUUID().toString().replace("-","");
         jdbc.execute("create function "+function+"() returns trigger language plpgsql as $$ begin if new.attempt_id='"+f.attempt()+"' then raise exception 'injected finalization intake failure'; end if; return new; end $$");
         jdbc.execute("create trigger "+function+" before insert on workspace_admission_finalization for each row execute function "+function+"()");
-        var command=new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),claim,WorkspaceAdmission.TerminalKind.UNKNOWN);
+        var command=new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),claim,WorkspaceAdmission.TerminalKind.UNKNOWN,null,f.owner());
         try {
             assertEquals(WorkspaceAdmission.FinalizationResult.RECOVERY_REQUIRED,admission.finalizeAttempt(command).toCompletableFuture().join());
             assertInstanceOf(WorkspaceAdmission.ClaimInspection.Unknown.class,admission.inspectClaim(f.registration(),f.attempt()).toCompletableFuture().join());
@@ -327,7 +330,7 @@ class WorkspaceAdmissionLaneTests {
             assertEquals("IN_PROGRESS",jdbc.queryForObject("select execution_outcome from provider_attempt where id=?",String.class,f.attempt()));
             jdbc.execute("drop trigger "+function+" on workspace_admission_finalization");
             assertEquals(claim,assertInstanceOf(WorkspaceAdmission.ClaimInspection.Found.class,
-                    admission.recoverClaim(f.registration(),f.attempt()).toCompletableFuture().join()).claim());
+                    admission.recoverClaim(f.registration(),f.attempt(),f.owner()).toCompletableFuture().join()).claim());
             assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(command).toCompletableFuture().join());
         } finally {
             jdbc.execute("drop trigger if exists "+function+" on workspace_admission_finalization");
@@ -345,7 +348,7 @@ class WorkspaceAdmissionLaneTests {
             try(var lock=connection.prepareStatement("select id from provider_attempt where id=? for update")) {
                 lock.setString(1,fixture.attempt()); lock.executeQuery().close();
             }
-            var write=java.util.concurrent.CompletableFuture.runAsync(()->ledger.recordResponseId(fixture.attempt(),"synthetic-response"));
+            var write=java.util.concurrent.CompletableFuture.runAsync(()->ledger.recordResponseId(fixture.attempt(),"synthetic-response",fixture.owner()));
             long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
             boolean blocked;
             do {
@@ -375,7 +378,7 @@ class WorkspaceAdmissionLaneTests {
             try(var lock=connection.prepareStatement("select id from provider_attempt where id=? for update")) {
                 lock.setString(1,fixture.attempt()); lock.executeQuery().close();
             }
-            var write=java.util.concurrent.CompletableFuture.supplyAsync(()->ledger.markDispatched(fixture.attempt(),java.time.Clock::instant));
+            var write=java.util.concurrent.CompletableFuture.supplyAsync(()->ledger.markDispatched(fixture.attempt(),java.time.Clock::instant,fixture.owner()));
             long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
             boolean blocked;
             do {
@@ -399,7 +402,7 @@ class WorkspaceAdmissionLaneTests {
         for (int i=0;i<69;i++) {
             var f=fixture(actor,workspace); items.add(f);
             fences.add(assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(
-                    new WorkspaceAdmission.Dispatch(f.registration(),f.attempt())).toCompletableFuture().join()).claim());
+                    new WorkspaceAdmission.Dispatch(f.registration(),f.attempt(),f.owner())).toCompletableFuture().join()).claim());
         }
         var last=items.getLast();
         jdbc.update("update chat_run set status='FAILED' where id=?",last.registration().runId());
@@ -415,7 +418,7 @@ class WorkspaceAdmissionLaneTests {
             for (int i=0;i<256;i++) admission.cancellationState(last.registration());
             for (int i=0;i<4;i++) {
                 var f=items.get(i); var claim=fences.get(i);
-                admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),claim,WorkspaceAdmission.TerminalKind.UNKNOWN)).thenApply(value -> {
+                admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),claim,WorkspaceAdmission.TerminalKind.UNKNOWN,null,f.owner())).thenApply(value -> {
                     criticalEntered.countDown();
                     try { if (!release.await(30,TimeUnit.SECONDS)) throw new AssertionError("critical callback timeout"); }
                     catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new RuntimeException(e); }
@@ -425,12 +428,12 @@ class WorkspaceAdmissionLaneTests {
             assertTrue(criticalEntered.await(10,TimeUnit.SECONDS));
             for (int i=4;i<68;i++) {
                 var f=items.get(i);
-                admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),fences.get(i),WorkspaceAdmission.TerminalKind.UNKNOWN));
+                admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),fences.get(i),WorkspaceAdmission.TerminalKind.UNKNOWN,null,f.owner()));
             }
             var denied=assertInstanceOf(WorkspaceAdmission.RegisterResult.Denied.class,admission.register(new WorkspaceAdmission.Register(
                     workspace,"overload-"+UUID.randomUUID(),actor,last.registration().conversationId(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().get(5,TimeUnit.SECONDS));
             assertEquals(WorkspaceAdmission.Reason.OVERLOADED,denied.reason());
-            admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(last.registration(),last.attempt(),fences.getLast(),WorkspaceAdmission.TerminalKind.UNKNOWN));
+            admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(last.registration(),last.attempt(),fences.getLast(),WorkspaceAdmission.TerminalKind.UNKNOWN,null,last.owner()));
             assertEquals("PENDING",jdbc.queryForObject("select state from workspace_admission_finalization where attempt_id=?",String.class,last.attempt()));
         } finally { release.countDown(); }
         long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(20);
@@ -449,7 +452,7 @@ class WorkspaceAdmissionLaneTests {
         String actor="lock-order-"+UUID.randomUUID(),workspace=workspaces.personal(actor).id();
         var fixture=fixture(actor,workspace);
         assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(
-                new WorkspaceAdmission.Dispatch(fixture.registration(),fixture.attempt())).toCompletableFuture().join());
+                new WorkspaceAdmission.Dispatch(fixture.registration(),fixture.attempt(),fixture.owner())).toCompletableFuture().join());
         long advisory=Math.abs(UUID.randomUUID().getMostSignificantBits());
         String function="pause_source_"+UUID.randomUUID().toString().replace("-","");
         jdbc.execute("create function "+function+"() returns trigger language plpgsql as $$ begin if new.attempt_id='"+fixture.attempt()+"' then perform pg_advisory_xact_lock("+advisory+"); end if; return new; end $$");
@@ -463,7 +466,7 @@ class WorkspaceAdmissionLaneTests {
             try(var s=registrationLock.prepareStatement("select token from workspace_admission_registration where token=? for update")) { s.setString(1,fixture.registration().token()); s.executeQuery().close(); }
             try(var s=sourceLatch.prepareStatement("select pg_advisory_xact_lock(?)")) { s.setLong(1,advisory); s.executeQuery().close(); }
             append=java.util.concurrent.CompletableFuture.runAsync(()->ledger.append(fixture.attempt(),new UsageLedger.Snapshot(
-                    "lock-order-event",1,"FINAL","FAKE_RAW","1","1","1","COMPLETE","{\"input_tokens\":1}")));
+                    "lock-order-event",1,"FINAL","FAKE_RAW","1","1","1","COMPLETE","{\"input_tokens\":1}"),fixture.owner()));
             long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5); boolean blocked;
             do {
                 blocked=Boolean.TRUE.equals(jdbc.queryForObject("select exists(select 1 from pg_stat_activity where ?=any(pg_blocking_pids(pid)) or ?=any(pg_blocking_pids(pid)))",Boolean.class,registrationPid,sourcePid));
@@ -491,7 +494,7 @@ class WorkspaceAdmissionLaneTests {
         String actor="intake-source-"+UUID.randomUUID(),workspace=workspaces.personal(actor).id();
         var fixture=fixture(actor,workspace);
         var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(
-                new WorkspaceAdmission.Dispatch(fixture.registration(),fixture.attempt())).toCompletableFuture().join()).claim();
+                new WorkspaceAdmission.Dispatch(fixture.registration(),fixture.attempt(),fixture.owner())).toCompletableFuture().join()).claim();
         var scope=new io.github.samzhu.bot.usage.WorkspaceMonthlyBudgetOperations.Scope(workspace,WorkspaceAdmission.Partition.REAL,
                 java.time.YearMonth.now(java.time.ZoneId.of("Asia/Taipei")));
         budgets.configure(new io.github.samzhu.bot.usage.WorkspaceMonthlyBudgetOperations.ConfigureCommand(scope,actor,true,java.math.BigDecimal.ZERO,0)).toCompletableFuture().join();
@@ -505,9 +508,9 @@ class WorkspaceAdmissionLaneTests {
             latch.setAutoCommit(false); int latchPid;
             try(var s=latch.createStatement();var rs=s.executeQuery("select pg_backend_pid()")) { rs.next(); latchPid=rs.getInt(1); }
             try(var s=latch.prepareStatement("select pg_advisory_xact_lock(?)")) { s.setLong(1,advisory); s.executeQuery().close(); }
-            java.util.function.Supplier<Object> source=()-> { ledger.append(fixture.attempt(),new UsageLedger.Snapshot("ordered-source",1,"FINAL","FAKE_RAW","1","1","1","COMPLETE","{\"input_tokens\":1}")); return null; };
+            java.util.function.Supplier<Object> source=()-> { ledger.append(fixture.attempt(),new UsageLedger.Snapshot("ordered-source",1,"FINAL","FAKE_RAW","1","1","1","COMPLETE","{\"input_tokens\":1}"),fixture.owner()); return null; };
             java.util.function.Supplier<Object> terminal=()->admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(
-                    fixture.registration(),fixture.attempt(),claim,WorkspaceAdmission.TerminalKind.SUCCEEDED)).toCompletableFuture().join();
+                    fixture.registration(),fixture.attempt(),claim,WorkspaceAdmission.TerminalKind.SUCCEEDED,null,fixture.owner())).toCompletableFuture().join();
             var first=java.util.concurrent.CompletableFuture.supplyAsync(order.equals("SOURCE_FIRST")?source:terminal);
             long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5); Integer firstPid=null;
             do {
@@ -544,20 +547,20 @@ class WorkspaceAdmissionLaneTests {
         jdbc.execute("create function "+function+"() returns trigger language plpgsql as $$ begin if new.attempt_id='"+fixture.attempt()+"' then raise exception 'injected claim failure'; end if; return new; end $$");
         jdbc.execute("create trigger "+function+" before insert on workspace_admission_claim for each row execute function "+function+"()");
         try {
-            var denied=assertInstanceOf(WorkspaceAdmission.Decision.Denied.class,admission.dispatch(new WorkspaceAdmission.Dispatch(fixture.registration(),fixture.attempt())).toCompletableFuture().join());
+            var denied=assertInstanceOf(WorkspaceAdmission.Decision.Denied.class,admission.dispatch(new WorkspaceAdmission.Dispatch(fixture.registration(),fixture.attempt(),fixture.owner())).toCompletableFuture().join());
             assertEquals(WorkspaceAdmission.Reason.RECOVERY_REQUIRED,denied.reason());
             assertNull(jdbc.queryForObject("select started_at from provider_attempt where id=?",java.sql.Timestamp.class,fixture.attempt()));
             assertInstanceOf(WorkspaceAdmission.ClaimInspection.Unknown.class,admission.inspectClaim(fixture.registration(),fixture.attempt()).toCompletableFuture().join());
             assertEquals(WorkspaceAdmission.FinalizationResult.RECOVERY_REQUIRED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(
-                    fixture.registration(),fixture.attempt(),null,WorkspaceAdmission.TerminalKind.NOT_DISPATCHED)).toCompletableFuture().join());
+                    fixture.registration(),fixture.attempt(),null,WorkspaceAdmission.TerminalKind.NOT_DISPATCHED,null,fixture.owner())).toCompletableFuture().join());
             assertEquals("IN_PROGRESS",jdbc.queryForObject("select execution_outcome from provider_attempt where id=?",String.class,fixture.attempt()));
-            assertThrows(RuntimeException.class,() -> ledger.notDispatched(fixture.attempt(),"test"));
+            assertThrows(RuntimeException.class,() -> ledger.notDispatched(fixture.attempt(),"test",fixture.owner()));
             assertEquals("IN_PROGRESS",jdbc.queryForObject("select execution_outcome from provider_attempt where id=?",String.class,fixture.attempt()));
             jdbc.execute("drop trigger "+function+" on workspace_admission_claim");
-            assertInstanceOf(WorkspaceAdmission.ClaimInspection.Absent.class,admission.recoverClaim(fixture.registration(),fixture.attempt()).toCompletableFuture().join());
-            assertInstanceOf(WorkspaceAdmission.Decision.Denied.class,admission.dispatch(new WorkspaceAdmission.Dispatch(fixture.registration(),fixture.attempt())).toCompletableFuture().join());
+            assertInstanceOf(WorkspaceAdmission.ClaimInspection.Absent.class,admission.recoverClaim(fixture.registration(),fixture.attempt(),fixture.owner()).toCompletableFuture().join());
+            assertInstanceOf(WorkspaceAdmission.Decision.Denied.class,admission.dispatch(new WorkspaceAdmission.Dispatch(fixture.registration(),fixture.attempt(),fixture.owner())).toCompletableFuture().join());
             assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(
-                    fixture.registration(),fixture.attempt(),null,WorkspaceAdmission.TerminalKind.NOT_DISPATCHED)).toCompletableFuture().join());
+                    fixture.registration(),fixture.attempt(),null,WorkspaceAdmission.TerminalKind.NOT_DISPATCHED,null,fixture.owner())).toCompletableFuture().join());
         } finally {
             jdbc.execute("drop trigger if exists "+function+" on workspace_admission_claim");
             jdbc.execute("drop function if exists "+function+"()");
@@ -569,7 +572,7 @@ class WorkspaceAdmissionLaneTests {
         var f=fixture(actor,workspace);
         jdbc.update("update provider_attempt set simulation=true where id=?",f.attempt());
         var decision=assertInstanceOf(WorkspaceAdmission.Decision.Denied.class,admission.dispatch(
-                new WorkspaceAdmission.Dispatch(f.registration(),f.attempt())).toCompletableFuture().join());
+                new WorkspaceAdmission.Dispatch(f.registration(),f.attempt(),f.owner())).toCompletableFuture().join());
         assertEquals(WorkspaceAdmission.Reason.UNAUTHORIZED,decision.reason());
         assertNull(jdbc.queryForObject("select started_at from provider_attempt where id=?",java.sql.Timestamp.class,f.attempt()));
         assertEquals(0,jdbc.queryForObject("select count(*) from workspace_admission_dispatch where attempt_id=?",Integer.class,f.attempt()));
@@ -583,7 +586,7 @@ class WorkspaceAdmissionLaneTests {
         assertEquals(WorkspaceAdmission.FinalizationResult.RECOVERY_REQUIRED,admission.finalizeAttempt(
                 new WorkspaceAdmission.FinalizeAttempt(fake,f.attempt(),null,WorkspaceAdmission.TerminalKind.NOT_DISPATCHED)).toCompletableFuture().join());
         assertEquals(WorkspaceAdmission.CancellationState.NONE,admission.cancellationState(f.registration()).toCompletableFuture().join().state());
-        assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt())).toCompletableFuture().join());
+        assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(f.registration(),f.attempt(),f.owner())).toCompletableFuture().join());
     }
 
     @Test void attemptBeginWaitsBehindEarlierWorkspaceClaim() throws Exception {
@@ -596,9 +599,9 @@ class WorkspaceAdmissionLaneTests {
             try(var lock=connection.prepareStatement("select token from workspace_admission_registration where token=? for update")) {
                 lock.setString(1,fixture.registration().token()); lock.executeQuery().close();
             }
-            claim=admission.dispatch(new WorkspaceAdmission.Dispatch(fixture.registration(),fixture.attempt()));
+            claim=admission.dispatch(new WorkspaceAdmission.Dispatch(fixture.registration(),fixture.attempt(),fixture.owner()));
             var metadata=new UsageLedger.Dispatch(fixture.registration().runId(),workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN");
-            later=java.util.concurrent.CompletableFuture.supplyAsync(() -> ledger.begin(metadata));
+            later=java.util.concurrent.CompletableFuture.supplyAsync(() -> ledger.begin(metadata,fixture.owner()));
             assertThrows(java.util.concurrent.TimeoutException.class,() -> later.get(500,TimeUnit.MILLISECONDS));
             connection.commit();
         }
@@ -611,7 +614,7 @@ class WorkspaceAdmissionLaneTests {
     void fullLaneQueueAndCriticalNotificationsPreserveAcceptedTerminalIntent(WorkspaceAdmission.TerminalKind kind) throws Exception {
         String actor="full-lane-"+UUID.randomUUID(),workspace=workspaces.personal(actor).id();
         var target=fixture(actor,workspace); var blocker=fixture(actor,workspace);
-        var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(target.registration(),target.attempt())).toCompletableFuture().join()).claim();
+        var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(target.registration(),target.attempt(),target.owner())).toCompletableFuture().join()).claim();
         jdbc.update("update chat_run set status=? where id=?",kind==WorkspaceAdmission.TerminalKind.CANCELLED?"CANCELLED":"FAILED",target.registration().runId());
         var entered=new CountDownLatch(4); var release=new CountDownLatch(1);
         try {
@@ -634,7 +637,7 @@ class WorkspaceAdmissionLaneTests {
                 for(int i=0;i<256;i++) queued.add(admission.cancellationState(target.registration()).toCompletableFuture());
                 var denied=assertInstanceOf(WorkspaceAdmission.RegisterResult.Denied.class,admission.register(new WorkspaceAdmission.Register(workspace,"extra-"+UUID.randomUUID(),actor,target.registration().conversationId(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().get(3,TimeUnit.SECONDS));
                 assertEquals(WorkspaceAdmission.Reason.OVERLOADED,denied.reason(),"the actual workspace queue rejects its 257th waiting admission");
-                assertEquals(WorkspaceAdmission.FinalizationResult.RECOVERY_REQUIRED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(target.registration(),target.attempt(),claim,kind)).toCompletableFuture().get(3,TimeUnit.SECONDS));
+                assertEquals(WorkspaceAdmission.FinalizationResult.RECOVERY_REQUIRED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(target.registration(),target.attempt(),claim,kind,null,target.owner())).toCompletableFuture().get(3,TimeUnit.SECONDS));
                 assertEquals("PENDING",jdbc.queryForObject("select state from workspace_admission_finalization where attempt_id=?",String.class,target.attempt()));
                 connection.rollback(); release.countDown();
                 occupying.handle((v,e)->null).get(10,TimeUnit.SECONDS);

@@ -3,24 +3,19 @@ package io.github.samzhu.bot.bootstrap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationArguments;
-import org.springframework.boot.ApplicationRunner;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
-import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-@Component
-@org.springframework.core.annotation.Order(10)
-public class DatabaseInitializer implements ApplicationRunner {
+public class DatabaseInitializer {
 
     private static final Logger log = LoggerFactory.getLogger(DatabaseInitializer.class);
 
@@ -30,27 +25,11 @@ public class DatabaseInitializer implements ApplicationRunner {
         this.jdbcTemplate = jdbcTemplate;
     }
 
-    @Override
     @Transactional(rollbackFor = Exception.class)
     public void run(ApplicationArguments args) throws Exception {
-        log.info("Starting schema initialization and orphan recovery...");
-
+        // Serialize release processes until the migration transaction commits.
+        jdbcTemplate.execute("SELECT pg_advisory_xact_lock(7620261124)");
         applyMigrations("classpath:db/migration/*.sql", "schema_version");
-
-        // Server restart recovery: transition lingering PENDING/RUNNING runs to FAILED
-        int recovered = jdbcTemplate.update("""
-            UPDATE chat_run
-            SET status = 'FAILED',
-                error_message = 'SYSTEM_RESTART_ORPHAN',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE status IN ('PENDING', 'RUNNING');
-        """);
-
-        if (recovered > 0) {
-            log.warn("Recovered {} orphaned running/pending runs to FAILED on startup.", recovered);
-        } else {
-            log.info("No orphaned runs detected on startup.");
-        }
     }
 
     public int applyMigrations(String locationPattern, String versionTable) throws Exception {

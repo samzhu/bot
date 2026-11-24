@@ -104,7 +104,7 @@ class PricingPublishIntegrationTests {
             assertEquals(next.id(),catalog.sample(java.time.Clock.systemUTC(),java.time.Clock::instant).revisionId());
             assertThrows(IllegalStateException.class,() -> catalog.publish("race-rev-old","changed-source",java.util.List.of()));
             var restored=new io.github.samzhu.bot.usage.internal.pricing.CatalogActivation(jdbc,transactionManager);
-            restored.restore();
+            restored.restore(true);
             var decision=restored.sample(java.time.Clock.systemUTC(),java.time.Clock::instant);
             assertEquals(next.id(),decision.revisionId());
         } finally { proceed.countDown(); executor.shutdownNow(); }

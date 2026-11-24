@@ -212,14 +212,14 @@ class UsageInvocationDurabilityIntegrationTests {
         assertEquals(0, count("SELECT count(*) FROM ai_session_event WHERE session_id=?", conversation));
 
         // Fail at the public ledger boundary before the actual provider can be invoked.
-        doThrow(new IllegalStateException("synthetic attempt persistence failure")).when(ledger).begin(any());
+        doThrow(new IllegalStateException("synthetic attempt persistence failure")).when(ledger).begin(any(), any(io.github.samzhu.bot.usage.RunOwnershipGuard.Fence.class));
         try {
             var failed = post("/api/conversations/" + conversation + "/runs", Map.of(
                     "clientRequestId", "durability-fail-" + UUID.randomUUID(), "message", "test input"));
             assertTrue(failed.statusCode() >= 500 || (failed.statusCode() == 200
                     && failed.body().contains("run.failed") && !failed.body().contains("run.completed")),
                     "A failed ledger write must be observable as an error: HTTP " + failed.statusCode() + " " + failed.body());
-            verify(ledger, times(1)).begin(any());
+            verify(ledger, times(1)).begin(any(), any(io.github.samzhu.bot.usage.RunOwnershipGuard.Fence.class));
             assertEquals(0, FAKE.calls.get());
             assertEquals(0, FAKE.streams.get());
             assertEquals(0, FAKE.subscriptions.get());
@@ -308,7 +308,7 @@ class UsageInvocationDurabilityIntegrationTests {
             persisted.countDown();
             if (!release.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("Timed out waiting for revocation");
             return attempt;
-        }).when(ledger).begin(any());
+        }).when(ledger).begin(any(), any(io.github.samzhu.bot.usage.RunOwnershipGuard.Fence.class));
 
         CompletableFuture<HttpResponse<String>> pending = CompletableFuture.supplyAsync(() -> {
             try {
@@ -443,7 +443,7 @@ class UsageInvocationDurabilityIntegrationTests {
             persisted.countDown();
             if (!release.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("begin latch timed out");
             return attempt;
-        }).when(ledger).begin(any());
+        }).when(ledger).begin(any(), any(io.github.samzhu.bot.usage.RunOwnershipGuard.Fence.class));
         var pending = startAsync(conversation, requestId);
         try {
             assertTrue(persisted.await(10, TimeUnit.SECONDS));
@@ -666,7 +666,7 @@ class UsageInvocationDurabilityIntegrationTests {
             persisted.countDown();
             if (!release.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("begin latch timed out");
             return id;
-        }).when(ledger).begin(any());
+        }).when(ledger).begin(any(), any(io.github.samzhu.bot.usage.RunOwnershipGuard.Fence.class));
         var pending = startAsync(conversation, requestId);
         try {
             assertTrue(persisted.await(10, TimeUnit.SECONDS));
@@ -794,7 +794,7 @@ class UsageInvocationDurabilityIntegrationTests {
             persisted.countDown();
             if (!releaseBegin.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("begin latch timed out");
             return id;
-        }).when(ledger).begin(any());
+        }).when(ledger).begin(any(), any(io.github.samzhu.bot.usage.RunOwnershipGuard.Fence.class));
         doAnswer(invocation -> {
             markEntered.countDown();
             return invocation.callRealMethod();
@@ -854,8 +854,8 @@ class UsageInvocationDurabilityIntegrationTests {
         String sentinel = "issue33-exception-secret-sentinel";
         try {
             switch (source) {
-                case "append" -> doThrow(new IllegalStateException(sentinel)).doCallRealMethod().when(ledger).append(anyString(), any());
-                case "responseId" -> doThrow(new IllegalStateException(sentinel)).doCallRealMethod().when(ledger).recordResponseId(anyString(), anyString());
+                case "append" -> doThrow(new IllegalStateException(sentinel)).doCallRealMethod().when(ledger).append(anyString(), any(), any(io.github.samzhu.bot.usage.RunOwnershipGuard.Fence.class));
+                case "responseId" -> doThrow(new IllegalStateException(sentinel)).doCallRealMethod().when(ledger).recordResponseId(anyString(), anyString(), any(io.github.samzhu.bot.usage.RunOwnershipGuard.Fence.class));
                 case "capture" -> doThrow(new IllegalStateException(sentinel)).doCallRealMethod().when(captureAdapter).capture(any(), anyString(), anyLong());
                 default -> throw new IllegalArgumentException(source);
             }

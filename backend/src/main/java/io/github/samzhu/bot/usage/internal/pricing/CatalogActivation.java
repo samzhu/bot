@@ -1,8 +1,6 @@
 package io.github.samzhu.bot.usage.internal.pricing;
 
 import io.github.samzhu.bot.pricing.PriceCatalog;
-import org.springframework.boot.context.event.ApplicationReadyEvent;
-import org.springframework.context.event.EventListener;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -36,6 +34,31 @@ public class CatalogActivation {
     }
     public Revision publish(String sourceRevision, String sourceReference, List<PriceCatalog.Entry> entries) {
         if (sourceRevision == null || sourceRevision.isBlank() || sourceReference == null || sourceReference.isBlank()) throw new IllegalArgumentException("source and revision required");
+        validateEntries(entries);
+        String id=UUID.randomUUID().toString();
+        String hash=contentHash(sourceReference,entries);
+        Revision created=transactions.execute(tx -> {
+            var inserted=jdbc.query("insert into pricing_catalog_revision(id,source_reference,source_revision,content_hash) values (?,?,?,?) on conflict (source_revision) do nothing returning id,generation",(rs,n)->new Revision(rs.getString(1),rs.getLong(2)),id,sourceReference,sourceRevision,hash);
+            if (inserted.isEmpty()) {
+                var existing=jdbc.queryForMap("select id,generation,content_hash from pricing_catalog_revision where source_revision=?",sourceRevision);
+                if (!hash.equals(existing.get("content_hash"))) throw new IllegalStateException("Catalog revision payload conflict");
+                return new Revision((String)existing.get("id"),((Number)existing.get("generation")).longValue());
+            }
+            long generation=inserted.getFirst().generation();
+            for (var e:entries) {
+                String rates;
+                try { rates=json.writeValueAsString(e.snapshot().rates()); } catch(Exception ex) { throw new IllegalArgumentException(ex); }
+                String metadata;
+                try { metadata=e.metadata()==null ? null : json.writeValueAsString(e.metadata()); } catch(Exception ex) { throw new IllegalArgumentException(ex); }
+                jdbc.update("insert into pricing_catalog_entry(id,revision_id,provider,endpoint,model,channel,price_revision,effective_from,effective_until,rates,metadata) values (?,?,?,?,?,?,?,?,?,?::jsonb,?::jsonb)",
+                    UUID.randomUUID().toString(),id,e.snapshot().provider(),e.snapshot().endpoint(),e.snapshot().model(),e.snapshot().channel(),e.snapshot().revision(),Timestamp.from(e.fromInclusive()),Timestamp.from(e.untilExclusive()),rates,metadata);
+            }
+            return new Revision(id,generation);
+        });
+        activate(created);
+        return created;
+    }
+    private void validateEntries(List<PriceCatalog.Entry> entries) {
         // Reject invalid rates before committing a revision that dispatch could sample.
         for (var entry : entries) {
             var price = entry.snapshot();
@@ -60,28 +83,6 @@ public class CatalogActivation {
                     throw new IllegalArgumentException("Overlapping catalog entries");
             }
         }
-        String id=UUID.randomUUID().toString();
-        String hash=contentHash(sourceReference,entries);
-        Revision created=transactions.execute(tx -> {
-            var inserted=jdbc.query("insert into pricing_catalog_revision(id,source_reference,source_revision,content_hash) values (?,?,?,?) on conflict (source_revision) do nothing returning id,generation",(rs,n)->new Revision(rs.getString(1),rs.getLong(2)),id,sourceReference,sourceRevision,hash);
-            if (inserted.isEmpty()) {
-                var existing=jdbc.queryForMap("select id,generation,content_hash from pricing_catalog_revision where source_revision=?",sourceRevision);
-                if (!hash.equals(existing.get("content_hash"))) throw new IllegalStateException("Catalog revision payload conflict");
-                return new Revision((String)existing.get("id"),((Number)existing.get("generation")).longValue());
-            }
-            long generation=inserted.getFirst().generation();
-            for (var e:entries) {
-                String rates;
-                try { rates=json.writeValueAsString(e.snapshot().rates()); } catch(Exception ex) { throw new IllegalArgumentException(ex); }
-                String metadata;
-                try { metadata=e.metadata()==null ? null : json.writeValueAsString(e.metadata()); } catch(Exception ex) { throw new IllegalArgumentException(ex); }
-                jdbc.update("insert into pricing_catalog_entry(id,revision_id,provider,endpoint,model,channel,price_revision,effective_from,effective_until,rates,metadata) values (?,?,?,?,?,?,?,?,?,?::jsonb,?::jsonb)",
-                    UUID.randomUUID().toString(),id,e.snapshot().provider(),e.snapshot().endpoint(),e.snapshot().model(),e.snapshot().channel(),e.snapshot().revision(),Timestamp.from(e.fromInclusive()),Timestamp.from(e.untilExclusive()),rates,metadata);
-            }
-            return new Revision(id,generation);
-        });
-        activate(created);
-        return created;
     }
     private String contentHash(String source, List<PriceCatalog.Entry> entries) {
         try {
@@ -99,11 +100,18 @@ public class CatalogActivation {
             return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
         } catch(Exception e) { throw new IllegalArgumentException("Invalid catalog",e); }
     }
+    public void verifyPublished(String revision, String source, List<PriceCatalog.Entry> entries) {
+        validateEntries(entries);
+        var hashes = jdbc.queryForList("select content_hash from pricing_catalog_revision where source_revision=?", String.class, revision);
+        if (hashes.isEmpty()) throw new IllegalStateException("Release provisioning required: configured pricing catalog is missing");
+        if (!contentHash(source, entries).equals(hashes.getFirst()))
+            throw new IllegalStateException("Catalog revision payload conflict");
+    }
     void activate(Revision revision) { synchronized(lock) { if(active==null || revision.generation()>active.generation()) active=revision; } }
-    @EventListener(ApplicationReadyEvent.class)
-    @org.springframework.core.annotation.Order(org.springframework.core.Ordered.HIGHEST_PRECEDENCE)
-    public void restore() {
+    public void restore(boolean required) {
         var rows=jdbc.query("select id,generation from pricing_catalog_revision order by generation desc limit 1",(rs,n)->new Revision(rs.getString(1),rs.getLong(2)));
-        if (!rows.isEmpty()) activate(rows.getFirst());
+        if (rows.isEmpty()) {
+            if (required) throw new IllegalStateException("Release provisioning required: pricing catalog is missing");
+        } else activate(rows.getFirst());
     }
 }

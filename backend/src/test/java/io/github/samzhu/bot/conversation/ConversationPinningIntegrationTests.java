@@ -36,7 +36,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(
-        classes = {BotApplication.class, ConversationPinningIntegrationTests.PostgresTestConfig.class},
+        classes = {BotApplication.class, ConversationPinningIntegrationTests.PostgresTestConfig.class, io.github.samzhu.bot.TestProvisioningConfiguration.class},
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT
 )
 @ActiveProfiles("test")

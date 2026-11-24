@@ -52,6 +52,9 @@ public class RunHandle {
     private final StringBuilder fullReply = new StringBuilder();
 
     private volatile io.github.samzhu.bot.usage.WorkspaceAdmission.Registration admissionRegistration;
+    private volatile io.github.samzhu.bot.usage.RunOwnershipGuard.Fence ownershipFence;
+    public void setOwnershipFence(io.github.samzhu.bot.usage.RunOwnershipGuard.Fence fence) { this.ownershipFence=fence; }
+    public io.github.samzhu.bot.usage.RunOwnershipGuard.Fence ownershipFence() { return ownershipFence; }
     private volatile boolean admissionCancelledBeforeClaim;
     private final java.util.concurrent.atomic.AtomicReference<io.github.samzhu.bot.usage.WorkspaceAdmission.ClaimFence> admissionClaim = new java.util.concurrent.atomic.AtomicReference<>();
     public void setAdmissionRegistration(io.github.samzhu.bot.usage.WorkspaceAdmission.Registration registration) {

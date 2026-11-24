@@ -122,6 +122,16 @@ tasks.named('test') {
 	useJUnitPlatform()
 }
 
+springBoot {
+	mainClass = project.hasProperty('releaseAdmin') ?
+			'io.github.samzhu.bot.bootstrap.ReleaseProvisioningApplication' : 'io.github.samzhu.bot.BotApplication'
+}
+
+tasks.named('bootBuildImage') {
+	// External environment supplies configuration; Paketo bindings are unused and incompatible with Boot 4.2.
+	environment['BP_SPRING_CLOUD_BINDINGS_DISABLED'] = 'true'
+}
+
 // The browser fixture is test-only and must never select the production main class.
 tasks.named('bootTestRun') {
 	mainClass = 'io.github.samzhu.bot.BrowserFixtureApplication'

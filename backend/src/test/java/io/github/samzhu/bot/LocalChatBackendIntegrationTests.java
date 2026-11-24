@@ -952,11 +952,12 @@ class LocalChatBackendIntegrationTests {
         databaseInitializer.run(null);
 
         ChatRun recovered = chatRunRepository.findById(orphanRunId).orElseThrow();
-        assertEquals(RunStatus.FAILED.name(), recovered.status());
-        assertEquals("SYSTEM_RESTART_ORPHAN", recovered.errorMessage());
+        assertEquals(RunStatus.RUNNING.name(), recovered.status());
+        assertNull(recovered.errorMessage());
 
         // Re-run databaseInitializer to test SQL re-entrancy
         assertDoesNotThrow(() -> databaseInitializer.run(null));
+        jdbcTemplate.update("delete from chat_run where id = ?", orphanRunId);
     }
 
     @Test
@@ -2016,7 +2017,7 @@ class LocalChatBackendIntegrationTests {
         Instant now = Instant.now();
 
         // 1. Insert chat_run in conv1
-        ChatRun run = new ChatRun(runId, conv1, "req-cfk", "hello", RunStatus.RUNNING.name(), "LOCAL", null, now, now);
+        ChatRun run = new ChatRun(runId, conv1, "req-cfk", "hello", RunStatus.COMPLETED.name(), "LOCAL", null, now, now);
         jdbcAggregateTemplate.insert(run);
 
         // 2. Inserting message with conv2 (mismatched conversation_id) must fail composite FK fk_msg_conv_run
@@ -2084,7 +2085,7 @@ class LocalChatBackendIntegrationTests {
         // 4. Send message to conv1 (the older conversation)
         String runId = UUID.randomUUID().toString();
         Instant now = Instant.now();
-        ChatRun run = new ChatRun(runId, conv1, "req-touch-order", "Order message", RunStatus.RUNNING.name(), "LOCAL", null, now, now);
+        ChatRun run = new ChatRun(runId, conv1, "req-touch-order", "Order message", RunStatus.COMPLETED.name(), "LOCAL", null, now, now);
         jdbcAggregateTemplate.insert(run);
         conversationOperations.appendMessage(conv1, "USER", "Order message", runId, false);
 

@@ -32,7 +32,7 @@ import java.util.stream.StreamSupport;
 import static org.junit.jupiter.api.Assertions.*;
 
 @io.github.samzhu.bot.UseTestFakes
-@SpringBootTest(classes = {BotApplication.class, ConversationSearchIntegrationTests.PostgresConfig.class},
+@SpringBootTest(classes = {BotApplication.class, ConversationSearchIntegrationTests.PostgresConfig.class, io.github.samzhu.bot.TestProvisioningConfiguration.class},
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
 class ConversationSearchIntegrationTests {

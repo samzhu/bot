@@ -43,7 +43,7 @@ public final class BrowserFixtureApplication {
             catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             throw new IllegalStateException("Fixture startup fault did not terminate");
         }
-        SpringApplication app = new SpringApplication(BotApplication.class, Fixture.class, TestUsageCaptureConfiguration.class);
+        SpringApplication app = new SpringApplication(BotApplication.class, Fixture.class, TestUsageCaptureConfiguration.class, TestProvisioningConfiguration.class);
         app.setAdditionalProfiles("test", "browser-fixture");
         var context = app.run("--server.address=127.0.0.1", "--server.port=0",
                 "--spring.docker.compose.enabled=false", "--spring.config.location=classpath:/");

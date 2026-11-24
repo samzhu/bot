@@ -81,6 +81,7 @@ class SupersededPostCommitResponseLossIntegrationTests {
         assertFalse(conversation.isBlank()); String run=UUID.randomUUID().toString();
         var dispatchEntered=new CountDownLatch(1); var releaseDispatch=new CompletableFuture<Void>();
         var held=new AtomicBoolean(); var injected=new AtomicInteger();
+        var committedVersion=new java.util.concurrent.atomic.AtomicReference<String>();
         var denyRecoveryRead=new AtomicBoolean(); var unknownReadObserved=new CountDownLatch(1);
         doAnswer(call -> {
             WorkspaceAdmission.Dispatch command=call.getArgument(0);
@@ -106,11 +107,12 @@ class SupersededPostCommitResponseLossIntegrationTests {
             if(result instanceof RunHandle.TerminalResult terminal && terminal.casSuccess() && terminal.finalStatus()==RunStatus.FAILED
                     && "BUDGET_CANCELLATION_SUPERSEDED".equals(terminal.errorMessage()) && injected.get()==0) {
                 // The true transaction has returned: independently verify committed PG state before losing the reply.
-                try(var connection=dataSource.getConnection(); var statement=connection.prepareStatement("select status,error_message from chat_run where id=?")) {
+                try(var connection=dataSource.getConnection(); var statement=connection.prepareStatement("select status,error_message,xmin::text from chat_run where id=?")) {
                     statement.setString(1,run);
                     try(var rows=statement.executeQuery()) {
                         if(rows.next() && "FAILED".equals(rows.getString(1)) && "BUDGET_CANCELLATION_SUPERSEDED".equals(rows.getString(2))
                                 && injected.compareAndSet(0,1)) {
+                            committedVersion.set(rows.getString(3));
                             denyRecoveryRead.set(true);
                             throw new IllegalStateException("synthetic post-commit response loss");
                         }
@@ -165,7 +167,9 @@ class SupersededPostCommitResponseLossIntegrationTests {
             assertEquals(0,jdbc.queryForObject("select count(*) from execution_budget_cancellation_receipt where effect_id=?",Integer.class,effect));
             assertEquals(1,jdbc.queryForObject("select count(*) from provider_attempt where run_id=?",Integer.class,run));
             assertTrue(model().getRecordedPrompts().isEmpty());
-            verify(runs,times(1)).failDurableRecovery(eq(run),eq(conversation),eq("BUDGET_CANCELLATION_SUPERSEDED"),any());
+            assertNotNull(committedVersion.get(),"the fenced terminal write must commit before response loss");
+            assertEquals(committedVersion.get(),jdbc.queryForObject("select xmin::text from chat_run where id=?",String.class,run),
+                    "recovery must observe the committed terminal row without writing it again");
         } finally { denyRecoveryRead.set(false); releaseDispatch.complete(null); reset(admission,sink,transactions,runs,recoveryReader); }
     }
 }

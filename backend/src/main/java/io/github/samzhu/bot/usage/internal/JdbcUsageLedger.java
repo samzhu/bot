@@ -12,6 +12,7 @@ import java.util.UUID;
 @Service
 public class JdbcUsageLedger implements UsageLedger {
     private final JdbcTemplate jdbc;
+    private final io.github.samzhu.bot.usage.RunOwnershipGuard ownership;
     private final java.time.Clock clock;
     private final io.github.samzhu.bot.usage.internal.admission.WorkspaceLane lane;
     private final io.github.samzhu.bot.usage.internal.admission.BudgetProjection budgetProjection;
@@ -20,12 +21,13 @@ public class JdbcUsageLedger implements UsageLedger {
     private final io.github.samzhu.bot.usage.RunAdmissionStateReader runStateReader;
 
     @org.springframework.beans.factory.annotation.Autowired
-    public JdbcUsageLedger(JdbcTemplate jdbc, java.time.Clock clock, io.github.samzhu.bot.usage.internal.pricing.CatalogActivation catalog,
+    public JdbcUsageLedger(JdbcTemplate jdbc, io.github.samzhu.bot.usage.RunOwnershipGuard ownership, java.time.Clock clock, io.github.samzhu.bot.usage.internal.pricing.CatalogActivation catalog,
             io.github.samzhu.bot.usage.internal.admission.WorkspaceLane lane,
             io.github.samzhu.bot.usage.internal.admission.BudgetProjection budgetProjection,
             org.springframework.transaction.PlatformTransactionManager manager,
             io.github.samzhu.bot.usage.RunAdmissionStateReader runStateReader) {
         this.jdbc = jdbc;
+        this.ownership = ownership;
         this.clock = clock;
         this.catalog = catalog;
         this.lane = lane;
@@ -35,16 +37,19 @@ public class JdbcUsageLedger implements UsageLedger {
     }
 
     @Override
-    public String begin(Dispatch d) {
+    public String begin(Dispatch d) { return begin(d, null); }
+
+    @Override
+    public String begin(Dispatch d, io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner) {
         try {
-            return lane.submit(d.workspaceId(), () -> transactions.execute(status -> beginInTransaction(d))).toCompletableFuture().join();
+            return lane.submit(d.workspaceId(), () -> transactions.execute(status -> beginInTransaction(d, owner))).toCompletableFuture().join();
         } catch (java.util.concurrent.CompletionException ex) {
             if (ex.getCause() instanceof RuntimeException cause) throw cause;
             throw ex;
         }
     }
 
-    private String beginInTransaction(Dispatch d) {
+    private String beginInTransaction(Dispatch d, io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner) {
         if (d.runId()!=null) {
             var registrations=jdbc.query("select workspace_id,actor_id,conversation_id,partition,status from workspace_admission_registration where run_id=? for update",
                     (rs,n)->new String[]{rs.getString(1),rs.getString(2),rs.getString(3),rs.getString(4),rs.getString(5)},d.runId());
@@ -61,6 +66,8 @@ public class JdbcUsageLedger implements UsageLedger {
             var run=runStateReader.readForUpdate(d.runId());
             if (run==null || run.status()!=io.github.samzhu.bot.usage.RunAdmissionStateReader.Status.ACTIVE
                     || !registration[2].equals(run.conversationId())) throw new IllegalStateException("Run is not active");
+            if (owner == null || !d.runId().equals(owner.runId()) || !ownership.lockOwner(owner))
+                throw new IllegalStateException("Run ownership lost");
         }
         String id = UUID.randomUUID().toString();
         jdbc.update(
@@ -86,14 +93,20 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'IN_PROGRESS','PENDING','UNKNOWN','MISSING')
 
     @Override
     public boolean markDispatched(String attemptId, java.util.function.Function<java.time.Clock, Instant> decision) {
+        return markDispatched(attemptId,decision,null);
+    }
+
+    @Override
+    public boolean markDispatched(String attemptId, java.util.function.Function<java.time.Clock, Instant> decision, io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner) {
         var scopes=jdbc.query("select workspace_id from provider_attempt where id=?",(rs,n)->rs.getString(1),attemptId);
         if (scopes.isEmpty()) return false;
         return Boolean.TRUE.equals(lane.submitCritical(scopes.getFirst(),()->transactions.execute(status ->
-                markDispatchedInTransaction(attemptId,decision))).toCompletableFuture().join());
+                markDispatchedInTransaction(attemptId,decision,owner))).toCompletableFuture().join());
     }
 
-    private boolean markDispatchedInTransaction(String attemptId, java.util.function.Function<java.time.Clock, Instant> decision) {
+    private boolean markDispatchedInTransaction(String attemptId, java.util.function.Function<java.time.Clock, Instant> decision, io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner) {
         io.github.samzhu.bot.usage.internal.admission.UsageWriterLock.registrationForAttempt(jdbc,attemptId);
+        requireOwner(attemptId, owner, false);
         // Wait for the database row before sampling the clock, so lock contention cannot move a
         // dispatch into the wrong period.
         var rows =
@@ -120,13 +133,17 @@ WHERE id=? AND execution_outcome='IN_PROGRESS' AND started_at IS NULL
     }
 
     @Override
-    public void append(String attemptId, Snapshot snapshot) {
+    public void append(String attemptId, Snapshot snapshot) { append(attemptId, snapshot, null); }
+
+    @Override
+    public void append(String attemptId, Snapshot snapshot, io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner) {
         var scopes=jdbc.query("select workspace_id from provider_attempt where id=?",(rs,n)->rs.getString(1),attemptId);
         if (scopes.isEmpty()) throw new IllegalArgumentException("Unknown usage attempt");
         String workspace=scopes.getFirst();
         try {
             lane.submitCritical(workspace, () -> transactions.execute(status -> {
                 io.github.samzhu.bot.usage.internal.admission.UsageWriterLock.registrationForAttempt(jdbc,attemptId);
+                requireOwner(attemptId, owner);
                 appendInTransaction(attemptId,snapshot);
                 refreshAttemptPeriod(attemptId,workspace);
                 return null;
@@ -307,12 +324,16 @@ UPDATE provider_attempt SET usage_presence=?,capture_completeness=?,projection_s
     }
 
     @Override
-    public void notDispatched(String attemptId, String reason) {
+    public void notDispatched(String attemptId, String reason) { notDispatched(attemptId,reason,null); }
+
+    @Override
+    public void notDispatched(String attemptId, String reason, io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner) {
         var scopes=jdbc.query("select workspace_id from provider_attempt where id=?",(rs,n)->rs.getString(1),attemptId);
         if (scopes.isEmpty()) throw new IllegalArgumentException("Unknown usage attempt");
         try {
             lane.submitCritical(scopes.getFirst(), () -> transactions.execute(status -> {
                 io.github.samzhu.bot.usage.internal.admission.UsageWriterLock.registrationForAttempt(jdbc,attemptId);
+                requireOwner(attemptId, owner, true);
                 var rows=jdbc.query("select started_at,execution_outcome from provider_attempt where id=? for update",
                         (rs,n)->new Object[]{rs.getTimestamp(1),rs.getString(2)},attemptId);
                 if (rows.isEmpty()) throw new IllegalStateException("RECOVERY_REQUIRED");
@@ -337,13 +358,44 @@ UPDATE provider_attempt SET usage_presence=?,capture_completeness=?,projection_s
         }
     }
 
+    private void requireOwner(String attemptId, io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner) {
+        requireOwner(attemptId,owner,false);
+    }
+
+    private void requireOwner(String attemptId, io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner, boolean allowTerminal) {
+        var rows=jdbc.query("select run_id,purpose,title_conversation_id from provider_attempt where id=?",
+                (rs,n) -> new String[]{rs.getString(1),rs.getString(2),rs.getString(3)},attemptId);
+        if (rows.size()!=1) throw new IllegalStateException("Usage attempt missing");
+        var row=rows.getFirst();
+        if (row[0]==null && owner==null) {
+            if (!"CONVERSATION_TITLE".equals(row[1])) return;
+            jdbc.query("select conversation_id from conversation_title_work where conversation_id=? for update",
+                    (rs,n)->rs.getString(1),row[2]);
+            Boolean current=jdbc.queryForObject("""
+                    select exists(select 1 from conversation_title_work w join provider_attempt a on a.title_conversation_id=w.conversation_id
+                     where a.id=? and a.purpose='CONVERSATION_TITLE' and w.state='CLAIMED' and w.claimed_until>clock_timestamp())
+                    """,Boolean.class,attemptId);
+            if (!Boolean.TRUE.equals(current)) throw new IllegalStateException("Title claim expired");
+            return;
+        }
+        if (owner==null || !owner.runId().equals(row[0])) throw new IllegalStateException("Run ownership mismatch");
+        var run=runStateReader.readForUpdate(owner.runId());
+        if (run==null || run.status()==io.github.samzhu.bot.usage.RunAdmissionStateReader.Status.NOT_FOUND
+                || (!allowTerminal && run.status()!=io.github.samzhu.bot.usage.RunAdmissionStateReader.Status.ACTIVE)
+                || !ownership.lockOwner(owner)) throw new IllegalStateException("Run ownership lost");
+    }
+
     @Override
-    public void recordResponseId(String attemptId, String responseId) {
+    public void recordResponseId(String attemptId, String responseId) { recordResponseId(attemptId, responseId, null); }
+
+    @Override
+    public void recordResponseId(String attemptId, String responseId, io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner) {
         if (responseId == null || responseId.isBlank()) return;
         var scopes=jdbc.query("select workspace_id from provider_attempt where id=?",(rs,n)->rs.getString(1),attemptId);
         if (scopes.isEmpty()) throw new IllegalArgumentException("Unknown usage attempt");
         lane.submitCritical(scopes.getFirst(),()->transactions.execute(status -> {
             io.github.samzhu.bot.usage.internal.admission.UsageWriterLock.registrationForAttempt(jdbc,attemptId);
+            requireOwner(attemptId, owner);
             int updated=jdbc.update(
                         """
                         UPDATE provider_attempt SET provider_response_id=?
@@ -358,12 +410,16 @@ UPDATE provider_attempt SET usage_presence=?,capture_completeness=?,projection_s
     }
 
     @Override
-    public void finish(String id, String outcome) {
+    public void finish(String id, String outcome) { finish(id,outcome,null); }
+
+    @Override
+    public void finish(String id, String outcome, io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner) {
         var scopes=jdbc.query("select workspace_id from provider_attempt where id=?",(rs,n)->rs.getString(1),id);
         if (scopes.isEmpty()) return;
         String workspace=scopes.getFirst();
         lane.submitCritical(workspace, () -> transactions.execute(status -> {
             io.github.samzhu.bot.usage.internal.admission.UsageWriterLock.registrationForAttempt(jdbc,id);
+            requireOwner(id, owner, true);
             var rows=jdbc.query("select simulation,started_at from provider_attempt where id=? and workspace_id=? for update",
                     (rs,n)->new Object[]{rs.getBoolean(1),rs.getTimestamp(2)},id,workspace);
             if (rows.isEmpty()) return null;

@@ -34,12 +34,18 @@ public class TerminalRunStartupCoordinator implements ApplicationRunner {
         long deadline = System.nanoTime() + startupBudget.toNanos();
         while (System.nanoTime() < deadline) {
             if (Thread.currentThread().isInterrupted()) throw new InterruptedException("Startup recovery interrupted");
+            scanner.scanRecoveryBeforeBarrier(deadline);
             var batch = scanner.scanBatch();
             if (!batch.cycleComplete()) continue;
             if (!batch.unresolved()) {
                 long remaining = deadline - System.nanoTime();
                 if (remaining <= 0) break;
-                var result = admission.verifyAndOpen().toCompletableFuture().get(remaining, TimeUnit.NANOSECONDS);
+                WorkspaceAdmission.RecoveryReadiness result;
+                try {
+                    result = admission.verifyAndOpen().toCompletableFuture().get(remaining, TimeUnit.NANOSECONDS);
+                } catch (java.util.concurrent.TimeoutException timeout) {
+                    throw new IllegalStateException("Startup admission recovery did not reach READY within its budget", timeout);
+                }
                 if (result == WorkspaceAdmission.RecoveryReadiness.READY) {
                     scanner.enableAfterStartupBarrier();
                     return;

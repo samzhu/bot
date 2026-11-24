@@ -2,6 +2,8 @@ package io.github.samzhu.bot;
 
 import io.github.samzhu.bot.conversation.ConversationOperations;
 import io.github.samzhu.bot.identity.CurrentUserProvider;
+import io.github.samzhu.bot.usage.RunOwnershipGuard;
+import io.github.samzhu.bot.usage.SyntheticRunOwner;
 import io.github.samzhu.bot.usage.UsageCostRevisionOperations;
 import io.github.samzhu.bot.usage.UsageLedger;
 import io.github.samzhu.bot.usage.WorkspaceAdmission;
@@ -35,17 +37,18 @@ class WorkspaceBudgetBoundaryEvidenceTests {
     @Autowired UsageCostRevisionOperations revisions;
     @Autowired JdbcTemplate jdbc;
     @MockitoBean CurrentUserProvider currentUser;
-    record Claimed(WorkspaceAdmission.Registration registration,String attempt,WorkspaceAdmission.ClaimFence claim) {}
+    record Claimed(WorkspaceAdmission.Registration registration,String attempt,WorkspaceAdmission.ClaimFence claim,RunOwnershipGuard.Fence fence) {}
     Claimed claim(String actor,String workspace,String model) {
         String bot="boundary-bot-"+UUID.randomUUID(),run="boundary-run-"+UUID.randomUUID();
         jdbc.update("insert into bot(id,name,target) values (?,?,'LOCAL')",bot,bot);
         var conversation=conversations.createConversation(bot,"synthetic",actor,workspace);
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(new WorkspaceAdmission.Register(workspace,run,actor,conversation.id(),WorkspaceAdmission.Partition.SIMULATION)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        var fence=SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
-        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE_GEMINI","generateContent",model,"FAKE","1",true,"VERIFIED"));
-        var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt)).toCompletableFuture().join()).claim();
-        return new Claimed(registration,attempt,claim);
+        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE_GEMINI","generateContent",model,"FAKE","1",true,"VERIFIED"),fence);
+        var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt,fence)).toCompletableFuture().join()).claim();
+        return new Claimed(registration,attempt,claim,fence);
     }
     WorkspaceMonthlyBudgetOperations.Scope scope(String workspace) {
         return new WorkspaceMonthlyBudgetOperations.Scope(workspace,WorkspaceAdmission.Partition.SIMULATION,YearMonth.now(ZoneId.of("Asia/Taipei")));
@@ -61,8 +64,8 @@ class WorkspaceBudgetBoundaryEvidenceTests {
         when(currentUser.getCurrentUserId()).thenReturn(actor);
         budgets.configure(new WorkspaceMonthlyBudgetOperations.ConfigureCommand(scope(workspace),actor,true,new BigDecimal("0.001"),0)).toCompletableFuture().join();
         var victim=claim(actor,workspace,model); var source=claim(actor,workspace,model);
-        ledger.append(source.attempt(),new UsageLedger.Snapshot("synthetic",1,"FINAL","FAKE_RAW","pricing-fixture-v1","1","1","COMPLETE","{\"promptTokenCount\":1000,\"cachedContentTokenCount\":0,\"candidatesTokenCount\":500,\"thoughtsTokenCount\":0,\"toolUsePromptTokenCount\":0}"));
-        assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(source.registration(),source.attempt(),source.claim(),WorkspaceAdmission.TerminalKind.SUCCEEDED)).toCompletableFuture().join());
+        ledger.append(source.attempt(),new UsageLedger.Snapshot("synthetic",1,"FINAL","FAKE_RAW","pricing-fixture-v1","1","1","COMPLETE","{\"promptTokenCount\":1000,\"cachedContentTokenCount\":0,\"candidatesTokenCount\":500,\"thoughtsTokenCount\":0,\"toolUsePromptTokenCount\":0}"),source.fence());
+        assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(source.registration(),source.attempt(),source.claim(),WorkspaceAdmission.TerminalKind.SUCCEEDED,null,source.fence())).toCompletableFuture().join());
         String version=jdbc.queryForObject("select projection_version::text from provider_attempt where id=?",String.class,source.attempt());
         var first=revisions.reconcile(new UsageCostRevisionOperations.ReconcileCommand(workspace,source.attempt(),null,version,"partial-first",catalog(model,"2"),"synthetic evidence","synthetic test"));
         assertEquals("PARTIAL",first.revision().status());
@@ -81,7 +84,7 @@ class WorkspaceBudgetBoundaryEvidenceTests {
         String actor="unknown-"+UUID.randomUUID(), workspace=workspaces.personal(actor).id(),model="unknown-"+UUID.randomUUID();
         budgets.configure(new WorkspaceMonthlyBudgetOperations.ConfigureCommand(scope(workspace),actor,true,new BigDecimal("1"),0)).toCompletableFuture().join();
         var victim=claim(actor,workspace,model); var unknown=claim(actor,workspace,model);
-        assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(unknown.registration(),unknown.attempt(),unknown.claim(),WorkspaceAdmission.TerminalKind.UNKNOWN)).toCompletableFuture().join());
+        assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(unknown.registration(),unknown.attempt(),unknown.claim(),WorkspaceAdmission.TerminalKind.UNKNOWN,null,unknown.fence())).toCompletableFuture().join());
         var denied=assertInstanceOf(WorkspaceAdmission.RegisterResult.Denied.class,admission.register(new WorkspaceAdmission.Register(workspace,"new-"+UUID.randomUUID(),actor,victim.registration().conversationId(),WorkspaceAdmission.Partition.SIMULATION)).toCompletableFuture().join());
         assertEquals(WorkspaceAdmission.Reason.MONTH_UNKNOWN,denied.reason());
         assertEquals(0,jdbc.queryForObject("select count(*) from workspace_admission_effect_outbox where registration_token=?",Integer.class,victim.registration().token()));
@@ -89,7 +92,7 @@ class WorkspaceBudgetBoundaryEvidenceTests {
     @Test void monthlyUnknownAndCapBothPrecedeWeeklyCap() {
         String actor="priority-"+UUID.randomUUID(),workspace=workspaces.personal(actor).id(),model="priority-"+UUID.randomUUID();
         var f=claim(actor,workspace,model);
-        assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),f.claim(),WorkspaceAdmission.TerminalKind.UNKNOWN)).toCompletableFuture().join());
+        assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),f.claim(),WorkspaceAdmission.TerminalKind.UNKNOWN,null,f.fence())).toCompletableFuture().join());
         weekly.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,actor,WorkspaceAdmission.Partition.SIMULATION,actor,true,"0","0","priority")).toCompletableFuture().join();
         budgets.configure(new WorkspaceMonthlyBudgetOperations.ConfigureCommand(scope(workspace),actor,true,new BigDecimal("10"),0)).toCompletableFuture().join();
         var req=new WorkspaceAdmission.Register(workspace,"new-"+UUID.randomUUID(),actor,f.registration().conversationId(),WorkspaceAdmission.Partition.SIMULATION);

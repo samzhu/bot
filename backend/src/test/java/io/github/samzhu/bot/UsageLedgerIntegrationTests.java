@@ -51,6 +51,13 @@ class UsageLedgerIntegrationTests {
     @Autowired io.github.samzhu.bot.usage.internal.admission.BudgetProjection budgetProjection;
     @Autowired org.springframework.transaction.PlatformTransactionManager transactionManager;
     @Autowired io.github.samzhu.bot.usage.RunAdmissionStateReader runAdmissionStateReader;
+    @Autowired io.github.samzhu.bot.usage.RunOwnershipGuard ownership;
+
+    private io.github.samzhu.bot.usage.RunOwnershipGuard.Fence fixtureOwner(String run) {
+        String token=UUID.nameUUIDFromBytes(run.getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
+        jdbc.update("insert into run_ownership(run_id,owner_token,generation,lease_until) values (?,?,1,clock_timestamp()+interval '1 hour') on conflict (run_id) do nothing",run,token);
+        return new io.github.samzhu.bot.usage.RunOwnershipGuard.Fence(run,token,1);
+    }
 
     @TestBean(name = "mockChatModel", methodName = "fakeModel", enforceOverride = true)
     ChatModel model;
@@ -751,7 +758,7 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
                 java.time.Clock.fixed(
                         java.time.Instant.parse("2026-01-31T16:00:00Z"), java.time.ZoneOffset.UTC);
         var controlled = new io.github.samzhu.bot.usage.internal.JdbcUsageLedger(
-                jdbc, fixed, catalogActivation, workspaceLane, budgetProjection, transactionManager, runAdmissionStateReader);
+                jdbc, ownership, fixed, catalogActivation, workspaceLane, budgetProjection, transactionManager, runAdmissionStateReader);
         String id =
                 controlled.begin(
                         new io.github.samzhu.bot.usage.UsageLedger.Dispatch(
@@ -954,7 +961,7 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
         jdbc.update("insert into workspace_member(workspace_id,user_id,role,active) values (?,'dev-user','MANAGER',true)",workspace);
         jdbc.update("insert into bot(id,name,target) values (?,?,'LOCAL')",bot,bot);
         String conversation=graph("mutation { createConversation(botId:\""+bot+"\",workspaceId:\""+workspace+"\") { id } }").path("data").path("createConversation").path("id").asText();
-        jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'synthetic','RUNNING')",run,conversation,run);
+
         var handle=new io.github.samzhu.bot.execution.internal.RunHandle(run,conversation,"dev-user",new org.springframework.web.servlet.mvc.method.annotation.SseEmitter(),runRegistry,org.mockito.Mockito.mock(io.github.samzhu.bot.execution.internal.RunHandle.TerminalCallback.class));
         var calls=new java.util.concurrent.atomic.AtomicInteger();
         ChatModel fake=new ChatModel() {
@@ -965,12 +972,15 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
         var partition=metadata.simulation()?io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.SIMULATION:io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.REAL;
         var registered=assertInstanceOf(io.github.samzhu.bot.usage.WorkspaceAdmission.RegisterResult.Registered.class,admission.register(new io.github.samzhu.bot.usage.WorkspaceAdmission.Register(workspace,run,"dev-user",conversation,partition)).toCompletableFuture().join());
         var registration=registered.registration();
+        jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'synthetic','RUNNING')",run,conversation,run);
+        var runOwner=fixtureOwner(run);
         assertInstanceOf(io.github.samzhu.bot.usage.WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
         handle.setAdmissionRegistration(registration);
-        var first=invocation.begin(metadata,registration);
+        handle.setOwnershipFence(runOwner);
+        var first=invocation.begin(metadata,registration,runOwner);
         assertEquals(1,invocation.stream(fake,new Prompt("one"),first,conversation,workspace,"dev-user",handle).collectList().block().size());
         weeklyBudgets.configure(new io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Configure(workspace,"dev-user",partition,"dev-user",true,"0","0","between")).toCompletableFuture().join();
-        var second=invocation.begin(metadata,registration);
+        var second=invocation.begin(metadata,registration,runOwner);
         var error=assertThrows(RuntimeException.class,()->invocation.stream(fake,new Prompt("two"),second,conversation,workspace,"dev-user",handle).collectList().block());
         assertTrue(error.getMessage().contains("WEEK_CAP")); assertEquals(1,calls.get());
         assertEquals("SUCCEEDED",jdbc.queryForObject("select execution_outcome from provider_attempt where id=?",String.class,first.id()));
@@ -996,12 +1006,6 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
                         .path("id")
                         .asText();
         String run = UUID.randomUUID().toString();
-        jdbc.update(
-                "insert into chat_run(id,conversation_id,client_request_id,input_text,status)"
-                    + " values (?,?,?,'synthetic','RUNNING')",
-                run,
-                conversation,
-                run);
         var handle =
                 new io.github.samzhu.bot.execution.internal.RunHandle(
                         run,
@@ -1041,9 +1045,17 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
             var registered = admission.register(new io.github.samzhu.bot.usage.WorkspaceAdmission.Register(workspace, run, "dev-user", conversation, partition)).toCompletableFuture().join();
             assertInstanceOf(io.github.samzhu.bot.usage.WorkspaceAdmission.RegisterResult.Registered.class, registered);
             var registration = ((io.github.samzhu.bot.usage.WorkspaceAdmission.RegisterResult.Registered)registered).registration();
+            jdbc.update(
+                    "insert into chat_run(id,conversation_id,client_request_id,input_text,status)"
+                        + " values (?,?,?,'synthetic','RUNNING')",
+                    run,
+                    conversation,
+                    run);
+            var runOwner=fixtureOwner(run);
             assertInstanceOf(io.github.samzhu.bot.usage.WorkspaceAdmission.PublicationResult.Ready.class, admission.publish(registration).toCompletableFuture().join());
             handle.setAdmissionRegistration(registration);
-            var first = invocation.begin(metadata, registration);
+            handle.setOwnershipFence(runOwner);
+            var first = invocation.begin(metadata, registration, runOwner);
         assertEquals(
                 1,
                 invocation.stream(
@@ -1057,7 +1069,7 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
                         .collectList()
                         .block()
                         .size());
-        var second = invocation.begin(metadata, registration);
+        var second = invocation.begin(metadata, registration, runOwner);
         assertEquals(
                 1,
                 invocation.stream(
@@ -1116,12 +1128,6 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
                             .path("id")
                             .asText();
             String run = UUID.randomUUID().toString();
-            jdbc.update(
-                    "insert into chat_run(id,conversation_id,client_request_id,input_text,status)"
-                        + " values (?,?,?,'synthetic','RUNNING')",
-                    run,
-                    conversation,
-                    run);
             var handle =
                     new io.github.samzhu.bot.execution.internal.RunHandle(
                             run,
@@ -1153,9 +1159,17 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
             var registered = admission.register(new io.github.samzhu.bot.usage.WorkspaceAdmission.Register(workspace, run, "dev-user", conversation, partition)).toCompletableFuture().join();
             assertInstanceOf(io.github.samzhu.bot.usage.WorkspaceAdmission.RegisterResult.Registered.class, registered);
             var registration = ((io.github.samzhu.bot.usage.WorkspaceAdmission.RegisterResult.Registered)registered).registration();
+            jdbc.update(
+                    "insert into chat_run(id,conversation_id,client_request_id,input_text,status)"
+                        + " values (?,?,?,'synthetic','RUNNING')",
+                    run,
+                    conversation,
+                    run);
+            var runOwner=fixtureOwner(run);
             assertInstanceOf(io.github.samzhu.bot.usage.WorkspaceAdmission.PublicationResult.Ready.class, admission.publish(registration).toCompletableFuture().join());
             handle.setAdmissionRegistration(registration);
-            var first = invocation.begin(metadata, registration);
+            handle.setOwnershipFence(runOwner);
+            var first = invocation.begin(metadata, registration, runOwner);
             invocation.stream(
                             fake,
                             new Prompt("one"),
@@ -1166,7 +1180,7 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
                             handle)
                     .collectList()
                     .block();
-            var second = invocation.begin(metadata, registration);
+            var second = invocation.begin(metadata, registration, runOwner);
             try {
                 if (revoke)
                     jdbc.update(
@@ -1324,7 +1338,7 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
         jdbc.update("insert into bot(id,name,target) values ('usage-test-bot','Fake','LOCAL') on conflict do nothing");
         String conversation=graph("mutation { createConversation(botId: \"usage-test-bot\") {id} }").path("data").path("createConversation").path("id").asText();
         String run=UUID.randomUUID().toString();
-        org.mockito.Mockito.doThrow(new IllegalStateException("private-error-sentinel")).doCallRealMethod().when(ledger).append(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.any());
+        org.mockito.Mockito.doThrow(new IllegalStateException("private-error-sentinel")).doCallRealMethod().when(ledger).append(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any());
         try {
             var body=Map.of("threadId",conversation,"runId",run,"messages",List.of(Map.of("id","u","role","user","content","hello")));
             var request=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/api/ag-ui")).header("Content-Type","application/json").header("Accept","text/event-stream").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body))).build();

@@ -1,5 +1,8 @@
 package io.github.samzhu.bot;
 
+import io.github.samzhu.bot.usage.SyntheticRunOwner;
+import io.github.samzhu.bot.usage.RunOwnershipGuard;
+
 import io.github.samzhu.bot.usage.WorkspaceAdmission;
 import io.github.samzhu.bot.usage.WorkspaceMonthlyBudgetOperations;
 import io.github.samzhu.bot.conversation.ConversationOperations;
@@ -68,10 +71,11 @@ class WorkspaceAdmissionPublicTests {
         var registration = assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,
                 admission.register(request).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        var runOwner=SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class, admission.publish(registration).toCompletableFuture().join());
-        String attempt = ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
+        String attempt = ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),runOwner);
         var allowed = assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,
-                admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt)).toCompletableFuture().join());
+                admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt,runOwner)).toCompletableFuture().join());
         assertEquals(attempt, allowed.claim().attemptId());
         var recovered = assertInstanceOf(WorkspaceAdmission.ClaimInspection.Found.class,
                 admission.inspectClaim(registration, attempt).toCompletableFuture().join());
@@ -86,18 +90,18 @@ class WorkspaceAdmissionPublicTests {
                 admission.authorizeProviderStart(allowed.claim()).toCompletableFuture().join());
         assertNotNull(jdbc.queryForObject("select started_at from provider_attempt where id=?", java.sql.Timestamp.class, attempt));
         assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED, admission.finalizeAttempt(
-                new WorkspaceAdmission.FinalizeAttempt(registration, attempt, allowed.claim(), WorkspaceAdmission.TerminalKind.UNKNOWN)).toCompletableFuture().join());
+                new WorkspaceAdmission.FinalizeAttempt(registration, attempt, allowed.claim(), WorkspaceAdmission.TerminalKind.UNKNOWN,null,runOwner)).toCompletableFuture().join());
         assertEquals("UNKNOWN", jdbc.queryForObject("select execution_outcome from provider_attempt where id=?", String.class, attempt));
         Long version = jdbc.queryForObject("select projection_version from provider_attempt where id=?", Long.class, attempt);
         assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED, admission.finalizeAttempt(
-                new WorkspaceAdmission.FinalizeAttempt(registration, attempt, allowed.claim(), WorkspaceAdmission.TerminalKind.UNKNOWN)).toCompletableFuture().join());
+                new WorkspaceAdmission.FinalizeAttempt(registration, attempt, allowed.claim(), WorkspaceAdmission.TerminalKind.UNKNOWN,null,runOwner)).toCompletableFuture().join());
         assertEquals(version,jdbc.queryForObject("select projection_version from provider_attempt where id=?", Long.class, attempt));
         assertThrows(CompletionException.class, () -> admission.complete(registration).toCompletableFuture().join());
         jdbc.update("update chat_run set status='CANCELLED' where id=?",run);
         admission.complete(registration).toCompletableFuture().join();
         assertEquals("TERMINAL",jdbc.queryForObject("select status from workspace_admission_registration where token=?",String.class,registration.token()));
         assertEquals(WorkspaceAdmission.FinalizationResult.RECOVERY_REQUIRED, admission.finalizeAttempt(
-                new WorkspaceAdmission.FinalizeAttempt(registration, attempt, null, WorkspaceAdmission.TerminalKind.NOT_DISPATCHED)).toCompletableFuture().join());
+                new WorkspaceAdmission.FinalizeAttempt(registration, attempt, null, WorkspaceAdmission.TerminalKind.NOT_DISPATCHED,null,runOwner)).toCompletableFuture().join());
     }
 
     @Test void oldPendingEffectKeepsItsOriginalFenceAndRetriesWhenOldPeriodClaimExists() {
@@ -110,6 +114,7 @@ class WorkspaceAdmissionPublicTests {
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,
                 admission.register(new WorkspaceAdmission.Register(workspace,run,owner,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        var runOwner=SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
         var row=jdbc.queryForMap("select pending_id,pending_epoch,pending_period_start,pending_period_end from workspace_admission_registration where token=?",registration.token());
         String effectId=UUID.randomUUID().toString(), receipt=UUID.randomUUID().toString();
@@ -119,8 +124,8 @@ class WorkspaceAdmissionPublicTests {
                 values (?,?,?,'REAL',?,?,?,?,?,0,'PENDING',?)
                 """,effectId,registration.token(),workspace,run,row.get("pending_id"),row.get("pending_epoch"),row.get("pending_period_start"),row.get("pending_period_end"),receipt);
         var found=assertInstanceOf(WorkspaceAdmission.EffectInspection.Found.class,admission.inspectCancellationEffect(effectId).toCompletableFuture().join()).effect();
-        String attempt=ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
-        assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt)).toCompletableFuture().join());
+        String attempt=ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),runOwner);
+        assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt,runOwner)).toCompletableFuture().join());
         var after=assertInstanceOf(WorkspaceAdmission.EffectInspection.Found.class,admission.inspectCancellationEffect(effectId).toCompletableFuture().join()).effect();
         assertEquals(found.target(),after.target());
         var effect=new io.github.samzhu.bot.usage.BudgetCancellationSink.Effect(effectId,registration.token(),workspace,WorkspaceAdmission.Partition.REAL,run,found.target(),receipt);
@@ -143,6 +148,7 @@ class WorkspaceAdmissionPublicTests {
         assertNull(effect.ackReceipt());
         assertInstanceOf(io.github.samzhu.bot.usage.BudgetCancellationSink.Target.Pending.class,effect.target());
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.CancelPending.class,admission.publish(registration).toCompletableFuture().join());
         var later=assertInstanceOf(WorkspaceAdmission.RegisterResult.Denied.class,admission.register(
                 new WorkspaceAdmission.Register(workspace,"later-"+UUID.randomUUID(),owner,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join());
@@ -158,10 +164,11 @@ class WorkspaceAdmissionPublicTests {
         budgets.configure(new WorkspaceMonthlyBudgetOperations.ConfigureCommand(scope,owner,true,new java.math.BigDecimal("100"),0)).toCompletableFuture().join();
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(new WorkspaceAdmission.Register(workspace,run,owner,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        var runOwner=SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
-        String attempt=ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
-        assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt)).toCompletableFuture().join());
-        ledger.finish(attempt,"UNKNOWN");
+        String attempt=ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),runOwner);
+        assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt,runOwner)).toCompletableFuture().join());
+        ledger.finish(attempt,"UNKNOWN",runOwner);
         var denied=assertInstanceOf(WorkspaceAdmission.RegisterResult.Denied.class,admission.register(
                 new WorkspaceAdmission.Register(workspace,"later-"+UUID.randomUUID(),owner,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join());
         assertEquals(WorkspaceAdmission.Reason.MONTH_UNKNOWN,denied.reason());
@@ -210,14 +217,15 @@ class WorkspaceAdmissionPublicTests {
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(
                 new WorkspaceAdmission.Register(workspace,run,owner,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        var runOwner=SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
-        String attempt=ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
+        String attempt=ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),runOwner);
         try(var connection=dataSource.getConnection()) {
             connection.setAutoCommit(false);
             int blocker;
             try(var statement=connection.createStatement(); var rs=statement.executeQuery("select pg_backend_pid()")) { rs.next(); blocker=rs.getInt(1); }
             try(var lock=connection.prepareStatement("select id from provider_attempt where id=? for update")) { lock.setString(1,attempt); lock.executeQuery().close(); }
-            var claimStage=admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt)).toCompletableFuture();
+            var claimStage=admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt,runOwner)).toCompletableFuture();
             long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(5); boolean blocked;
             do { blocked=Boolean.TRUE.equals(jdbc.queryForObject("select exists(select 1 from pg_stat_activity where ?=any(pg_blocking_pids(pid)))",Boolean.class,blocker));
                 if(blocked) break; Thread.sleep(20); } while(System.nanoTime()<deadline);
@@ -240,17 +248,18 @@ class WorkspaceAdmissionPublicTests {
         budgets.configure(new WorkspaceMonthlyBudgetOperations.ConfigureCommand(scope,owner,true,new java.math.BigDecimal("100"),0)).toCompletableFuture().join();
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(new WorkspaceAdmission.Register(workspace,run,owner,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        var runOwner=SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
-        String attempt=ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
-        assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt)).toCompletableFuture().join());
-        ledger.finish(attempt,"SUCCEEDED");
+        String attempt=ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),runOwner);
+        assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt,runOwner)).toCompletableFuture().join());
+        ledger.finish(attempt,"SUCCEEDED",runOwner);
         long version=jdbc.queryForObject("select projection_version from provider_attempt where id=?",Long.class,attempt);
         String price="price-"+UUID.randomUUID(),estimate="estimate-"+UUID.randomUUID();
         jdbc.update("insert into usage_price_snapshot(id,attempt_id,selection_state,provider,endpoint,model,channel,price_revision,rates) values (?,?,'MATCHED','FAKE','test','model','FAKE','test','{}'::jsonb)",price,attempt);
         jdbc.update("insert into usage_cost_estimate(id,attempt_id,source_version,price_snapshot_id,calculator_version,status,known_subtotal,complete_amount,details,payload_hash) values (?,?,?,?,'test','COMPLETE',5,5,'{}'::jsonb,'test')",estimate,attempt,version,price);
         jdbc.update("insert into usage_cost_current(attempt_id,estimate_id) values (?,?)",attempt,estimate);
         jdbc.update("update workspace_monthly_budget_period set known_subtotal_usd=5,terminal_effective_unknown=false where workspace_id=? and partition='REAL' and period_start=?",workspace,scope.period().atDay(1));
-        ledger.append(attempt,new io.github.samzhu.bot.usage.UsageLedger.Snapshot("late",1,"FINAL","FAKE_RAW","1","1","1","COMPLETE","{\"input_tokens\":1}"));
+        ledger.append(attempt,new io.github.samzhu.bot.usage.UsageLedger.Snapshot("late",1,"FINAL","FAKE_RAW","1","1","1","COMPLETE","{\"input_tokens\":1}"),runOwner);
         var denied=assertInstanceOf(WorkspaceAdmission.RegisterResult.Denied.class,admission.register(new WorkspaceAdmission.Register(workspace,"later-"+UUID.randomUUID(),owner,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join());
         assertEquals(WorkspaceAdmission.Reason.MONTH_UNKNOWN,denied.reason());
     }
@@ -355,22 +364,23 @@ class WorkspaceAdmissionPublicTests {
         var conversation=conversations.createConversation(bot,"fixture",owner,workspace);
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(new WorkspaceAdmission.Register(workspace,run,owner,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        var runOwner=SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
-        String attempt=ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
-        var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt)).toCompletableFuture().join()).claim();
+        String attempt=ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),runOwner);
+        var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt,runOwner)).toCompletableFuture().join()).claim();
         jdbc.execute("create or replace function test_reason_failure() returns trigger language plpgsql as $$ begin raise exception 'injected'; end $$");
         jdbc.execute("create trigger test_reason_failure before update of execution_outcome on provider_attempt for each row execute function test_reason_failure()");
         try {
-            var command=new WorkspaceAdmission.FinalizeAttempt(registration,attempt,claim,WorkspaceAdmission.TerminalKind.UNKNOWN,WorkspaceAdmission.TerminalReason.CAPTURE_FAILED);
+            var command=new WorkspaceAdmission.FinalizeAttempt(registration,attempt,claim,WorkspaceAdmission.TerminalKind.UNKNOWN,WorkspaceAdmission.TerminalReason.CAPTURE_FAILED,runOwner);
             assertEquals(WorkspaceAdmission.FinalizationResult.RECOVERY_REQUIRED,admission.finalizeAttempt(command).toCompletableFuture().join());
             assertEquals("CAPTURE_FAILED",jdbc.queryForObject("select terminal_reason from workspace_admission_finalization where attempt_id=?",String.class,attempt));
             jdbc.execute("drop trigger test_reason_failure on provider_attempt");
             assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.recoverFinalization(registration,attempt).toCompletableFuture().join());
             assertEquals("CAPTURE_FAILED",jdbc.queryForObject("select execution_reason from provider_attempt where id=?",String.class,attempt));
             assertEquals("CAPTURE_FAILED",jdbc.queryForObject("select projection_error from provider_attempt where id=?",String.class,attempt));
-            var invalid=new WorkspaceAdmission.FinalizeAttempt(registration,attempt,claim,WorkspaceAdmission.TerminalKind.UNKNOWN,WorkspaceAdmission.TerminalReason.PROMPT_CONTEXT_UNAVAILABLE);
+            var invalid=new WorkspaceAdmission.FinalizeAttempt(registration,attempt,claim,WorkspaceAdmission.TerminalKind.UNKNOWN,WorkspaceAdmission.TerminalReason.PROMPT_CONTEXT_UNAVAILABLE,runOwner);
             assertEquals(WorkspaceAdmission.FinalizationResult.RECOVERY_REQUIRED,admission.finalizeAttempt(invalid).toCompletableFuture().join());
-            var conflicting=new WorkspaceAdmission.FinalizeAttempt(registration,attempt,claim,WorkspaceAdmission.TerminalKind.UNKNOWN,WorkspaceAdmission.TerminalReason.ADMISSION_RECOVERY);
+            var conflicting=new WorkspaceAdmission.FinalizeAttempt(registration,attempt,claim,WorkspaceAdmission.TerminalKind.UNKNOWN,WorkspaceAdmission.TerminalReason.ADMISSION_RECOVERY,runOwner);
             assertEquals(WorkspaceAdmission.FinalizationResult.RECOVERY_REQUIRED,admission.finalizeAttempt(conflicting).toCompletableFuture().join());
             assertEquals("CAPTURE_FAILED",jdbc.queryForObject("select execution_reason from provider_attempt where id=?",String.class,attempt));
         } finally {
@@ -385,9 +395,10 @@ class WorkspaceAdmissionPublicTests {
         var conversation=conversations.createConversation(bot,"fixture",owner,workspace);
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(new WorkspaceAdmission.Register(workspace,run,owner,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        var runOwner=SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
-        String attempt=ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
-        assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(registration,attempt,null,WorkspaceAdmission.TerminalKind.NOT_DISPATCHED,WorkspaceAdmission.TerminalReason.PROMPT_CONTEXT_UNAVAILABLE)).toCompletableFuture().join());
+        String attempt=ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),runOwner);
+        assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(registration,attempt,null,WorkspaceAdmission.TerminalKind.NOT_DISPATCHED,WorkspaceAdmission.TerminalReason.PROMPT_CONTEXT_UNAVAILABLE,runOwner)).toCompletableFuture().join());
         var first=assertInstanceOf(WorkspaceAdmission.PromptFailurePage.Page.class,admission.scanSettledPromptFailures(null,null,100).toCompletableFuture().join());
         assertTrue(first.facts().contains(new WorkspaceAdmission.PromptFailureFact(attempt,registration)));
         assertNotNull(first.upperAttemptId());
@@ -409,23 +420,26 @@ class WorkspaceAdmissionPublicTests {
         jdbc.update("insert into bot(id,name,target) values (?,?,'LOCAL')",bot,bot);
         var registrations=new java.util.ArrayList<WorkspaceAdmission.Registration>();
         var attempts=new java.util.ArrayList<String>();
+        var runOwners=new java.util.ArrayList<RunOwnershipGuard.Fence>();
         for(int i=0;i<4;i++) {
             var conversation=conversations.createConversation(bot,"fixture-"+i,owner,workspace);
             String run="pages-"+UUID.randomUUID();
             var reg=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(new WorkspaceAdmission.Register(workspace,run,owner,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
             jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+            var runOwner=SyntheticRunOwner.attach(jdbc,reg);
+            runOwners.add(runOwner);
             assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(reg).toCompletableFuture().join());
-            attempts.add(ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN")));
+            attempts.add(ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),runOwner));
             registrations.add(reg);
         }
         var prompt=WorkspaceAdmission.TerminalReason.PROMPT_CONTEXT_UNAVAILABLE;
-        for(int i=0;i<2;i++) assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(registrations.get(i),attempts.get(i),null,WorkspaceAdmission.TerminalKind.NOT_DISPATCHED,prompt)).toCompletableFuture().join());
-        assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(registrations.get(2),attempts.get(2),null,WorkspaceAdmission.TerminalKind.NOT_DISPATCHED,WorkspaceAdmission.TerminalReason.RUN_TERMINATED_BEFORE_DISPATCH)).toCompletableFuture().join());
+        for(int i=0;i<2;i++) assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(registrations.get(i),attempts.get(i),null,WorkspaceAdmission.TerminalKind.NOT_DISPATCHED,prompt,runOwners.get(i))).toCompletableFuture().join());
+        assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(registrations.get(2),attempts.get(2),null,WorkspaceAdmission.TerminalKind.NOT_DISPATCHED,WorkspaceAdmission.TerminalReason.RUN_TERMINATED_BEFORE_DISPATCH,runOwners.get(2))).toCompletableFuture().join());
         String held=attempts.get(3);
         jdbc.execute("create or replace function test_pending_scan() returns trigger language plpgsql as $$ begin if new.id='"+held+"' and new.execution_outcome <> 'IN_PROGRESS' then raise exception 'injected'; end if; return new; end $$");
         jdbc.execute("create trigger test_pending_scan before update on provider_attempt for each row execute function test_pending_scan()");
         try {
-            assertEquals(WorkspaceAdmission.FinalizationResult.RECOVERY_REQUIRED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(registrations.get(3),held,null,WorkspaceAdmission.TerminalKind.NOT_DISPATCHED,prompt)).toCompletableFuture().join());
+            assertEquals(WorkspaceAdmission.FinalizationResult.RECOVERY_REQUIRED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(registrations.get(3),held,null,WorkspaceAdmission.TerminalKind.NOT_DISPATCHED,prompt,runOwners.get(3))).toCompletableFuture().join());
             assertEquals("PENDING",jdbc.queryForObject("select state from workspace_admission_finalization where attempt_id=?",String.class,held));
             var first=assertInstanceOf(WorkspaceAdmission.PromptFailurePage.Page.class,admission.scanSettledPromptFailures(null,null,1).toCompletableFuture().join());
             String upper=first.upperAttemptId(); assertNotNull(upper);

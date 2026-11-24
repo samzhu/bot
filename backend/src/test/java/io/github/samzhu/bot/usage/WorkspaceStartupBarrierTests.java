@@ -85,8 +85,8 @@ class WorkspaceStartupBarrierTests {
         jdbc.update("insert into bot(id,name,target) values (?,?,'LOCAL')",bot,bot);
         var conversation=conversations.createConversation(bot,"fixture",actor,workspace);
         jdbc.update("""
-                insert into workspace_admission_registration(token,run_id,workspace_id,actor_id,conversation_id,partition,status,pending_id,pending_period_start,pending_period_end)
-                values (?,?,?,?,?,'REAL','REGISTERED',?,date '2026-11-01',date '2026-12-01')
+                insert into workspace_admission_registration(token,run_id,workspace_id,actor_id,conversation_id,partition,status,pending_id,pending_period_start,pending_period_end,start_lease_until)
+                values (?,?,?,?,?,'REAL','REGISTERED',?,date '2026-11-01',date '2026-12-01',clock_timestamp()-interval '1 second')
                 """,token,run,workspace,actor,conversation.id(),UUID.randomUUID().toString());
         var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
         try(var restarted=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
@@ -94,7 +94,7 @@ class WorkspaceStartupBarrierTests {
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                         "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false").run()) {
             assertEquals("TERMINAL",jdbc.queryForObject("select status from workspace_admission_registration where token=?",String.class,token));
-        }
+        } finally { jdbc.update("delete from workspace_admission_registration where token=?",token); }
     }
 
     @Test void bootDoesNotAbandonAbsentRunWithDurableCancellationEffect() {

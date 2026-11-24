@@ -3,6 +3,8 @@ package io.github.samzhu.bot;
 import com.zaxxer.hikari.HikariDataSource;
 import io.github.samzhu.bot.conversation.ConversationOperations;
 import io.github.samzhu.bot.usage.RunAdmissionStateReader;
+import io.github.samzhu.bot.usage.RunOwnershipGuard;
+import io.github.samzhu.bot.usage.SyntheticRunOwner;
 import io.github.samzhu.bot.usage.UsageLedger;
 import io.github.samzhu.bot.usage.WorkspaceAdmission;
 import io.github.samzhu.bot.workspace.WorkspaceOperations;
@@ -48,14 +50,16 @@ class WorkspaceStartupInconsistentFactsTests {
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(
                 new WorkspaceAdmission.Register(workspace,run,actor,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        var fence=SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
-        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
+        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),fence);
         if (fact.equals("CLAIM") || fact.equals("FINALIZATION")) {
-            var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt)).toCompletableFuture().join()).claim();
+            var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt,fence)).toCompletableFuture().join()).claim();
             if (fact.equals("FINALIZATION")) jdbc.update("insert into workspace_admission_finalization(attempt_id,registration_token,claim_id,terminal_kind,state) values (?,?,?,'UNKNOWN','PENDING')",attempt,registration.token(),claim.claimId());
         }
         if (fact.equals("DISPATCH")) jdbc.update("insert into workspace_admission_dispatch(attempt_id,registration_token,state) values (?,?,'PENDING')",attempt,registration.token());
         jdbc.update("update workspace_admission_registration set status='REGISTERED' where token=?",registration.token());
+        jdbc.update("update run_ownership set lease_until = clock_timestamp() - interval '1 second' where run_id = ?", registration.runId());
         assertThrows(RuntimeException.class,()->restart(AbsentReaderFixture.class));
         assertEquals("REGISTERED",jdbc.queryForObject("select status from workspace_admission_registration where token=?",String.class,registration.token()));
         assertEquals(1,jdbc.queryForObject("select count(*) from provider_attempt where id=?",Integer.class,attempt));

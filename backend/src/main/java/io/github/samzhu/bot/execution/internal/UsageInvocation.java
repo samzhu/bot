@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public class UsageInvocation {
     private static final Logger log = LoggerFactory.getLogger(UsageInvocation.class);
     private final UsageLedger ledger;
+    private final RunOwnership ownership;
     private final WorkspaceAdmission admission;
     private final UsageCaptureAdapter adapter;
     private final ConversationOperations conversations;
@@ -31,6 +32,7 @@ public class UsageInvocation {
 
     public UsageInvocation(
             UsageLedger ledger,
+            RunOwnership ownership,
             WorkspaceAdmission admission,
             UsageCaptureAdapter adapter,
             ConversationOperations conversations,
@@ -40,6 +42,7 @@ public class UsageInvocation {
             @org.springframework.beans.factory.annotation.Qualifier("providerDispatchScheduler")
                     reactor.core.scheduler.Scheduler providerScheduler) {
         this.ledger = ledger;
+        this.ownership = ownership;
         this.admission = admission;
         this.adapter = adapter;
         this.conversations = conversations;
@@ -48,7 +51,7 @@ public class UsageInvocation {
         this.providerScheduler = providerScheduler;
     }
 
-    public record Attempt(String id, WorkspaceAdmission.Registration registration,
+    public record Attempt(String id, WorkspaceAdmission.Registration registration, RunOwnership.Fence owner,
                           java.util.concurrent.atomic.AtomicReference<ClaimState> claim,
                           java.util.concurrent.atomic.AtomicReference<WorkspaceAdmission.ClaimFence> fence,
                           java.util.concurrent.atomic.AtomicReference<WorkspaceAdmission.TerminalKind> terminalIntent,
@@ -59,8 +62,8 @@ public class UsageInvocation {
         return adapter.dispatch(run, workspace, actor);
     }
 
-    public Attempt begin(UsageLedger.Dispatch dispatch, WorkspaceAdmission.Registration registration) {
-        return new Attempt(ledger.begin(dispatch), registration, new java.util.concurrent.atomic.AtomicReference<>(ClaimState.PENDING),
+    public Attempt begin(UsageLedger.Dispatch dispatch, WorkspaceAdmission.Registration registration, RunOwnership.Fence owner) {
+        return new Attempt(ledger.begin(dispatch, owner), registration, owner, new java.util.concurrent.atomic.AtomicReference<>(ClaimState.PENDING),
                 new java.util.concurrent.atomic.AtomicReference<>(), new java.util.concurrent.atomic.AtomicReference<>(),
                 new java.util.concurrent.CompletableFuture<>());
     }
@@ -97,7 +100,8 @@ public class UsageInvocation {
                                 if (decision==DispatchResolution.BUDGET_PENDING) return awaitDurableTerminal(handle).thenMany(Flux.empty());
                                 if (decision!=DispatchResolution.READY) return settlement(attempt).thenMany(Flux.error(new IllegalStateException(dispatchError(decision))));
                                 return Flux.defer(() -> {
-                                    if (handle.cancellationRequested()) return Flux.error(new IllegalStateException("Run cancelled before provider invocation"));
+                                    if (handle.cancellationRequested() || !ownership.mayDispatch(attempt.owner()))
+                                        return Flux.error(new IllegalStateException("Run cancelled or ownership lost before provider invocation"));
                                     return model.stream(prompt);
                                 })
                                     // Admission completes asynchronously; isolate the later blocking subscription
@@ -141,7 +145,8 @@ public class UsageInvocation {
                                 if (decision!=DispatchResolution.READY) return settlement(attempt).then(Mono.error(new IllegalStateException(dispatchError(decision))));
                                 return reactor.core.publisher.Mono.fromCallable(
                                             () -> {
-                                                    if (handle.cancellationRequested()) throw new IllegalStateException("Run cancelled before provider invocation");
+                                                    if (handle.cancellationRequested() || !ownership.mayDispatch(attempt.owner()))
+                                                        throw new IllegalStateException("Run cancelled or ownership lost before provider invocation");
                                                     return java.util.Objects.requireNonNull(
                                                             model.call(prompt),
                                                             "Model response missing");
@@ -163,9 +168,9 @@ public class UsageInvocation {
 
     private void capture(ChatResponse response, Attempt attempt, long ordinal) {
         try {
-            adapter.responseId(response).ifPresent(id -> ledger.recordResponseId(attempt.id(), id));
+            adapter.responseId(response).ifPresent(id -> ledger.recordResponseId(attempt.id(), id, attempt.owner()));
             adapter.capture(response, UUID.randomUUID().toString(), ordinal)
-                    .ifPresent(snapshot -> ledger.append(attempt.id(), snapshot));
+                    .ifPresent(snapshot -> ledger.append(attempt.id(), snapshot, attempt.owner()));
         } catch (RuntimeException ex) {
             // Capture exceptions may contain provider payloads or SQL values; neither may escape.
             finalizeAttempt(attempt, WorkspaceAdmission.TerminalKind.UNKNOWN, WorkspaceAdmission.TerminalReason.CAPTURE_FAILED);
@@ -209,7 +214,7 @@ public class UsageInvocation {
         if (!attempt.terminalIntent().compareAndSet(null, kind)) return;
         try {
             admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(
-                    attempt.registration(), attempt.id(), attempt.fence().get(), kind, reason))
+                    attempt.registration(), attempt.id(), attempt.fence().get(), kind, reason, attempt.owner()))
                 .whenComplete((result, error) -> {
                     attempt.settled().complete(error == null && result == WorkspaceAdmission.FinalizationResult.SETTLED);
                 });
@@ -248,7 +253,7 @@ public class UsageInvocation {
             }
             final java.util.concurrent.CompletionStage<WorkspaceAdmission.Decision> dispatch;
             try {
-                dispatch = admission.dispatch(new WorkspaceAdmission.Dispatch(attempt.registration(), attempt.id()));
+                dispatch = admission.dispatch(new WorkspaceAdmission.Dispatch(attempt.registration(), attempt.id(), attempt.owner()));
                 if (dispatch == null) throw new IllegalStateException("Admission returned no decision stage");
             } catch (RuntimeException ex) {
                 // A synchronous failure may occur after the lane received work; only
@@ -347,7 +352,7 @@ public class UsageInvocation {
     private void recoverDispatch(Attempt attempt) {
         try {
             // Recovery is a separate lane command; a lost dispatch is never resubmitted.
-            admission.recoverClaim(attempt.registration(), attempt.id())
+            admission.recoverClaim(attempt.registration(), attempt.id(), attempt.owner())
                     .whenCompleteAsync((inspection, failure) -> {
                         if (failure != null) return;
                         if (inspection instanceof WorkspaceAdmission.ClaimInspection.Found found) {

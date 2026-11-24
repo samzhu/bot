@@ -21,7 +21,7 @@ import java.util.function.Supplier;
 
 /** Durable admission state. A workspace lane serializes decisions until the transaction commits. */
 @Service
-public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
+public class DefaultWorkspaceAdmission implements WorkspaceAdmission, io.github.samzhu.bot.usage.RunRecoveryEvidence {
     private static final ZoneId ZONE = ZoneId.of("Asia/Taipei");
     private final ConversationOperations conversations;
     private final WorkspaceOperations workspaces;
@@ -33,6 +33,7 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
     private final BudgetProjection projection;
     private final WeeklyBudgetQuery weeklyBudgets;
     private final RunAdmissionStateReader runStateReader;
+    private final io.github.samzhu.bot.usage.RunOwnershipGuard ownership;
     private final StartupRecoveryState startupState;
     private final java.util.concurrent.ThreadPoolExecutor startupVerifier = new java.util.concurrent.ThreadPoolExecutor(1,1,0,
             java.util.concurrent.TimeUnit.MILLISECONDS,new java.util.concurrent.ArrayBlockingQueue<>(1),r -> {
@@ -49,7 +50,7 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
     public DefaultWorkspaceAdmission(ConversationOperations conversations, WorkspaceOperations workspaces,
             JdbcTemplate jdbc, org.springframework.transaction.PlatformTransactionManager manager,
             Clock clock, WorkspaceLane lane, io.github.samzhu.bot.usage.internal.pricing.CatalogActivation catalog, BudgetProjection projection,
-            RunAdmissionStateReader runStateReader, StartupRecoveryState startupState,
+            RunAdmissionStateReader runStateReader, io.github.samzhu.bot.usage.RunOwnershipGuard ownership, StartupRecoveryState startupState,
             WeeklyBudgetQuery weeklyBudgets) {
         this.conversations = conversations;
         this.workspaces = workspaces;
@@ -62,8 +63,57 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
         this.projection = projection;
         this.catalog = catalog;
         this.runStateReader = runStateReader;
+        this.ownership = ownership;
         this.startupState = startupState;
         this.weeklyBudgets = weeklyBudgets;
+    }
+
+    private boolean lockRecoveryRegistration(Registration r) {
+        if (!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive() || !valid(r)) return false;
+        var rows=jdbc.query("""
+                select token from workspace_admission_registration
+                 where token=? and run_id=? and workspace_id=? and actor_id=? and conversation_id=? and partition=? for update
+                """,(rs,n)->rs.getString(1),r.token(),r.runId(),r.workspaceId(),r.actorId(),r.conversationId(),r.partition().name());
+        if (rows.size()!=1) return false;
+        var run=runStateReader.readForUpdate(r.runId());
+        return run!=null && run.status()==RunAdmissionStateReader.Status.ACTIVE && r.conversationId().equals(run.conversationId());
+    }
+
+    @Override public boolean lockPromptFailure(PromptFailureFact fact) {
+        if (fact==null || blank(fact.attemptId()) || !lockRecoveryRegistration(fact.registration())) return false;
+        var r=fact.registration();
+        return Boolean.TRUE.equals(jdbc.queryForObject("""
+                select exists(select 1 from workspace_admission_finalization f
+                  join provider_attempt a on a.id=f.attempt_id
+                 where f.attempt_id=? and f.registration_token=? and f.state='SETTLED'
+                   and f.terminal_kind='NOT_DISPATCHED' and f.terminal_reason='PROMPT_CONTEXT_UNAVAILABLE'
+                   and a.run_id=? and a.workspace_id=? and a.actor_id=? and a.simulation=? and a.execution_outcome='NOT_DISPATCHED')
+                """,Boolean.class,fact.attemptId(),r.token(),r.runId(),r.workspaceId(),r.actorId(),r.partition()==Partition.SIMULATION));
+    }
+
+    @Override public boolean lockSuperseded(SupersededNotDispatched fact) {
+        if (fact==null || fact.oldEffect()==null || !lockRecoveryRegistration(fact.registration())) return false;
+        var r=fact.registration(); var effect=fact.oldEffect();
+        if (!(effect.target() instanceof io.github.samzhu.bot.usage.BudgetCancellationSink.Target.Pending pending)
+                || pending.fence()==null) return false;
+        var f=pending.fence();
+        if (!r.token().equals(effect.token()) || !r.workspaceId().equals(effect.workspaceId()) || r.partition()!=effect.partition()
+                || !r.runId().equals(effect.runId()) || !r.token().equals(f.token()) || !r.workspaceId().equals(f.workspaceId())
+                || r.partition()!=f.partition() || f.periodStart()==null || f.periodEnd()==null) return false;
+        return Boolean.TRUE.equals(jdbc.queryForObject("""
+                select exists(select 1 from workspace_admission_superseded s
+                  join workspace_admission_effect_outbox o on o.effect_id=s.old_effect_id
+                 where s.registration_token=? and o.effect_id=? and o.registration_token=?
+                   and o.target_workspace_id=? and o.target_partition=? and o.target_run_id=?
+                   and o.delivery_status='STALE' and o.claim_id is null and o.target_attempt_id is null
+                   and o.pending_id=? and o.pending_epoch=? and o.period_start=? and o.period_end=? and o.intent_receipt=?
+                   and not exists (select 1 from provider_attempt a
+                       left join workspace_admission_finalization z on z.attempt_id=a.id and z.registration_token=s.registration_token
+                      where a.run_id=? and (a.workspace_id is distinct from ? or a.actor_id is distinct from ? or a.simulation is distinct from ?
+                          or a.execution_outcome='IN_PROGRESS' or z.state is distinct from 'SETTLED'
+                          or z.terminal_kind is distinct from a.execution_outcome)))
+                """,Boolean.class,r.token(),effect.effectId(),r.token(),r.workspaceId(),r.partition().name(),r.runId(),
+                f.pendingId(),f.epoch(),f.periodStart().atZone(ZONE).toLocalDate(),f.periodEnd().atZone(ZONE).toLocalDate(),effect.intentReceipt(),r.runId(),r.workspaceId(),r.actorId(),r.partition()==Partition.SIMULATION));
     }
 
     @Override public CompletionStage<PromptFailurePage> scanSettledPromptFailures(String afterExclusive, String upperInclusive, int limit) {
@@ -166,6 +216,15 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
         }
     }
 
+    // Caller holds the registration lock and transaction; reuse the same authority as the periodic worker.
+    boolean preserveSupersededInTransaction(Registration registration) {
+        if (superseded(registration.token())) return true;
+        var effects=jdbc.query("select effect_id from workspace_admission_effect_outbox where registration_token=? and delivery_status='STALE' and claim_id is null order by effect_id",
+                (rs,n)->rs.getString(1),registration.token());
+        for (var effect:effects) if (createSupersededDisposition(registration,effect)) return true;
+        return false;
+    }
+
     private boolean createSupersededDisposition(Registration r, String effectId) {
         jdbc.execute("set local lock_timeout = '2s'");
         jdbc.execute("set local statement_timeout = '5s'");
@@ -217,6 +276,13 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
             if (recoveryScopes.contains(scopeKey(command.workspaceId(),command.partition())) || hasPendingRecovery(command.workspaceId(),command.partition()))
                 return new RegisterResult.Denied(Reason.RECOVERY_REQUIRED);
             RegisterResult result = transactions.execute(status -> {
+                // Registration is normally created before its Run. If a Run already
+                // exists, its row lock serializes this decision with no-registration recovery.
+                Boolean exists=jdbc.queryForObject("select exists(select 1 from workspace_admission_registration where run_id=?)",Boolean.class,command.runId());
+                if (Boolean.TRUE.equals(exists)) return new RegisterResult.Collision();
+                var existingRun=runStateReader.readForUpdate(command.runId());
+                if (existingRun==null || existingRun.status()!=RunAdmissionStateReader.Status.NOT_FOUND)
+                    return new RegisterResult.Denied(Reason.RECOVERY_REQUIRED);
                 var sampledAt = clock.instant();
                 var period = YearMonth.from(sampledAt.atZone(ZONE));
                 jdbc.update("insert into workspace_monthly_budget(workspace_id,partition) values (?,?) on conflict do nothing",command.workspaceId(),command.partition().name());
@@ -240,8 +306,8 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
                         command.runId(), command.actorId(), command.conversationId(), command.partition());
                 int inserted = jdbc.update("""
                     insert into workspace_admission_registration(token,run_id,workspace_id,actor_id,conversation_id,
-                        partition,status,pending_id,pending_period_start,pending_period_end)
-                    values (?,?,?,?,?,?,'REGISTERED',?,?,?) on conflict (run_id) do nothing
+                        partition,status,pending_id,pending_period_start,pending_period_end,start_lease_until)
+                    values (?,?,?,?,?,?,'REGISTERED',?,?,?,clock_timestamp()+interval '60 seconds') on conflict (run_id) do nothing
                     """, registration.token(), registration.runId(), registration.workspaceId(), registration.actorId(),
                         registration.conversationId(), registration.partition().name(), UUID.randomUUID().toString(),
                         period.atDay(1), period.plusMonths(1).atDay(1));
@@ -364,8 +430,8 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
             if ("CANCEL_REQUESTED".equals(registrationState)) return pendingBudgetCancellation(command,true);
             if (!"PUBLISHED".equals(registrationState)) return new Decision.Denied(Reason.RECOVERY_REQUIRED);
             var run=runStateReader.readForUpdate(r.runId());
-            if (run==null || run.status()!=RunAdmissionStateReader.Status.ACTIVE || !r.conversationId().equals(run.conversationId()))
-                return new Decision.Denied(Reason.RECOVERY_REQUIRED);
+            if (run==null || run.status()!=RunAdmissionStateReader.Status.ACTIVE || !r.conversationId().equals(run.conversationId())
+                    || !owns(r, command.owner())) return new Decision.Denied(Reason.RECOVERY_REQUIRED);
             var attempts = jdbc.query("""
                     select run_id,workspace_id,actor_id,simulation,execution_outcome,started_at
                       from provider_attempt where id=? for update
@@ -400,6 +466,8 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
                 if (cap.signum()==0 || (known==null ? java.math.BigDecimal.ZERO : known).add(held).compareTo(cap)>=0) return resolveDenied(command,Reason.MONTH_CAP);
                 if ((boolean)budget.get("terminal_effective_unknown")) return resolveDenied(command,Reason.MONTH_UNKNOWN);
             }
+            // Recheck at the durable admission decision; the startup gate is only a snapshot.
+            if (hasUncertainRun(r.workspaceId(),r.partition())) return resolveDenied(command,Reason.RECOVERY_REQUIRED);
             var weekly=weeklyBudgets.select(r.workspaceId(),r.actorId(),r.partition(),sampled.startedAt());
             var weeklyReason=weeklyReason(weekly, titleWeekHolds(r.workspaceId(),r.actorId(),r.partition(),weekly));
             if (weeklyReason!=null) return resolveDenied(command,weeklyReason);
@@ -446,9 +514,12 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
         }),new ClaimInspection.Unknown());
     }
     @Override public CompletionStage<ClaimInspection> recoverClaim(Registration registration,String attemptId) {
+        return recoverClaim(registration,attemptId,null);
+    }
+    @Override public CompletionStage<ClaimInspection> recoverClaim(Registration registration,String attemptId,io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner) {
         if (!valid(registration) || blank(attemptId)) return CompletableFuture.completedFuture(new ClaimInspection.Unknown());
         return executeCritical(registration.workspaceId(), () -> transactions.execute(status -> {
-            if (state(registration,true)==null || hasPendingFinalization(registration.workspaceId(),registration.partition()))
+            if (state(registration,true)==null || !ownsSettlement(registration,owner) || hasPendingFinalization(registration.workspaceId(),registration.partition()))
                 return (ClaimInspection)new ClaimInspection.Unknown();
             var attempts=jdbc.query("select run_id,workspace_id,actor_id,simulation,started_at,execution_outcome from provider_attempt where id=? for update",
                     (rs,n)->new Object[]{rs.getString(1),rs.getString(2),rs.getString(3),rs.getBoolean(4),rs.getTimestamp(5),rs.getString(6)},attemptId);
@@ -488,7 +559,7 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
         }
         return executeCritical(r.workspaceId(), () -> {
             return transactions.execute(status -> {
-            if (state(r,true)==null) return FinalizationResult.RECOVERY_REQUIRED;
+            if (state(r,true)==null || !ownsFinalization(command)) return FinalizationResult.RECOVERY_REQUIRED;
             var attempts=jdbc.query("select run_id,workspace_id,actor_id,simulation,started_at,execution_outcome from provider_attempt where id=? for update",
                     (rs,n)->new Object[]{rs.getString(1),rs.getString(2),rs.getString(3),rs.getBoolean(4),rs.getTimestamp(5),rs.getString(6)},command.attemptId());
             if (attempts.isEmpty()) return FinalizationResult.RECOVERY_REQUIRED;
@@ -578,7 +649,7 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
 
     private boolean persistFinalizationIntent(FinalizeAttempt command) {
         var r=command.registration();
-        if (state(r,true)==null) return false;
+        if (state(r,true)==null || !ownsFinalization(command)) return false;
         var rows=jdbc.query("select run_id,workspace_id,actor_id,simulation,started_at from provider_attempt where id=? for update",
                 (rs,n)->new Object[]{rs.getString(1),rs.getString(2),rs.getString(3),rs.getBoolean(4),rs.getTimestamp(5)},command.attemptId());
         if (rows.isEmpty()) return false;
@@ -601,6 +672,34 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
                 """,Boolean.class,command.attemptId(),r.token(),command.claim()==null?null:command.claim().claimId(),command.kind().name(),command.reason()==null?null:command.reason().name()));
     }
 
+    private boolean owns(Registration registration, io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner) {
+        var run=runStateReader.readForUpdate(registration.runId());
+        if (run==null || !registration.conversationId().equals(run.conversationId())) return false;
+        if (owner==null) return run.status()==RunAdmissionStateReader.Status.COMPLETED || run.status()==RunAdmissionStateReader.Status.TERMINAL;
+        return registration.runId().equals(owner.runId()) && run.status()==RunAdmissionStateReader.Status.ACTIVE && ownership.lockOwner(owner);
+    }
+
+    private boolean ownsSettlement(Registration registration, io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner) {
+        if (owner==null || !registration.runId().equals(owner.runId())) return false;
+        var run=runStateReader.readForUpdate(registration.runId());
+        return run!=null && run.status()!=RunAdmissionStateReader.Status.NOT_FOUND
+                && registration.conversationId().equals(run.conversationId()) && ownership.lockOwner(owner);
+    }
+
+    private boolean ownsFinalization(FinalizeAttempt command) {
+        var r=command.registration();
+        if (command.owner()!=null) return ownsSettlement(r,command.owner());
+        var run=runStateReader.readForUpdate(r.runId());
+        if (run==null || run.status()==RunAdmissionStateReader.Status.NOT_FOUND || !r.conversationId().equals(run.conversationId())) return false;
+        // A recovery worker may consume an already committed exact receipt, but may
+        // never create new provider evidence on behalf of an unowned Run.
+        return Boolean.TRUE.equals(jdbc.queryForObject("""
+                select exists(select 1 from workspace_admission_finalization where attempt_id=? and registration_token=?
+                   and claim_id is not distinct from ? and terminal_kind=? and terminal_reason is not distinct from ?)
+                """,Boolean.class,command.attemptId(),r.token(),command.claim()==null?null:command.claim().claimId(),
+                command.kind().name(),command.reason()==null?null:command.reason().name()));
+    }
+
     private boolean validTerminalReason(FinalizeAttempt command) {
         if (command.reason()==null) return true;
         return switch (command.reason()) {
@@ -617,17 +716,31 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
         return Boolean.TRUE.equals(jdbc.queryForObject("select exists(select 1 from workspace_admission_dispatch where attempt_id=? and registration_token=? and state='PENDING')",Boolean.class,attemptId,token));
     }
     private boolean hasPendingRecovery(String workspaceId, Partition partition) {
-        if (hasPendingFinalization(workspaceId,partition)) return true;
+        if (hasPendingFinalization(workspaceId,partition) || hasUncertainRun(workspaceId,partition)) return true;
         return Boolean.TRUE.equals(jdbc.queryForObject("""
                 select exists(select 1 from workspace_admission_dispatch d join workspace_admission_registration r
                     on r.token=d.registration_token where r.workspace_id=? and r.partition=? and d.state='PENDING')
                 """,Boolean.class,workspaceId,partition.name()));
     }
+    private boolean hasUncertainRun(String workspaceId, Partition partition) {
+        return Boolean.TRUE.equals(jdbc.queryForObject("""
+                select exists (select 1 from chat_run cr join conversation c on c.id=cr.conversation_id
+                    left join workspace_admission_registration r on r.run_id=cr.id
+                    left join run_ownership o on o.run_id=cr.id
+                    where c.workspace_id=? and cr.status in ('PENDING','RUNNING')
+                      and (r.token is null or (r.partition=? and (o.run_id is null or o.lease_until<=clock_timestamp()))))
+                  or exists (select 1 from workspace_admission_registration r
+                    where r.workspace_id=? and r.partition=? and r.status='REGISTERED'
+                      and not exists(select 1 from chat_run cr where cr.id=r.run_id)
+                      and coalesce(r.start_lease_until<=clock_timestamp(),true))
+                """,Boolean.class,workspaceId,partition.name(),workspaceId,partition.name()));
+    }
+
     /** Called only on the workspace lane within a transaction, after the registration lock. */
     private Decision pendingBudgetCancellation(Dispatch command, boolean ownDispatchPending) {
         var r=command.registration();
-        if (!"CANCEL_REQUESTED".equals(state(r,true)) || !authorized(r.workspaceId(),r.conversationId(),r.actorId()))
-            return new Decision.Denied(Reason.RECOVERY_REQUIRED);
+        if (!"CANCEL_REQUESTED".equals(state(r,true)) || !authorized(r.workspaceId(),r.conversationId(),r.actorId())
+                || !owns(r,command.owner())) return new Decision.Denied(Reason.RECOVERY_REQUIRED);
         var attempts=jdbc.query("select run_id,workspace_id,actor_id,simulation,started_at,execution_outcome from provider_attempt where id=? for update",
                 (rs,n)->new Object[]{rs.getString(1),rs.getString(2),rs.getString(3),rs.getBoolean(4),rs.getTimestamp(5),rs.getString(6)},command.attemptId());
         if (attempts.size()!=1) return new Decision.Denied(Reason.RECOVERY_REQUIRED);
@@ -672,7 +785,7 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
         if (state==null || !authorized(r.workspaceId(),r.conversationId(),r.actorId())) return Reason.UNAUTHORIZED;
         if (superseded(r.token())) return Reason.RECOVERY_REQUIRED;
         if ("CANCEL_REQUESTED".equals(state)) return Reason.CANCELLED;
-        if (!"PUBLISHED".equals(state)) return Reason.RECOVERY_REQUIRED;
+        if (!"PUBLISHED".equals(state) || !owns(r,command.owner())) return Reason.RECOVERY_REQUIRED;
         var attempts=jdbc.query("select run_id,workspace_id,actor_id,simulation,started_at,execution_outcome from provider_attempt where id=? for update",
                 (rs,n)->new Object[]{rs.getString(1),rs.getString(2),rs.getString(3),rs.getBoolean(4),rs.getTimestamp(5),rs.getString(6)},command.attemptId());
         if (attempts.isEmpty()) return Reason.UNAUTHORIZED;
@@ -926,11 +1039,32 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission {
     private boolean unresolvedStartupFacts() {
         if (!recoveryScopes.isEmpty()) return true;
         return Boolean.TRUE.equals(startupJdbc.queryForObject("""
-                select exists(select 1 from workspace_admission_finalization where state='PENDING')
-                    or exists(select 1 from workspace_admission_dispatch where state='PENDING')
-                    or exists(select 1 from workspace_admission_registration where status<>'TERMINAL')
-                    or exists(select 1 from workspace_admission_claim where status in ('CLAIMED','CANCEL_REQUESTED'))
-                    or exists(select 1 from provider_attempt where execution_outcome='IN_PROGRESS')
+                select exists (select 1 from chat_run cr
+                    where cr.status in ('PENDING','RUNNING')
+                      and not exists (select 1 from workspace_admission_registration r where r.run_id=cr.id))
+                  or exists (
+                    select 1 from workspace_admission_registration r
+                    where r.status<>'TERMINAL' and not exists (
+                        select 1 from chat_run cr join run_ownership o on o.run_id=cr.id
+                        where cr.id=r.run_id and cr.status in ('PENDING','RUNNING') and o.lease_until>clock_timestamp())
+                    and not (r.status='REGISTERED' and coalesce(r.start_lease_until>clock_timestamp(),false)
+                        and not exists(select 1 from chat_run cr where cr.id=r.run_id)))
+                  or exists (
+                    select 1 from provider_attempt a where a.execution_outcome='IN_PROGRESS'
+                    and not exists (select 1 from chat_run cr join run_ownership o on o.run_id=cr.id
+                        where cr.id=a.run_id and cr.status in ('PENDING','RUNNING') and o.lease_until>clock_timestamp())
+                    and not exists (select 1 from conversation_title_work w join workspace_title_reservation h on h.conversation_id=w.conversation_id
+                        where w.conversation_id=a.title_conversation_id and h.attempt_id=a.id and w.state='CLAIMED'
+                        and w.claimed_until>clock_timestamp() and h.state='HELD'))
+                  or exists (select 1 from workspace_admission_finalization f join workspace_admission_registration r on r.token=f.registration_token
+                        where f.state='PENDING' and not exists (select 1 from chat_run cr join run_ownership o on o.run_id=cr.id
+                            where cr.id=r.run_id and cr.status in ('PENDING','RUNNING') and o.lease_until>clock_timestamp()))
+                  or exists (select 1 from workspace_admission_dispatch d join workspace_admission_registration r on r.token=d.registration_token
+                        where d.state='PENDING' and not exists (select 1 from chat_run cr join run_ownership o on o.run_id=cr.id
+                            where cr.id=r.run_id and cr.status in ('PENDING','RUNNING') and o.lease_until>clock_timestamp()))
+                  or exists (select 1 from workspace_admission_claim c join workspace_admission_registration r on r.token=c.registration_token
+                        where c.status in ('CLAIMED','CANCEL_REQUESTED') and not exists (select 1 from chat_run cr join run_ownership o on o.run_id=cr.id
+                            where cr.id=r.run_id and cr.status in ('PENDING','RUNNING') and o.lease_until>clock_timestamp()))
                 """,Boolean.class));
     }
 

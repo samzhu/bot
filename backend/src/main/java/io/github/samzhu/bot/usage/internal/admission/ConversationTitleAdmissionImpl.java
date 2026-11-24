@@ -13,9 +13,11 @@ import org.springframework.transaction.support.TransactionTemplate;
 class ConversationTitleAdmissionImpl implements ConversationTitleAdmission {
     private static final ZoneId ZONE = ZoneId.of("Asia/Taipei");
     private final JdbcTemplate jdbc;
+    private final JdbcTemplate recoveryJdbc;
     private final TransactionTemplate transactions;
     private final WorkspaceLane lanes;
     private final WeeklyBudgetQuery weekly;
+    private final BudgetProjection projection;
     private final Clock clock;
     private final io.github.samzhu.bot.usage.UsageLedger ledger;
     private final io.github.samzhu.bot.usage.internal.pricing.PricingPublisher pricing;
@@ -24,11 +26,12 @@ class ConversationTitleAdmissionImpl implements ConversationTitleAdmission {
     private final com.fasterxml.jackson.databind.ObjectMapper json = new com.fasterxml.jackson.databind.ObjectMapper();
 
     ConversationTitleAdmissionImpl(JdbcTemplate jdbc, TransactionTemplate transactions, WorkspaceLane lanes,
-            WeeklyBudgetQuery weekly, Clock clock, io.github.samzhu.bot.usage.ConversationTitlePartition partition, io.github.samzhu.bot.usage.UsageLedger ledger,
+            WeeklyBudgetQuery weekly, BudgetProjection projection, Clock clock, io.github.samzhu.bot.usage.ConversationTitlePartition partition, io.github.samzhu.bot.usage.UsageLedger ledger,
             io.github.samzhu.bot.usage.internal.pricing.PricingPublisher pricing,
             io.github.samzhu.bot.usage.internal.pricing.CatalogActivation catalog) {
-        this.jdbc = jdbc; this.transactions = transactions; this.lanes = lanes;
-        this.weekly = weekly; this.clock = clock; this.partition = partition; this.catalog = catalog; this.ledger = ledger; this.pricing = pricing;
+        this.jdbc = jdbc; this.recoveryJdbc=new JdbcTemplate(java.util.Objects.requireNonNull(jdbc.getDataSource()));
+        this.recoveryJdbc.setQueryTimeout(5); this.transactions = transactions; this.lanes = lanes;
+        this.weekly = weekly; this.projection=projection; this.clock = clock; this.partition = partition; this.catalog = catalog; this.ledger = ledger; this.pricing = pricing;
     }
 
     @Override public Decision allow(String conversationId) {
@@ -36,6 +39,9 @@ class ConversationTitleAdmissionImpl implements ConversationTitleAdmission {
         if (scopes.size() != 1) return Decision.DENIED;
         try {
             return lanes.submit(scopes.getFirst(), () -> transactions.execute(status -> {
+                // Recovery and admission serialize on the title work row before budget locks.
+                jdbc.query("select conversation_id from conversation_title_work where conversation_id=? for update",(rs,n)->rs.getString(1),conversationId);
+                if (!hasLiveClaim(conversationId)) return Decision.DENIED;
                 var rows = jdbc.query("""
                     select c.workspace_id,c.user_id from conversation c
                     join workspace_member m on m.workspace_id=c.workspace_id and m.user_id=c.user_id and m.active=true
@@ -63,7 +69,8 @@ class ConversationTitleAdmissionImpl implements ConversationTitleAdmission {
                 if (week.enabled() && (week.capUsd().signum() == 0 ||
                     (week.knownSubtotalUsd() != null && week.knownSubtotalUsd().compareTo(week.capUsd()) >= 0) || week.terminalUnknownCount() > 0)) return Decision.DENIED;
                 // Existing fake-only flows with no enabled budget retain their established behavior.
-                if (!(boolean) budget.get("enabled") && !week.enabled() && partition == WorkspaceAdmission.Partition.SIMULATION) return Decision.ALLOWED;
+                if (!(boolean) budget.get("enabled") && !week.enabled() && partition == WorkspaceAdmission.Partition.SIMULATION)
+                    return hasLiveClaim(conversationId) ? Decision.ALLOWED : Decision.DENIED;
                 if (partition == WorkspaceAdmission.Partition.REAL && (!(boolean) budget.get("enabled") || !week.enabled())) return Decision.DENIED;
                 if (partition == WorkspaceAdmission.Partition.REAL && Boolean.TRUE.equals(jdbc.queryForObject("""
                     select exists(select 1 from provider_attempt where workspace_id=? and simulation=false
@@ -103,6 +110,7 @@ class ConversationTitleAdmissionImpl implements ConversationTitleAdmission {
                     var spent = week.knownSubtotalUsd() == null ? java.math.BigDecimal.ZERO : week.knownSubtotalUsd();
                     if (spent.add(weekHeld).add(amount).compareTo(week.capUsd()) > 0) return Decision.DENIED;
                 }
+                if (!hasLiveClaim(conversationId)) return Decision.DENIED;
                 String attempt = java.util.UUID.randomUUID().toString();
                 jdbc.update("""
                     insert into provider_attempt(id,run_id,workspace_id,actor_id,provider,endpoint,model,channel,adapter_version,
@@ -116,10 +124,20 @@ class ConversationTitleAdmissionImpl implements ConversationTitleAdmission {
                     insert into workspace_title_reservation(conversation_id,workspace_id,actor_id,partition,reserved_at,month_start,amount_usd,catalog_revision_id,attempt_id,state)
                     values (?,?,?,?,?,?,?,?,?,'HELD') on conflict (conversation_id) do nothing
                     """, conversationId, scopes.getFirst(), actor, partition.name(), java.sql.Timestamp.from(now), month.atDay(1), amount, selected.revisionId(), attempt);
-                if (inserted != 1) status.setRollbackOnly();
-                return inserted == 1 ? Decision.ALLOWED : Decision.DENIED;
+                if (inserted != 1 || !hasLiveClaim(conversationId)) {
+                    status.setRollbackOnly();
+                    return Decision.DENIED;
+                }
+                return Decision.ALLOWED;
             })).toCompletableFuture().join();
         } catch (RuntimeException ex) { return Decision.DENIED; }
+    }
+
+    private boolean hasLiveClaim(String conversationId) {
+        return Boolean.TRUE.equals(jdbc.queryForObject("""
+                select exists(select 1 from conversation_title_work
+                  where conversation_id=? and state='CLAIMED' and claimed_until>clock_timestamp())
+                """,Boolean.class,conversationId));
     }
 
     @Override public boolean capture(String conversationId, io.github.samzhu.bot.conversation.ConversationTitleGenerator.Result result) {
@@ -163,10 +181,75 @@ class ConversationTitleAdmissionImpl implements ConversationTitleAdmission {
     }
 
     @Override public void unknown(String conversationId) {
-        var ids = jdbc.query("select attempt_id from workspace_title_reservation where conversation_id=?", (rs,n) -> rs.getString(1), conversationId);
-        if (ids.isEmpty()) return;
-        try { ledger.finish(ids.getFirst(), "UNKNOWN"); }
-        finally { jdbc.update("update workspace_title_reservation set state='UNKNOWN' where conversation_id=? and state='HELD'", conversationId); }
+        settleUnknown(conversationId,false);
+    }
+
+    @Override public int recoverExpiredBatch() {
+        var ids=recoveryJdbc.query("""
+                select w.conversation_id from conversation_title_work w
+                  join workspace_title_reservation h on h.conversation_id=w.conversation_id
+                  join provider_attempt a on a.id=h.attempt_id and a.title_conversation_id=w.conversation_id
+                 where w.state in ('CLAIMED','FAILED') and w.claimed_until<=clock_timestamp()
+                   and h.state='HELD' and a.purpose='CONVERSATION_TITLE' and a.execution_outcome='IN_PROGRESS'
+                 order by w.conversation_id limit 100
+                """,(rs,n)->rs.getString(1));
+        int recovered=0;
+        long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(250);
+        for (String id:ids) {
+            if (System.nanoTime()>=deadline) break;
+            if (settleUnknown(id,true)) recovered++;
+        }
+        return recovered;
+    }
+
+    private boolean settleUnknown(String conversationId,boolean onlyExpired) {
+        var scopes=jdbc.query("select workspace_id,attempt_id,partition from workspace_title_reservation where conversation_id=?",
+                (rs,n)->new String[]{rs.getString(1),rs.getString(2),rs.getString(3)},conversationId);
+        if (scopes.size()!=1 || scopes.getFirst()[1]==null) return false;
+        var scope=scopes.getFirst();
+        try {
+            return Boolean.TRUE.equals(lanes.submitCritical(scope[0], () -> transactions.execute(status -> {
+                jdbc.execute("set local lock_timeout = '2s'");
+                jdbc.execute("set local statement_timeout = '5s'");
+                jdbc.query("select conversation_id from conversation_title_work where conversation_id=? for update",(rs,n)->rs.getString(1),conversationId);
+                var work=jdbc.query("select state,claimed_until is not null and claimed_until<=clock_timestamp() from conversation_title_work where conversation_id=?",
+                        (rs,n)->new Object[]{rs.getString(1),rs.getBoolean(2)},conversationId);
+                if (work.size()!=1 || !("CLAIMED".equals(work.getFirst()[0]) || "FAILED".equals(work.getFirst()[0]))
+                        || (onlyExpired && !Boolean.TRUE.equals(work.getFirst()[1]))) return false;
+                var attempts=jdbc.query("""
+                        select execution_outcome,simulation,started_at from provider_attempt
+                         where id=? and workspace_id=? and purpose='CONVERSATION_TITLE' and title_conversation_id=? for update
+                        """,(rs,n)->new Object[]{rs.getString(1),rs.getBoolean(2),rs.getTimestamp(3)},scope[1],scope[0],conversationId);
+                if (attempts.size()!=1) return false;
+                var attempt=attempts.getFirst();
+                // A committed success and its projection remain authoritative even if the hold is still HELD.
+                if (!("IN_PROGRESS".equals(attempt[0]) || "UNKNOWN".equals(attempt[0]))) return false;
+                if ("IN_PROGRESS".equals(attempt[0])) {
+                    jdbc.update("""
+                            update provider_attempt set execution_outcome='UNKNOWN',usage_presence='UNKNOWN',projection_state='UNKNOWN',
+                                projection_error='TITLE_RECOVERY',projection_version=projection_version+1,finished_at=clock_timestamp()
+                             where id=? and execution_outcome='IN_PROGRESS'
+                            """,scope[1]);
+                    if (attempt[2]!=null) {
+                        var period=YearMonth.from(((java.sql.Timestamp)attempt[2]).toInstant().atZone(ZONE));
+                        projection.recompute(scope[0],WorkspaceAdmission.Partition.valueOf(scope[2]),
+                                period.atDay(1).atStartOfDay(ZONE).toInstant(),period.plusMonths(1).atDay(1).atStartOfDay(ZONE).toInstant());
+                    }
+                }
+                int changed=jdbc.update("""
+                        update workspace_title_reservation set state='UNKNOWN'
+                         where conversation_id=? and workspace_id=? and attempt_id=? and partition=? and state='HELD'
+                        """,conversationId,scope[0],scope[1],scope[2]);
+                if (changed!=1) { status.setRollbackOnly(); return false; }
+                jdbc.update("update conversation_title_work set state='FAILED' where conversation_id=? and state='CLAIMED'",conversationId);
+                return true;
+            })).toCompletableFuture().get(10,java.util.concurrent.TimeUnit.SECONDS));
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Title recovery interrupted",interrupted);
+        } catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException failure) {
+            throw new IllegalStateException("Title recovery outcome is unknown",failure);
+        }
     }
 
     private static java.math.BigDecimal rate(com.fasterxml.jackson.databind.JsonNode node, String key) {

@@ -2,6 +2,8 @@ package io.github.samzhu.bot;
 
 import com.zaxxer.hikari.HikariDataSource;
 import io.github.samzhu.bot.conversation.ConversationOperations;
+import io.github.samzhu.bot.usage.RunOwnershipGuard;
+import io.github.samzhu.bot.usage.SyntheticRunOwner;
 import io.github.samzhu.bot.usage.UsageLedger;
 import io.github.samzhu.bot.usage.WorkspaceAdmission;
 import io.github.samzhu.bot.usage.WorkspaceMonthlyBudgetOperations;
@@ -44,10 +46,12 @@ class WorkspaceAdmissionRestartTests {
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,
                 admission.register(new WorkspaceAdmission.Register(workspace,run,actor,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        var fence=SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
-        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
-        var allowed=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt)).toCompletableFuture().join());
+        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),fence);
+        var allowed=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt,fence)).toCompletableFuture().join());
         jdbc.update("insert into workspace_admission_finalization(attempt_id,registration_token,claim_id,terminal_kind,terminal_reason,state) values (?,?,?,'UNKNOWN','CAPTURE_FAILED','PENDING')",attempt,registration.token(),allowed.claim().claimId());
+        jdbc.update("update run_ownership set lease_until = clock_timestamp() - interval '1 second' where run_id = ?", registration.runId());
         var ds=(HikariDataSource)dataSource;
         try(var restarted=new SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class).web(WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
@@ -84,19 +88,33 @@ class WorkspaceAdmissionRestartTests {
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(
                 new WorkspaceAdmission.Register(workspace,run,actor,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        var fence=SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
-        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
+        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),fence);
         jdbc.update("insert into workspace_admission_dispatch(attempt_id,registration_token,state) values (?,?,'PENDING')",attempt,registration.token());
+        jdbc.update("update run_ownership set lease_until = clock_timestamp() - interval '1 second' where run_id = ?", registration.runId());
+        var beforeAttempt=jdbc.queryForMap("select execution_outcome,projection_version from provider_attempt where id=?",attempt);
+        var beforeOwner=jdbc.queryForMap("select owner_token,generation from run_ownership where run_id=?",run);
+        String beforeRegStatus=jdbc.queryForObject("select status from workspace_admission_registration where token=?",String.class,registration.token());
         var ds=(HikariDataSource)dataSource;
         assertThrows(RuntimeException.class,()->new SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class).web(WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                         "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false",
                         "bot.execution.startup-coordinator.budget=2s",
                         "bot.pricing.reconcile.initial-delay-ms=3600000","bot.pricing.reconcile.delay-ms=3600000").run());
+        var afterAttempt=jdbc.queryForMap("select execution_outcome,projection_version from provider_attempt where id=?",attempt);
+        var afterOwner=jdbc.queryForMap("select owner_token,generation from run_ownership where run_id=?",run);
+        String afterRegStatus=jdbc.queryForObject("select status from workspace_admission_registration where token=?",String.class,registration.token());
         assertEquals("PENDING",jdbc.queryForObject("select state from workspace_admission_dispatch where attempt_id=?",String.class,attempt));
-        assertEquals("UNKNOWN",jdbc.queryForObject("select execution_outcome from provider_attempt where id=?",String.class,attempt));
+        assertEquals(beforeAttempt.get("execution_outcome"),afterAttempt.get("execution_outcome"));
+        assertEquals("IN_PROGRESS",afterAttempt.get("execution_outcome"));
+        assertEquals(beforeAttempt.get("projection_version"),afterAttempt.get("projection_version"));
+        assertEquals(beforeOwner.get("owner_token"),afterOwner.get("owner_token"));
+        assertEquals(beforeOwner.get("generation"),afterOwner.get("generation"));
+        assertEquals(beforeRegStatus,afterRegStatus);
         assertEquals(0,jdbc.queryForObject("select count(*) from workspace_admission_claim where attempt_id=?",Integer.class,attempt));
-        assertNotEquals("TERMINAL",jdbc.queryForObject("select status from workspace_admission_registration where token=?",String.class,registration.token()));
+        assertNotEquals("TERMINAL",afterRegStatus);
+        assertInstanceOf(WorkspaceAdmission.ClaimInspection.Unknown.class,admission.recoverClaim(registration,attempt).toCompletableFuture().join());
     }
 
     @org.junit.jupiter.params.ParameterizedTest
@@ -109,15 +127,16 @@ class WorkspaceAdmissionRestartTests {
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(
                 new WorkspaceAdmission.Register(workspace,run,actor,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        var fence=SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
-        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
-        var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt)).toCompletableFuture().join()).claim();
+        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),fence);
+        var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt,fence)).toCompletableFuture().join()).claim();
         String function="fail_restart_"+UUID.randomUUID().toString().replace("-","");
         jdbc.execute("create function "+function+"() returns trigger language plpgsql as $$ begin if new.id='"+attempt+"' and new.execution_outcome='"+kind.name()+"' then raise exception 'injected settlement failure'; end if; return new; end $$");
         jdbc.execute("create trigger "+function+" before update on provider_attempt for each row execute function "+function+"()");
         try {
             assertEquals(WorkspaceAdmission.FinalizationResult.RECOVERY_REQUIRED,admission.finalizeAttempt(
-                    new WorkspaceAdmission.FinalizeAttempt(registration,attempt,claim,kind)).toCompletableFuture().join());
+                    new WorkspaceAdmission.FinalizeAttempt(registration,attempt,claim,kind,null,fence)).toCompletableFuture().join());
             assertEquals("PENDING",jdbc.queryForObject("select state from workspace_admission_finalization where attempt_id=?",String.class,attempt));
         } finally {
             jdbc.execute("drop trigger if exists "+function+" on provider_attempt");
@@ -141,9 +160,10 @@ class WorkspaceAdmissionRestartTests {
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(
                 new WorkspaceAdmission.Register(workspace,run,actor,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        var fence=SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
-        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
-        var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt)).toCompletableFuture().join()).claim();
+        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),fence);
+        var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt,fence)).toCompletableFuture().join()).claim();
         jdbc.update("insert into workspace_admission_finalization(attempt_id,registration_token,claim_id,terminal_kind,state) values (?,?,?,'SUCCEEDED','PENDING')",attempt,registration.token(),claim.claimId());
         jdbc.update("update provider_attempt set execution_outcome='FAILED' where id=?",attempt);
         var ds=(HikariDataSource)dataSource;

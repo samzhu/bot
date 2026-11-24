@@ -69,7 +69,20 @@ class PromptFailureTimeoutIntegrationTests {
             return call.callRealMethod();
         }).when(finalizationScheduler).schedule(any(Runnable.class));
         doAnswer(call -> {
-            if (revokeMember) assertEquals(1,jdbc.update("update workspace_member set active=false where workspace_id=? and user_id='dev-user' and active=true",workspace));
+            if (revokeMember) {
+                // Commit independently: the surrounding fenced session transaction is about to fail.
+                try (var connection=dataSource.getConnection();
+                     var update=connection.prepareStatement("update workspace_member set active=false where workspace_id=? and user_id='dev-user' and active=true")) {
+                    connection.setAutoCommit(true);
+                    update.setString(1,workspace);
+                    assertEquals(1,update.executeUpdate());
+                }
+                try (var connection=dataSource.getConnection();
+                     var query=connection.prepareStatement("select active from workspace_member where workspace_id=? and user_id='dev-user'")) {
+                    query.setString(1,workspace);
+                    try (var rows=query.executeQuery()) { assertTrue(rows.next()); assertFalse(rows.getBoolean(1)); }
+                }
+            }
             if (registryMiss) {
                 String run=jdbc.queryForObject("select id from chat_run where conversation_id=? and client_request_id=?",String.class,conversation,requestId);
                 assertNotNull(registry.remove(run));
@@ -242,6 +255,8 @@ class PromptFailureTimeoutIntegrationTests {
             String run=jdbc.queryForObject("select id from chat_run where conversation_id=? and client_request_id=?",String.class,conversation,requestId);
             assertEquals("RUNNING",jdbc.queryForObject("select status from chat_run where id=?",String.class,run));
             assertEquals("SETTLED",jdbc.queryForObject("select f.state from workspace_admission_finalization f join provider_attempt a on a.id=f.attempt_id where a.run_id=?",String.class,run));
+            // The second context may recover only after the existing lease has expired.
+            assertEquals(1,jdbc.update("update run_ownership set lease_until=clock_timestamp()-interval '1 second' where run_id=?",run));
             var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
             try(var fresh=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
                     .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")

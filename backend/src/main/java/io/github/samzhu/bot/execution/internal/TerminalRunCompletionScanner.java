@@ -19,6 +19,7 @@ public class TerminalRunCompletionScanner {
     private static final Duration BATCH_BUDGET = Duration.ofMillis(250);
     private final TerminalRunScanRepository runs;
     private final WorkspaceAdmission admission;
+    private final io.github.samzhu.bot.usage.RunRecoverySweep recovery;
     private final PromptFailureCompletionScanner promptFailures;
     private final SupersededBudgetCompletionScanner supersededBudgets;
     private final AtomicBoolean running = new AtomicBoolean();
@@ -27,12 +28,19 @@ public class TerminalRunCompletionScanner {
     private String after = "";
     private boolean unresolved;
 
-    public TerminalRunCompletionScanner(TerminalRunScanRepository runs, WorkspaceAdmission admission, PromptFailureCompletionScanner promptFailures,
+    public TerminalRunCompletionScanner(TerminalRunScanRepository runs, WorkspaceAdmission admission, io.github.samzhu.bot.usage.RunRecoverySweep recovery, PromptFailureCompletionScanner promptFailures,
                                         SupersededBudgetCompletionScanner supersededBudgets) {
         this.runs = runs;
         this.admission = admission;
+        this.recovery = recovery;
         this.promptFailures = promptFailures;
         this.supersededBudgets = supersededBudgets;
+    }
+
+    void scanRecoveryBeforeBarrier(long deadlineNanos) {
+        if (deadlineNanos-System.nanoTime()<=0) return;
+        promptFailures.scanStartupBatch(deadlineNanos);
+        if (deadlineNanos-System.nanoTime()>0) supersededBudgets.scanStartupBatch(deadlineNanos);
     }
 
     /** Startup coordinator may enable periodic work only after its readiness barrier succeeds. */
@@ -91,7 +99,7 @@ public class TerminalRunCompletionScanner {
             fixedDelayString = "${bot.execution.completion-sweep.delay-ms:1000}")
     public void scheduledScan() {
         if (!enabled) return;
-        try { scanBatch(); }
+        try { recovery.recoverExpiredBatch(); scanBatch(); }
         catch (RuntimeException ex) { log.warn("Terminal Run completion scan requires retry"); }
     }
 

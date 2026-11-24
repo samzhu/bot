@@ -100,10 +100,13 @@ class AgUiDenialIntegrationTests {
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(
                 new WorkspaceAdmission.Register(workspace,sourceRun,"dev-user",sourceConversation,WorkspaceAdmission.Partition.SIMULATION)).toCompletableFuture().get(10,TimeUnit.SECONDS)).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'synthetic','PENDING')",sourceRun,sourceConversation,UUID.randomUUID().toString());
+        String ownerToken=UUID.randomUUID().toString();
+        jdbc.update("insert into run_ownership(run_id,owner_token,generation,lease_until) values (?,?,1,clock_timestamp()+interval '1 hour')",sourceRun,ownerToken);
+        var owner=new io.github.samzhu.bot.usage.RunOwnershipGuard.Fence(sourceRun,ownerToken,1);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().get(10,TimeUnit.SECONDS));
-        String attempt=ledger.begin(new UsageLedger.Dispatch(sourceRun,workspace,"dev-user","FAKE","test","model","FAKE","1",true,"UNKNOWN"));
-        var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt)).toCompletableFuture().get(10,TimeUnit.SECONDS)).claim();
-        assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(registration,attempt,claim,WorkspaceAdmission.TerminalKind.UNKNOWN)).toCompletableFuture().get(10,TimeUnit.SECONDS));
+        String attempt=ledger.begin(new UsageLedger.Dispatch(sourceRun,workspace,"dev-user","FAKE","test","model","FAKE","1",true,"UNKNOWN"),owner);
+        var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt,owner)).toCompletableFuture().get(10,TimeUnit.SECONDS)).claim();
+        assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(registration,attempt,claim,WorkspaceAdmission.TerminalKind.UNKNOWN,null,owner)).toCompletableFuture().get(10,TimeUnit.SECONDS));
         jdbc.update("update chat_run set status='FAILED' where id=?",sourceRun);
         var configured=budgets.configure(new WorkspaceMonthlyBudgetOperations.ConfigureCommand(scope(workspace),"dev-user",true,new BigDecimal("100"),0)).toCompletableFuture().get(10,TimeUnit.SECONDS);
         assertTrue(configured.terminalEffectiveUnknown());

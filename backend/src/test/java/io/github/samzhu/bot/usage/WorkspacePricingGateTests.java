@@ -1,6 +1,8 @@
 package io.github.samzhu.bot;
 
 import io.github.samzhu.bot.conversation.ConversationOperations;
+import io.github.samzhu.bot.usage.RunOwnershipGuard;
+import io.github.samzhu.bot.usage.SyntheticRunOwner;
 import io.github.samzhu.bot.usage.UsageLedger;
 import io.github.samzhu.bot.usage.WorkspaceAdmission;
 import io.github.samzhu.bot.usage.WorkspaceMonthlyBudgetOperations;
@@ -70,9 +72,10 @@ class WorkspacePricingGateTests {
             budgets.configure(new WorkspaceMonthlyBudgetOperations.ConfigureCommand(scope,actor,true,new BigDecimal("100"),0)).toCompletableFuture().join();
             var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(new WorkspaceAdmission.Register(workspace,run,actor,conversation.id(),WorkspaceAdmission.Partition.SIMULATION)).toCompletableFuture().join()).registration();
             jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+            var fence=SyntheticRunOwner.attach(jdbc,registration);
             assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
-            String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE_GEMINI","generateContent",model,"FAKE","1",true,"VERIFIED"));
-            assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt)).toCompletableFuture().join());
+            String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE_GEMINI","generateContent",model,"FAKE","1",true,"VERIFIED"),fence);
+            assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt,fence)).toCompletableFuture().join());
             String catalog="fixture-catalog-"+UUID.randomUUID(),entry="fixture-entry-"+UUID.randomUUID();
             jdbc.update("insert into pricing_catalog_revision(id,source_reference,source_revision,content_hash) values (?,'synthetic',?,'fixture')",catalog,catalog);
             jdbc.update("""
@@ -82,8 +85,8 @@ class WorkspacePricingGateTests {
                     """,entry,catalog,model);
             jdbc.update("update provider_attempt set catalog_marker='CAPTURED',catalog_revision_id=? where id=?",catalog,attempt);
             ledger.append(attempt,new UsageLedger.Snapshot("raw",1,"FINAL","FAKE_RAW","pricing-fixture-v1","1","1","COMPLETE",
-                    "{\"promptTokenCount\":1000,\"cachedContentTokenCount\":200,\"candidatesTokenCount\":300,\"thoughtsTokenCount\":100,\"toolUsePromptTokenCount\":0}"));
-            ledger.finish(attempt,"SUCCEEDED");
+                    "{\"promptTokenCount\":1000,\"cachedContentTokenCount\":200,\"candidatesTokenCount\":300,\"thoughtsTokenCount\":100,\"toolUsePromptTokenCount\":0}"),fence);
+            ledger.finish(attempt,"SUCCEEDED",fence);
             assertTrue(budgets.read(new WorkspaceMonthlyBudgetOperations.ReadCommand(scope,actor)).toCompletableFuture().join().terminalEffectiveUnknown());
             SCHEDULER_RELEASE.countDown();
             long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(8);
@@ -138,11 +141,13 @@ class WorkspacePricingGateTests {
         var first=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(new WorkspaceAdmission.Register(workspace,run,actor,conversation.id(),WorkspaceAdmission.Partition.SIMULATION)).toCompletableFuture().join()).registration();
         var second=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(new WorkspaceAdmission.Register(workspace,nextRun,actor,nextConversation.id(),WorkspaceAdmission.Partition.SIMULATION)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING'),(?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString(),nextRun,nextConversation.id(),UUID.randomUUID().toString());
+        var fence1=SyntheticRunOwner.attach(jdbc,first);
+        var fence2=SyntheticRunOwner.attach(jdbc,second);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(first).toCompletableFuture().join());
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(second).toCompletableFuture().join());
-        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE_GEMINI","generateContent",model,"FAKE","1",true,"VERIFIED"));
-        String nextAttempt=ledger.begin(new UsageLedger.Dispatch(nextRun,workspace,actor,"FAKE_GEMINI","generateContent",model,"FAKE","1",true,"VERIFIED"));
-        assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(first,attempt)).toCompletableFuture().join());
+        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE_GEMINI","generateContent",model,"FAKE","1",true,"VERIFIED"),fence1);
+        String nextAttempt=ledger.begin(new UsageLedger.Dispatch(nextRun,workspace,actor,"FAKE_GEMINI","generateContent",model,"FAKE","1",true,"VERIFIED"),fence2);
+        assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(first,attempt,fence1)).toCompletableFuture().join());
         String catalog="manual-catalog-"+UUID.randomUUID(),entry="manual-entry-"+UUID.randomUUID();
         jdbc.update("insert into pricing_catalog_revision(id,source_reference,source_revision,content_hash) values (?,'synthetic',?,'fixture')",catalog,catalog);
         jdbc.update("""
@@ -152,8 +157,8 @@ class WorkspacePricingGateTests {
                 """,entry,catalog,model);
         jdbc.update("update provider_attempt set catalog_marker='CAPTURED',catalog_revision_id=? where id=?",catalog,attempt);
         ledger.append(attempt,new UsageLedger.Snapshot("raw",1,"FINAL","FAKE_RAW","pricing-fixture-v1","1","1","COMPLETE",
-                "{\"promptTokenCount\":1000,\"cachedContentTokenCount\":200,\"candidatesTokenCount\":300,\"thoughtsTokenCount\":100,\"toolUsePromptTokenCount\":0}"));
-        ledger.finish(attempt,"SUCCEEDED");
+                "{\"promptTokenCount\":1000,\"cachedContentTokenCount\":200,\"candidatesTokenCount\":300,\"thoughtsTokenCount\":100,\"toolUsePromptTokenCount\":0}"),fence1);
+        ledger.finish(attempt,"SUCCEEDED",fence1);
         SCHEDULER_RELEASE.countDown();
         long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(8);
         while (System.nanoTime()<deadline && Boolean.TRUE.equals(budgets.read(new WorkspaceMonthlyBudgetOperations.ReadCommand(scope,actor)).toCompletableFuture().join().terminalEffectiveUnknown())) Thread.yield();
@@ -171,7 +176,7 @@ class WorkspacePricingGateTests {
             do { blocked=Boolean.TRUE.equals(jdbc.queryForObject("select exists(select 1 from pg_stat_activity where ?=any(pg_blocking_pids(pid)))",Boolean.class,blocker));
                 if(blocked) break; Thread.sleep(20); } while(System.nanoTime()<wait);
             assertTrue(blocked,"manual current write must wait on the attempt row");
-            var decision=admission.dispatch(new WorkspaceAdmission.Dispatch(second,nextAttempt)).toCompletableFuture();
+            var decision=admission.dispatch(new WorkspaceAdmission.Dispatch(second,nextAttempt,fence2)).toCompletableFuture();
             try { assertThrows(java.util.concurrent.TimeoutException.class,()->decision.get(500,TimeUnit.MILLISECONDS)); }
             finally { connection.commit(); }
             assertEquals("APPLIED",manual.get(5,TimeUnit.SECONDS).outcome());

@@ -1,6 +1,8 @@
 package io.github.samzhu.bot;
 
 import io.github.samzhu.bot.conversation.ConversationOperations;
+import io.github.samzhu.bot.usage.RunOwnershipGuard;
+import io.github.samzhu.bot.usage.SyntheticRunOwner;
 import io.github.samzhu.bot.usage.UsageLedger;
 import io.github.samzhu.bot.usage.WorkspaceAdmission;
 import io.github.samzhu.bot.usage.WorkspaceMonthlyBudgetOperations;
@@ -32,7 +34,7 @@ class WorkspaceSupersededRecoveryTests {
     @Autowired WorkspaceMonthlyBudgetOperations budgets;
     @Autowired JdbcTemplate jdbc;
 
-    record Fixture(WorkspaceAdmission.Registration registration, String attempt) {}
+    record Fixture(WorkspaceAdmission.Registration registration, String attempt, RunOwnershipGuard.Fence fence) {}
 
     private Fixture fixture(boolean attempt, boolean claim) {
         String owner="superseded-"+UUID.randomUUID(), workspace=workspaces.personal(owner).id();
@@ -42,10 +44,11 @@ class WorkspaceSupersededRecoveryTests {
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,
                 admission.register(new WorkspaceAdmission.Register(workspace,run,owner,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        var fence=SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
-        String id=attempt?ledger.begin(new UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN")):null;
-        if (claim) assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,id)).toCompletableFuture().join());
-        return new Fixture(registration,id);
+        String id=attempt?ledger.begin(new UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),fence):null;
+        if (claim) assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,id,fence)).toCompletableFuture().join());
+        return new Fixture(registration,id,fence);
     }
 
     private void insertSyntheticStale(WorkspaceAdmission.Registration r) {
@@ -83,7 +86,7 @@ class WorkspaceSupersededRecoveryTests {
         var f=fixture(true,false);
         assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(
                 new WorkspaceAdmission.FinalizeAttempt(f.registration(),f.attempt(),null,WorkspaceAdmission.TerminalKind.NOT_DISPATCHED,
-                        WorkspaceAdmission.TerminalReason.PROMPT_CONTEXT_UNAVAILABLE)).toCompletableFuture().join());
+                        WorkspaceAdmission.TerminalReason.PROMPT_CONTEXT_UNAVAILABLE,f.fence())).toCompletableFuture().join());
         insertSyntheticStale(f.registration());
         long deadline=System.nanoTime()+Duration.ofSeconds(15).toNanos();
         while (!ready(f.registration()) && System.nanoTime()<deadline) Thread.sleep(50);
@@ -93,10 +96,10 @@ class WorkspaceSupersededRecoveryTests {
 
     @Test void everyAttemptIsSettledBeforeWholeRunFactBecomesReady() throws Exception {
         var f=fixture(true,false); var r=f.registration();
-        String second=ledger.begin(new UsageLedger.Dispatch(r.runId(),r.workspaceId(),r.actorId(),"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
+        String second=ledger.begin(new UsageLedger.Dispatch(r.runId(),r.workspaceId(),r.actorId(),"FAKE","test","model","FAKE","1",false,"UNKNOWN"),f.fence());
         assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(
                 new WorkspaceAdmission.FinalizeAttempt(r,f.attempt(),null,WorkspaceAdmission.TerminalKind.NOT_DISPATCHED,
-                        WorkspaceAdmission.TerminalReason.PROMPT_CONTEXT_UNAVAILABLE)).toCompletableFuture().join());
+                        WorkspaceAdmission.TerminalReason.PROMPT_CONTEXT_UNAVAILABLE,f.fence())).toCompletableFuture().join());
         insertSyntheticStale(r);
         long deadline=System.nanoTime()+Duration.ofSeconds(15).toNanos();
         while (!ready(r) && System.nanoTime()<deadline) Thread.sleep(50);
@@ -111,13 +114,13 @@ class WorkspaceSupersededRecoveryTests {
         var scope=new WorkspaceMonthlyBudgetOperations.Scope(r.workspaceId(),r.partition(),java.time.YearMonth.now(java.time.ZoneId.of("Asia/Taipei")));
         budgets.configure(new WorkspaceMonthlyBudgetOperations.ConfigureCommand(scope,r.actorId(),true,java.math.BigDecimal.ZERO,0)).toCompletableFuture().join();
         assertNull(jdbc.queryForObject("select user_cancel_requested_at from workspace_admission_registration where token=?",java.sql.Timestamp.class,r.token()));
-        assertInstanceOf(WorkspaceAdmission.Decision.BudgetCancellationPending.class,admission.dispatch(new WorkspaceAdmission.Dispatch(r,f.attempt())).toCompletableFuture().join());
+        assertInstanceOf(WorkspaceAdmission.Decision.BudgetCancellationPending.class,admission.dispatch(new WorkspaceAdmission.Dispatch(r,f.attempt(),f.fence())).toCompletableFuture().join());
         assertEquals(WorkspaceAdmission.CancelStatus.BEFORE_CLAIM,admission.cancelRun(r).toCompletableFuture().join().status());
         var first=jdbc.queryForObject("select user_cancel_requested_at from workspace_admission_registration where token=?",java.sql.Timestamp.class,r.token());
         assertNotNull(first);
         assertEquals(WorkspaceAdmission.CancelStatus.BEFORE_CLAIM,admission.cancelRun(r).toCompletableFuture().join().status());
         assertEquals(first,jdbc.queryForObject("select user_cancel_requested_at from workspace_admission_registration where token=?",java.sql.Timestamp.class,r.token()));
-        assertInstanceOf(WorkspaceAdmission.Decision.BudgetCancellationPending.class,admission.dispatch(new WorkspaceAdmission.Dispatch(r,f.attempt())).toCompletableFuture().join());
+        assertInstanceOf(WorkspaceAdmission.Decision.BudgetCancellationPending.class,admission.dispatch(new WorkspaceAdmission.Dispatch(r,f.attempt(),f.fence())).toCompletableFuture().join());
     }
 
     @Test void revokedUserCannotCreateCancelMarker() {
@@ -130,7 +133,7 @@ class WorkspaceSupersededRecoveryTests {
     @Test void cancellationWithoutBudgetEffectOrUserMarkerDoesNotPretendUserCancelled() {
         var f=fixture(true,false); var r=f.registration();
         jdbc.update("update workspace_admission_registration set status='CANCEL_REQUESTED' where token=?",r.token());
-        var decision=assertInstanceOf(WorkspaceAdmission.Decision.Denied.class,admission.dispatch(new WorkspaceAdmission.Dispatch(r,f.attempt())).toCompletableFuture().join());
+        var decision=assertInstanceOf(WorkspaceAdmission.Decision.Denied.class,admission.dispatch(new WorkspaceAdmission.Dispatch(r,f.attempt(),f.fence())).toCompletableFuture().join());
         assertEquals(WorkspaceAdmission.Reason.RECOVERY_REQUIRED,decision.reason());
     }
 
@@ -142,8 +145,9 @@ class WorkspaceSupersededRecoveryTests {
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,
                 admission.register(new WorkspaceAdmission.Register(workspace,run,owner,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        var fence=SyntheticRunOwner.attach(jdbc,registration);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
-        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
+        String attempt=ledger.begin(new UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),fence);
         var row=jdbc.queryForMap("select pending_id,pending_epoch,pending_period_start,pending_period_end from workspace_admission_registration where token=?",registration.token());
         String effect=UUID.randomUUID().toString(), receipt=UUID.randomUUID().toString();
         // A synthetic already-stale outbox fact isolates recovery from sink delivery timing.
@@ -166,6 +170,6 @@ class WorkspaceSupersededRecoveryTests {
         assertEquals("NOT_DISPATCHED",jdbc.queryForObject("select execution_outcome from provider_attempt where id=?",String.class,attempt));
         assertEquals("SETTLED",jdbc.queryForObject("select state from workspace_admission_finalization where attempt_id=?",String.class,attempt));
         assertEquals("BUDGET_CANCELLATION_SUPERSEDED",jdbc.queryForObject("select terminal_reason from workspace_admission_finalization where attempt_id=?",String.class,attempt));
-        assertThrows(IllegalStateException.class,()->ledger.begin(new UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN")));
+        assertThrows(IllegalStateException.class,()->ledger.begin(new UsageLedger.Dispatch(run,workspace,owner,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),fence));
     }
 }

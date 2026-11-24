@@ -3,6 +3,7 @@ package io.github.samzhu.bot;
 import com.zaxxer.hikari.HikariDataSource;
 import io.github.samzhu.bot.conversation.ConversationOperations;
 import io.github.samzhu.bot.usage.UsageLedger;
+import io.github.samzhu.bot.usage.SyntheticRunOwner;
 import io.github.samzhu.bot.usage.WorkspaceAdmission;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -45,9 +46,11 @@ class WorkspaceShutdownDrainTests {
         var regA=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(new WorkspaceAdmission.Register(a,runA,actor,convA.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         var regB=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(new WorkspaceAdmission.Register(b,runB,actor,convB.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING'),(?,?,?,'test','PENDING')",runA,convA.id(),UUID.randomUUID().toString(),runB,convB.id(),UUID.randomUUID().toString());
+        SyntheticRunOwner.attach(jdbc,regA);
+        var ownerB=SyntheticRunOwner.attach(jdbc,regB);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(regB).toCompletableFuture().join());
-        String attempt=ledger.begin(new UsageLedger.Dispatch(runB,b,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
-        var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(regB,attempt)).toCompletableFuture().join()).claim();
+        String attempt=ledger.begin(new UsageLedger.Dispatch(runB,b,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),ownerB);
+        var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(regB,attempt,ownerB)).toCompletableFuture().join()).claim();
         CompletableFuture<Void> close=null;
         try(var connection=dataSource.getConnection()) {
             connection.setAutoCommit(false); int blocker;
@@ -58,7 +61,7 @@ class WorkspaceShutdownDrainTests {
             do { waiting=Boolean.TRUE.equals(jdbc.queryForObject("select exists(select 1 from pg_stat_activity where ?=any(pg_blocking_pids(pid)))",Boolean.class,blocker));
                 if(waiting) break; Thread.sleep(20); } while(System.nanoTime()<deadline);
             assertTrue(waiting,"first workspace operation must hold its stripe at the PG lock");
-            var terminal=admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(regB,attempt,claim,WorkspaceAdmission.TerminalKind.UNKNOWN)).toCompletableFuture();
+            var terminal=admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(regB,attempt,claim,WorkspaceAdmission.TerminalKind.UNKNOWN,null,ownerB)).toCompletableFuture();
             assertEquals("PENDING",jdbc.queryForObject("select state from workspace_admission_finalization where attempt_id=?",String.class,attempt));
             var closing=CompletableFuture.runAsync(context::close); close=closing;
             try { assertThrows(java.util.concurrent.TimeoutException.class,()->closing.get(500,TimeUnit.MILLISECONDS)); }
@@ -89,9 +92,11 @@ class WorkspaceShutdownDrainTests {
         var regA=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(new WorkspaceAdmission.Register(a,runA,actor,convA.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         var regB=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(new WorkspaceAdmission.Register(b,runB,actor,convB.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING'),(?,?,?,'test','PENDING')",runA,convA.id(),UUID.randomUUID().toString(),runB,convB.id(),UUID.randomUUID().toString());
+        var ownerA=SyntheticRunOwner.attach(jdbc,regA);
+        var ownerB=SyntheticRunOwner.attach(jdbc,regB);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(regB).toCompletableFuture().join());
-        String attempt=ledger.begin(new UsageLedger.Dispatch(runB,b,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"));
-        var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(regB,attempt)).toCompletableFuture().join()).claim();
+        String attempt=ledger.begin(new UsageLedger.Dispatch(runB,b,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),ownerB);
+        var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(regB,attempt,ownerB)).toCompletableFuture().join()).claim();
         CompletableFuture<Void> closing=null;
         try(var connection=dataSource.getConnection()) {
             connection.setAutoCommit(false); int blocker;
@@ -102,7 +107,7 @@ class WorkspaceShutdownDrainTests {
             do { waiting=Boolean.TRUE.equals(jdbc.queryForObject("select exists(select 1 from pg_stat_activity where ?=any(pg_blocking_pids(pid)))",Boolean.class,blocker));
                 if(waiting) break; Thread.sleep(20); } while(System.nanoTime()<deadline);
             assertTrue(waiting);
-            var terminal=admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(regB,attempt,claim,WorkspaceAdmission.TerminalKind.UNKNOWN)).toCompletableFuture();
+            var terminal=admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(regB,attempt,claim,WorkspaceAdmission.TerminalKind.UNKNOWN,null,ownerB)).toCompletableFuture();
             assertEquals("PENDING",jdbc.queryForObject("select state from workspace_admission_finalization where attempt_id=?",String.class,attempt));
             closing=CompletableFuture.runAsync(context::close);
             closing.get(15,TimeUnit.SECONDS);
@@ -114,6 +119,9 @@ class WorkspaceShutdownDrainTests {
             if (context.isActive()) context.close();
             if (closing!=null) closing.handle((value,error)->null).get(15,TimeUnit.SECONDS);
         }
+        // The old process is gone; expire only its test-owned leases before recovery.
+        assertEquals(1,jdbc.update("update run_ownership set lease_until=clock_timestamp()-interval '1 second' where run_id=? and owner_token=? and generation=?",runA,ownerA.token(),ownerA.generation()));
+        assertEquals(1,jdbc.update("update run_ownership set lease_until=clock_timestamp()-interval '1 second' where run_id=? and owner_token=? and generation=?",runB,ownerB.token(),ownerB.generation()));
         try(var restored=new SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class).web(WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                         "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false").run()) {
@@ -138,6 +146,7 @@ class WorkspaceShutdownDrainTests {
         var conversation=conversations.createConversation(bot,"fixture",actor,workspace);
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(new WorkspaceAdmission.Register(workspace,run,actor,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'test','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        SyntheticRunOwner.attach(jdbc,registration);
         if (fallback) {
             var lane=context.getBean(io.github.samzhu.bot.usage.internal.admission.WorkspaceLane.class);
             var executor=(java.util.concurrent.ThreadPoolExecutor)org.springframework.test.util.ReflectionTestUtils.getField(lane,"completions");

@@ -6,6 +6,7 @@ import org.springframework.context.annotation.Bean;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 @TestConfiguration(proxyBeanMethods = false)
+@org.springframework.context.annotation.Import(TestProvisioningConfiguration.class)
 class TestcontainersConfiguration {
 
 	@Bean

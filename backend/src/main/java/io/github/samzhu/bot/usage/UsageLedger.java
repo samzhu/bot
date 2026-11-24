@@ -64,15 +64,27 @@ public interface UsageLedger {
 
     String begin(Dispatch dispatch);
 
+    String begin(Dispatch dispatch, io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner);
+
     boolean markDispatched(String attemptId, java.util.function.Function<java.time.Clock, java.time.Instant> decision);
+
+    boolean markDispatched(String attemptId, java.util.function.Function<java.time.Clock, java.time.Instant> decision, RunOwnershipGuard.Fence owner);
 
     void append(String attemptId, Snapshot snapshot);
 
+    void append(String attemptId, Snapshot snapshot, io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner);
+
     void finish(String attemptId, String outcome);
+
+    void finish(String attemptId, String outcome, RunOwnershipGuard.Fence owner);
 
     void notDispatched(String attemptId, String reason);
 
+    void notDispatched(String attemptId, String reason, RunOwnershipGuard.Fence owner);
+
     void recordResponseId(String attemptId, String responseId);
+
+    void recordResponseId(String attemptId, String responseId, io.github.samzhu.bot.usage.RunOwnershipGuard.Fence owner);
 
     PricingInputView readPricingInput(String attemptId);
 }

@@ -48,6 +48,7 @@ class SupersededExecutionIntegrationTests {
     @Autowired UsageLedger ledger;
     @Autowired JdbcTemplate jdbc;
     @Autowired DataSource dataSource;
+    @Autowired org.springframework.transaction.PlatformTransactionManager transactionManager;
     @TestBean(name="mockChatModel",methodName="model",enforceOverride=true) ChatModel chatModel;
     static ControlledChatModel model() { return ControlledChatModel.getInstance(); }
 
@@ -61,21 +62,27 @@ class SupersededExecutionIntegrationTests {
         var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(
                 new WorkspaceAdmission.Register(workspace,run,actor,conversation.id(),WorkspaceAdmission.Partition.REAL)).toCompletableFuture().join()).registration();
         jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'synthetic','PENDING')",run,conversation.id(),UUID.randomUUID().toString());
+        String token=registration.token();
+        assertEquals(1,jdbc.update("insert into run_ownership(run_id,owner_token,generation,lease_until) values (?,?,1,clock_timestamp()+interval '1 hour')",run,token));
+        var owner=new io.github.samzhu.bot.usage.RunOwnershipGuard.Fence(run,token,1);
         assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().join());
         var attempts=new ArrayList<String>();
-        for(int i=0;i<count;i++) attempts.add(ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN")));
+        for(int i=0;i<count;i++) attempts.add(ledger.begin(new UsageLedger.Dispatch(run,workspace,actor,"FAKE","test","model","FAKE","1",false,"UNKNOWN"),owner));
         return new Fixture(registration,List.copyOf(attempts),UUID.randomUUID().toString());
     }
     void insertSyntheticStale(Fixture f) {
         var r=f.registration();
-        var row=jdbc.queryForMap("select pending_id,pending_epoch,pending_period_start from workspace_admission_registration where token=?",r.token());
-        var next=((java.sql.Date)row.get("pending_period_start")).toLocalDate();
-        // Synthetic prior-period STALE isolates durable no-caller recovery from delivery timing.
-        jdbc.update("""
-                insert into workspace_admission_effect_outbox(effect_id,registration_token,target_workspace_id,target_partition,target_run_id,
-                  pending_id,pending_epoch,period_start,period_end,generation,delivery_status,intent_receipt,ack_receipt,acknowledged_at)
-                values (?,?,?,'REAL',?,?,?,?,?,0,'STALE',?,'synthetic-stale',current_timestamp)
-                """,f.effectId(),r.token(),r.workspaceId(),r.runId(),row.get("pending_id"),row.get("pending_epoch"),next.minusMonths(1),next,UUID.randomUUID().toString());
+        new org.springframework.transaction.support.TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            // Publish the durable stale fact and expiry together under the registration lock.
+            var row=jdbc.queryForMap("select pending_id,pending_epoch,pending_period_start from workspace_admission_registration where token=? for update",r.token());
+            var next=((java.sql.Date)row.get("pending_period_start")).toLocalDate();
+            jdbc.update("""
+                    insert into workspace_admission_effect_outbox(effect_id,registration_token,target_workspace_id,target_partition,target_run_id,
+                      pending_id,pending_epoch,period_start,period_end,generation,delivery_status,intent_receipt,ack_receipt,acknowledged_at)
+                    values (?,?,?,'REAL',?,?,?,?,?,0,'STALE',?,'synthetic-stale',current_timestamp)
+                    """,f.effectId(),r.token(),r.workspaceId(),r.runId(),row.get("pending_id"),row.get("pending_epoch"),next.minusMonths(1),next,UUID.randomUUID().toString());
+            assertEquals(1,jdbc.update("update run_ownership set lease_until=clock_timestamp()-interval '1 second' where run_id=? and owner_token=? and generation=1",r.runId(),r.token()));
+        });
     }
     void awaitConvergence(Fixture f,RunStatus expected,String reason) throws Exception {
         var r=f.registration(); long deadline=System.nanoTime()+Duration.ofSeconds(20).toNanos();
@@ -131,7 +138,7 @@ class SupersededExecutionIntegrationTests {
         } finally { blocked.set(false); reset(admission); }
     }
 
-    @Test void freshContextSweepsOrphanWithoutInventingReceipt() throws Exception {
+    @Test void freshContextCompletesSettledSupersededDispositionWithoutInventingReceipt() throws Exception {
         var fixture=fixture(1); var blocked=new AtomicBoolean(true);
         doAnswer(call -> blocked.get() ? java.util.concurrent.CompletableFuture.completedFuture(new WorkspaceAdmission.SupersededPage.Unknown()) : call.callRealMethod())
                 .when(admission).scanSupersededNotDispatched(any(),any(),anyInt());
@@ -146,12 +153,24 @@ class SupersededExecutionIntegrationTests {
             assertEquals("PENDING",jdbc.queryForObject("select status from chat_run where id=?",String.class,fixture.registration().runId()));
             var ds=(HikariDataSource)dataSource;
             // A fresh context on the same isolated PG while the test context remains alive; not an OS restart.
-            try(var fresh=new SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class).web(WebApplicationType.NONE).profiles("test")
+            try(var fresh=new SpringApplicationBuilder(BotApplication.class, FreshSupersededModel.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class).web(WebApplicationType.NONE).profiles("test")
                     .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                             "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false").run()) {
-                awaitConvergence(fixture,RunStatus.FAILED,"SYSTEM_RESTART_ORPHAN");
+                awaitConvergence(fixture,RunStatus.FAILED,"BUDGET_CANCELLATION_SUPERSEDED");
+                assertEquals(2,jdbc.queryForObject("select generation from run_ownership where run_id=?",Integer.class,fixture.registration().runId()));
+                var freshModel=fresh.getBean(io.github.samzhu.bot.execution.internal.model.MockChatModel.class);
+                verify(freshModel,never()).call(any(org.springframework.ai.chat.prompt.Prompt.class));
+                verify(freshModel,never()).stream(any(org.springframework.ai.chat.prompt.Prompt.class));
                 assertEquals("BUDGET_CANCELLATION_SUPERSEDED",jdbc.queryForObject("select terminal_reason from workspace_admission_finalization where attempt_id=?",String.class,fixture.attempts().getFirst()));
             }
         } finally { blocked.set(false); reset(admission); }
+    }
+}
+
+@TestConfiguration
+class FreshSupersededModel {
+    @org.springframework.context.annotation.Bean
+    io.github.samzhu.bot.execution.internal.model.MockChatModel mockChatModel() {
+        return org.mockito.Mockito.spy(new io.github.samzhu.bot.execution.internal.model.MockChatModel());
     }
 }

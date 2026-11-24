@@ -17,7 +17,7 @@ A minimal, deterministic, and resilient loopback AI chat platform built with Jav
 
 Development uses `dev` and an explicit Spring AI selector. `dev` activates local infrastructure; missing, invalid or conflicting selections fail closed. `spring.ai.model.chat=google-genai` requires the configured Gemini key; `spring.ai.model.chat=ollama` uses the local service. A key alone does not select a provider. The application remains loopback-only; production requires an authorization strategy not provided by this MVP.
 
-Automated tests provide test-owned Fake models and use isolated Testcontainers where infrastructure is needed. They never require real model credentials or invoke a paid provider. The default Bot is application data and remains initialized independently of test fixtures.
+Automated tests provide test-owned Fake models and use isolated Testcontainers where infrastructure is needed. They never require real model credentials or invoke a paid provider. The default Bot is release-provisioned application data; test databases are provisioned explicitly by their fixtures.
 
 ---
 
@@ -35,7 +35,7 @@ Privately set `bot-google-api-key` and keep permissions at `0600`; do not print 
 
 ### Backend Development
 
-With Java 25 and Docker running, start the backend from the repository root (or invoke the script by path from another directory):
+Before the first start on a new local database, prepare it explicitly as described in [Release database preparation](#release-database-preparation). `dev.sh` starts the service and does not run the release command. With Java 25 and Docker running, start the backend from the repository root (or invoke the script by path from another directory):
 
 ```bash
 ./dev.sh
@@ -91,7 +91,38 @@ The frontend has its own installation, development, build, and verification work
 
 ### Test fixtures and artifacts
 
-Tests explicitly provide Fake model boundaries and synthetic data where needed. Normal development startup does not insert demonstration conversations or usage. The application still creates its required default Bot after database migration. Test fixtures and private configuration are excluded from production artifacts.
+Tests explicitly provide Fake model boundaries and synthetic data where needed. Normal application startup does not provision the database or insert demonstration conversations or usage. Test fixtures and private configuration are excluded from production artifacts.
+
+### Release database preparation
+
+Build both images from the same source revision and version. The second image selects the one-off release entry point using the same application dependencies and configuration:
+
+```bash
+cd backend
+./gradlew bootBuildImage --imageName=bot:0.0.1-SNAPSHOT
+./gradlew bootBuildImage -PreleaseAdmin --imageName=bot-admin:0.0.1-SNAPSHOT
+```
+
+Run the admin image once against the release PostgreSQL with the same `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD`, and catalog configuration as the service. Supply credentials through the deployment environment. A successful exit applies pending versioned migrations, ensures the default Bot exists, and publishes the configured catalog using its existing validation and conflict checks. Re-running preserves existing records; a conflicting catalog revision fails the release. Start service instances only after the command succeeds. An unprepared schema, missing default Bot, or missing published catalog prevents service readiness. Investigate the reported failure and rerun the admin process before starting the service.
+
+For the initial cutover from an older release:
+
+1. Stop new traffic and quiesce all old application instances, including their in-flight work. Confirm they have stopped before running the new release's admin command; do not overlap old runtime instances with the new release.
+2. Run the new release's admin command against the intended database. On failure, stop the cutover and investigate; do not start the new service until preparation succeeds.
+3. Start the application from the same release and check its readiness and existing Run status diagnostics before restoring traffic. Investigate legacy Runs whose outcome is unknown using their Run IDs and persisted evidence; do not rewrite their states solely because ownership is unknown.
+4. Verify the actual service and admin images for the release, including the service image's exclusion of synthetic and test fixtures, before accepting the delivery.
+
+The bundled configuration selects the official catalog. A deployment that deliberately replaces the configuration with one containing no catalog revision, source, or entries may run without a published catalog; pricing then remains unavailable. Partial catalog configuration is rejected. The readiness check validates the configured revision and payload against the persisted publication without writing it.
+
+For local development, first confirm the target is your intended local database. Start only PostgreSQL, configure its datasource environment, then run the one-off command before `./dev.sh`:
+
+```bash
+cd backend
+docker compose up -d pgvector
+./gradlew bootRun -PreleaseAdmin
+```
+
+The Compose file maps PostgreSQL to `localhost:5432` and specifies its database name and user. Set `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, and `SPRING_DATASOURCE_PASSWORD` for that database before invoking `bootRun`; supply the password privately. The base configuration disables Spring Boot's Compose integration for this command, so it does not start other services or a chat model. If your database or port differs, use its actual connection settings. The subsequent `dev.sh` uses its normal Compose service connection; ensure that it points to the same database. Repeat the preparation after a release that changes migrations or configured catalog.
 
 ### Backend Test Suites
 ```bash
@@ -184,9 +215,10 @@ The lifecycle stripes and terminal claims do not provide cross-node coordination
 If terminal persistence, fallback and status lookup all fail, the result remains
 unknown. Local subscriptions and resources are released without claiming a
 persisted FAILED state. A remaining RUNNING row blocks another Run for that
-Conversation. After database recovery, explicitly cancel the original Run ID or
-restart to invoke existing orphan recovery; database recovery alone does not
-perform continuous reconciliation.
+Conversation. After database recovery, inspect the original Run's status and
+available persisted evidence before taking action; a restart alone is not proof
+that an in-flight Run was orphaned. Database recovery alone does not perform
+continuous reconciliation.
 
 The MVP retains loopback developer identity, PostgreSQL migrations, one active Run
 per Conversation, bounded Session context, local Spring AI Bot simulation and

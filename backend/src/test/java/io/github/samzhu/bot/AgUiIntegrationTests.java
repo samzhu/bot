@@ -83,6 +83,156 @@ class AgUiIntegrationTests {
   }
   assertEquals(expected,actual,"attempt must settle through the authoritative recovery path");
  }
+ @Test void secondServiceMustNotRecoverLiveRunOrItsAttempt() throws Exception {
+  String c=conversation(), run=UUID.randomUUID().toString();
+  model().setHoldMode(true);
+  var pending=http.sendAsync(HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/api/ag-ui"))
+    .header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(input(c,run,"live owner"))).build(), HttpResponse.BodyHandlers.ofString());
+  try {
+   assertTrue(model().awaitSubscribed(10,java.util.concurrent.TimeUnit.SECONDS),"fake provider did not start");
+   var ds=(com.zaxxer.hikari.HikariDataSource)jdbc.getDataSource();
+   try (var second=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, TestChatModelConfiguration.class, TestUsageCaptureConfiguration.class)
+      .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
+      .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),"spring.datasource.password="+ds.getPassword(),
+        "spring.docker.compose.enabled=false", "bot.pricing.reconcile.initial-delay-ms=3600000", "bot.pricing.reconcile.delay-ms=3600000")
+      .run()) { }
+   var read=json.readTree(post("/graphql",json.writeValueAsString(Map.of("query","{ run(id:\""+run+"\") { status } }"))).body()).path("data").path("run");
+   assertEquals("RUNNING",read.path("status").asText());
+   assertEquals("IN_PROGRESS",jdbc.queryForObject("select execution_outcome from provider_attempt where run_id=?",String.class,run));
+   assertEquals("CLAIMED",jdbc.queryForObject("select c.status from workspace_admission_claim c join provider_attempt a on a.id=c.attempt_id where a.run_id=?",String.class,run));
+   assertEquals(1,model().getRecordedPrompts().size());
+  } finally { model().complete(); pending.get(15,java.util.concurrent.TimeUnit.SECONDS); }
+ }
+ @Test void expiredOwnerIsTakenOverAndCannotWriteLateCompletion() throws Exception {
+  String c=conversation(), run=UUID.randomUUID().toString();
+  model().setHoldMode(true);
+  var pending=http.sendAsync(HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/api/ag-ui"))
+    .header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(input(c,run,"expired owner"))).build(), HttpResponse.BodyHandlers.ofString());
+  try {
+   assertTrue(model().awaitSubscribed(10,java.util.concurrent.TimeUnit.SECONDS),"fake provider did not start");
+   assertEquals(1,jdbc.update("update run_ownership set lease_until=clock_timestamp()-interval '1 second' where run_id=?",run));
+   var ds=(com.zaxxer.hikari.HikariDataSource)jdbc.getDataSource();
+   try (var second=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, TestChatModelConfiguration.class, TestUsageCaptureConfiguration.class)
+      .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
+      .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),"spring.datasource.password="+ds.getPassword(),
+        "spring.docker.compose.enabled=false", "bot.execution.startup-coordinator.budget=2s", "bot.pricing.reconcile.initial-delay-ms=3600000", "bot.pricing.reconcile.delay-ms=3600000")
+      .run()) {
+    var read=json.readTree(post("/graphql",json.writeValueAsString(Map.of("query","{ run(id:\""+run+"\") { status } }"))).body()).path("data").path("run");
+    assertEquals("FAILED",read.path("status").asText());
+    assertEquals("UNKNOWN",jdbc.queryForObject("select execution_outcome from provider_attempt where run_id=?",String.class,run));
+    assertEquals("UNKNOWN",jdbc.queryForObject("select c.status from workspace_admission_claim c join provider_attempt a on a.id=c.attempt_id where a.run_id=?",String.class,run));
+    assertEquals(2L,jdbc.queryForObject("select generation from run_ownership where run_id=?",Long.class,run));
+    model().emitChunk("late completion"); model().complete();
+    pending.get(15,java.util.concurrent.TimeUnit.SECONDS);
+    assertEquals(0,jdbc.queryForObject("select count(*) from message where run_id=? and role='ASSISTANT'",Integer.class,run));
+    assertEquals(0,jdbc.queryForObject("select count(*) from ai_session_event where session_id=?",Integer.class,c));
+    assertEquals(1,model().getRecordedPrompts().size());
+   }
+  } finally { model().complete(); pending.cancel(true); }
+ }
+ @Test void expiredOwnedRunWithoutRegistrationIsRecoveredWithoutDispatch() throws Exception {
+  String c=conversation(), run=UUID.randomUUID().toString();
+  jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'synthetic','RUNNING')",run,c,run);
+  jdbc.update("insert into run_ownership(run_id,owner_token,generation,lease_until) values (?,?,1,clock_timestamp()-interval '1 second')",run,UUID.randomUUID().toString());
+  var ds=(com.zaxxer.hikari.HikariDataSource)jdbc.getDataSource();
+  try (var second=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, TestChatModelConfiguration.class, TestUsageCaptureConfiguration.class)
+    .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
+    .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),"spring.datasource.password="+ds.getPassword(),
+      "spring.docker.compose.enabled=false", "bot.execution.startup-coordinator.budget=2s", "bot.pricing.reconcile.initial-delay-ms=3600000", "bot.pricing.reconcile.delay-ms=3600000")
+    .run()) {
+   var read=json.readTree(post("/graphql",json.writeValueAsString(Map.of("query","{ run(id:\""+run+"\") { status } }"))).body()).path("data").path("run");
+   assertEquals("FAILED",read.path("status").asText());
+   assertEquals(2L,jdbc.queryForObject("select generation from run_ownership where run_id=?",Long.class,run));
+   assertEquals(0,jdbc.queryForObject("select count(*) from workspace_admission_registration where run_id=?",Integer.class,run));
+   assertEquals(0,model().getRecordedPrompts().size());
+  }
+ }
+ @Test void legacyRunWithoutOwnershipIsUnchangedAndFailsClosed() throws Exception {
+  String c=conversation(), run=UUID.randomUUID().toString();
+  jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'synthetic','RUNNING')",run,c,run);
+  try {
+  var ds=(com.zaxxer.hikari.HikariDataSource)jdbc.getDataSource();
+  var failure=assertThrows(RuntimeException.class, () -> {
+   try (var second=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, TestChatModelConfiguration.class, TestUsageCaptureConfiguration.class)
+     .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
+     .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),"spring.datasource.password="+ds.getPassword(),
+       "spring.docker.compose.enabled=false", "bot.execution.startup-coordinator.budget=2s", "bot.pricing.reconcile.initial-delay-ms=3600000", "bot.pricing.reconcile.delay-ms=3600000")
+     .run()) { }
+  });
+  assertTrue(failure.getMessage().contains("Startup admission recovery did not reach READY"),failure.toString());
+  var read=json.readTree(post("/graphql",json.writeValueAsString(Map.of("query","{ run(id:\""+run+"\") { status } }"))).body()).path("data").path("run");
+  assertEquals("RUNNING",read.path("status").asText());
+  assertEquals(0,jdbc.queryForObject("select count(*) from run_ownership where run_id=?",Integer.class,run));
+  assertEquals(0,model().getRecordedPrompts().size());
+  } finally { jdbc.update("delete from chat_run where id=?",run); }
+ }
+ @Test void liveRegistrationBeforeRunDoesNotBlockSecondService() throws Exception {
+  String c=conversation(), run=UUID.randomUUID().toString();
+  jdbc.execute("create function test_hold_run_start() returns trigger language plpgsql as $$ begin perform pg_advisory_xact_lock(771037); return new; end $$");
+  jdbc.execute("create trigger test_hold_run_start before insert on chat_run for each row execute function test_hold_run_start()");
+  try (var lock=jdbc.getDataSource().getConnection()) {
+   lock.createStatement().execute("select pg_advisory_lock(771037)");
+   var pending=http.sendAsync(HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/api/ag-ui"))
+     .header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(input(c,run,"registration window"))).build(), HttpResponse.BodyHandlers.ofString());
+   try {
+    long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+    while (System.nanoTime()<deadline && jdbc.queryForObject("select count(*) from workspace_admission_registration where run_id=?",Integer.class,run)==0) Thread.yield();
+    assertEquals(1,jdbc.queryForObject("select count(*) from workspace_admission_registration where run_id=?",Integer.class,run));
+    assertEquals(0,jdbc.queryForObject("select count(*) from chat_run where id=?",Integer.class,run));
+    var ds=(com.zaxxer.hikari.HikariDataSource)jdbc.getDataSource();
+    try (var second=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, TestChatModelConfiguration.class, TestUsageCaptureConfiguration.class)
+      .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
+      .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),"spring.datasource.password="+ds.getPassword(),
+        "spring.docker.compose.enabled=false", "bot.execution.startup-coordinator.budget=2s", "bot.pricing.reconcile.initial-delay-ms=3600000", "bot.pricing.reconcile.delay-ms=3600000")
+      .run()) {
+     assertEquals("REGISTERED",jdbc.queryForObject("select status from workspace_admission_registration where run_id=?",String.class,run));
+    }
+   } finally {
+    lock.createStatement().execute("select pg_advisory_unlock(771037)");
+    try { pending.get(15,java.util.concurrent.TimeUnit.SECONDS); } catch (Exception ignored) { pending.cancel(true); }
+   }
+  } finally {
+   jdbc.execute("drop trigger if exists test_hold_run_start on chat_run");
+   jdbc.execute("drop function if exists test_hold_run_start()");
+  }
+ }
+ @Test void expiredStartWithoutRunReleasesRegistrationWithoutDispatch() throws Exception {
+  String c=conversation(), run=UUID.randomUUID().toString(), token=UUID.randomUUID().toString();
+  String workspace=jdbc.queryForObject("select workspace_id from conversation where id=?",String.class,c);
+  jdbc.update("""
+    insert into workspace_admission_registration(token,run_id,workspace_id,actor_id,conversation_id,partition,status,
+      pending_id,pending_period_start,pending_period_end,start_lease_until)
+    values (?,?,?,'dev-user',?,'SIMULATION','REGISTERED',?,date '2026-11-01',date '2026-12-01',clock_timestamp()-interval '1 second')
+    """,token,run,workspace,c,UUID.randomUUID().toString());
+  var ds=(com.zaxxer.hikari.HikariDataSource)jdbc.getDataSource();
+  try (var second=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, TestChatModelConfiguration.class, TestUsageCaptureConfiguration.class)
+    .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
+    .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),"spring.datasource.password="+ds.getPassword(),
+      "spring.docker.compose.enabled=false", "bot.execution.startup-coordinator.budget=2s", "bot.pricing.reconcile.initial-delay-ms=3600000", "bot.pricing.reconcile.delay-ms=3600000")
+    .run()) {
+   assertEquals("TERMINAL",jdbc.queryForObject("select status from workspace_admission_registration where token=?",String.class,token));
+   assertEquals(0,jdbc.queryForObject("select count(*) from chat_run where id=?",Integer.class,run));
+   assertEquals(0,jdbc.queryForObject("select count(*) from provider_attempt where run_id=?",Integer.class,run));
+   assertEquals(0,model().getRecordedPrompts().size());
+  }
+ }
+ @Test void expiredRunAfterStartupIsRecoveredByExistingSweep() throws Exception {
+  String c=conversation(), run=UUID.randomUUID().toString();
+  jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'synthetic','RUNNING')",run,c,run);
+  jdbc.update("insert into run_ownership(run_id,owner_token,generation,lease_until) values (?,?,1,clock_timestamp()-interval '1 second')",run,UUID.randomUUID().toString());
+  try {
+  long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(8);
+  String status="";
+  while (System.nanoTime()<deadline) {
+   var read=json.readTree(post("/graphql",json.writeValueAsString(Map.of("query","{ run(id:\""+run+"\") { status } }"))).body()).path("data").path("run");
+   status=read.path("status").asText(); if ("FAILED".equals(status)) break;
+   Thread.sleep(50);
+  }
+  assertEquals("FAILED",status);
+  assertEquals(2L,jdbc.queryForObject("select generation from run_ownership where run_id=?",Long.class,run));
+  assertEquals(0,model().getRecordedPrompts().size());
+  } finally { jdbc.update("delete from chat_run where id=?",run); }
+ }
  @Test void weeklyDenialAfterRegisterEmitsReasonAndDoesNotCallProvider() throws Exception {
   var c=conversation(); var run=UUID.randomUUID().toString();
   String workspace=jdbc.queryForObject("select workspace_id from conversation where id=?",String.class,c);
@@ -212,7 +362,7 @@ class AgUiIntegrationTests {
    assertEquals(0,jdbc.queryForObject("select count(*) from workspace_admission_claim c join provider_attempt a on a.id=c.attempt_id where a.run_id=?",Integer.class,run));
    assertEquals(1,jdbc.queryForObject("select count(*) from provider_attempt where run_id=?",Integer.class,run));
    verify(admission,times(1)).dispatch(argThat(d->d.registration().runId().equals(run)));
-   verify(admission,atLeastOnce()).recoverClaim(argThat(r->r.runId().equals(run)),anyString());
+   verify(admission,atLeastOnce()).recoverClaim(argThat(r->r.runId().equals(run)),anyString(),argThat(f->f!=null && f.runId().equals(run)));
   } finally { reset(admission); }
  }
  @Test void lostCommittedClaimResponseIsRecoveredWithoutProviderOrRedispatch() throws Exception {
@@ -233,7 +383,7 @@ class AgUiIntegrationTests {
    assertEquals(1,jdbc.queryForObject("select count(*) from workspace_admission_claim c join provider_attempt a on a.id=c.attempt_id where a.run_id=? and a.started_at is not null",Integer.class,run));
    assertEquals(1,jdbc.queryForObject("select count(*) from provider_attempt where run_id=?",Integer.class,run));
    verify(admission,times(1)).dispatch(argThat(d->d.registration().runId().equals(run)));
-   verify(admission,atLeastOnce()).recoverClaim(argThat(r->r.runId().equals(run)),anyString());
+   verify(admission,atLeastOnce()).recoverClaim(argThat(r->r.runId().equals(run)),anyString(),argThat(f->f!=null && f.runId().equals(run)));
   } finally { reset(admission); }
  }
  @Test void completedRunSettlesAttemptBeforeReleasingRegistration() throws Exception {
