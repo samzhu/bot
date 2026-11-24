@@ -39,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.*;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import({TestcontainersConfiguration.class, ConversationTitleBudgetHttpIntegrationTests.LoopbackConfig.class})
 @ActiveProfiles("test")
+@org.junit.jupiter.api.extension.ExtendWith(org.springframework.boot.test.system.OutputCaptureExtension.class)
 class ConversationTitleBudgetHttpIntegrationTests {
     static class Loopback implements AutoCloseable {
         final HttpServer server;
@@ -256,7 +257,7 @@ class ConversationTitleBudgetHttpIntegrationTests {
         }
     }
 
-    @Test void completedTitleHasDistinctDurableUsageAttempt() throws Exception {
+    @Test void completedTitleHasDistinctDurableUsageAttempt(org.springframework.boot.test.system.CapturedOutput output) throws Exception {
         assertTrue(environment.matchesProfiles("test") && environment.getProperty("bot-ai-provider") == null);
         try (var connection = dataSource.getConnection()) { assertEquals(postgres.getJdbcUrl(), connection.getMetaData().getURL()); }
         chatModel().reset(); chatModel().setHoldMode(true);
@@ -306,6 +307,9 @@ class ConversationTitleBudgetHttpIntegrationTests {
                 String line; StringBuilder events = new StringBuilder();
                 do { line = reader.readLine(); assertNotNull(line, () -> "subscription ended: " + events); events.append(line).append('\n'); } while (!line.contains("conversationTitleChanged"));
                 var notice = json.readTree(line.substring("data:".length())).path("data").path("conversationTitleChanged");
+                java.util.Set<String> fields = new java.util.HashSet<>();
+                notice.fieldNames().forEachRemaining(fields::add);
+                assertEquals(java.util.Set.of("id", "version", "state"), fields);
                 assertEquals(id, notice.path("id").asText());
                 assertEquals("1", notice.path("version").asText());
                 assertEquals("DONE", notice.path("state").asText());
@@ -361,7 +365,16 @@ class ConversationTitleBudgetHttpIntegrationTests {
             assertEquals("0", titleReport.path("nativeGroups").get(0).path("cacheRead").path("knownValue").asText());
             assertEquals("CONVERSATION_TITLE", titleReport.path("attempts").path("nodes").get(0).path("purpose").asText());
             assertEquals(1, jdbc.queryForObject("select count(*) from chat_run where conversation_id=?", Integer.class, id));
+            assertNoSyntheticSecrets(output);
         } finally { loopback.release.countDown(); loopback.hold = false; loopback.success = false; chatModel().complete(); }
+    }
+
+    private static void assertNoSyntheticSecrets(org.springframework.boot.test.system.CapturedOutput output) {
+        String logs = output.getAll();
+        assertFalse(logs.contains("synthetic-test-only"), "synthetic key appeared in captured logs");
+        assertFalse(logs.contains("Synthetic ledger question"), "synthetic success prompt appeared in captured logs");
+        assertFalse(logs.contains("Synthetic failure question"), "synthetic failure prompt appeared in captured logs");
+        assertFalse(logs.contains("Synthetic title"), "synthetic model output appeared in captured logs");
     }
 
     @Test void activeUnreservedRealChatDefersTitleUntilChatHasKnownCost() throws Exception {
@@ -419,7 +432,7 @@ class ConversationTitleBudgetHttpIntegrationTests {
         }
     }
 
-    @Test void provider503IsNotRetriedAndKeepsUnknownHold() throws Exception { checkProviderFailure("503"); }
+    @Test void provider503IsNotRetriedAndKeepsUnknownHold(org.springframework.boot.test.system.CapturedOutput output) throws Exception { checkProviderFailure("503"); assertNoSyntheticSecrets(output); }
 
     @Test void providerRedirectAndDisconnectCannotRepeatHttp() throws Exception {
         checkProviderFailure("redirect");
