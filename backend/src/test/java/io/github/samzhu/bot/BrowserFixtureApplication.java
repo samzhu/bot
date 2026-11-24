@@ -19,11 +19,18 @@ import org.testcontainers.utility.DockerImageName;
 
 /** Test-only entry point. Its readiness line is consumed solely from the owned child process. */
 public final class BrowserFixtureApplication {
+    private static final String NONCE_ENV = "BOT75_FIXTURE_NONCE";
+    private static final String NONCE_LABEL = "io.github.samzhu.bot.browser-fixture.nonce";
+
     public static void main(String[] args) {
         System.out.println("BROWSER_FIXTURE_PROCESS " + ProcessHandle.current().pid());
         System.out.flush();
         if (args.length != 0) throw new IllegalArgumentException("Fixture accepts no arguments");
         var environment = System.getenv();
+        String nonce = environment.get(NONCE_ENV);
+        if (nonce != null && !nonce.matches("[0-9a-f]{32}")) {
+            throw new IllegalStateException("Invalid fixture nonce");
+        }
         if (environment.keySet().stream().anyMatch(key -> key.startsWith("SPRING_") || key.equals("BOT_AI_PROVIDER"))) {
             throw new IllegalStateException("Unsafe fixture selector or Spring configuration");
         }
@@ -43,8 +50,12 @@ public final class BrowserFixtureApplication {
         try {
             var postgres = context.getBean(PostgreSQLContainer.class);
             var dataSource = context.getBean(DataSource.class);
+            String database = postgres.getDatabaseName();
+            String username = postgres.getUsername();
             try (var connection = dataSource.getConnection()) {
-                if (!connection.getMetaData().getURL().equals(postgres.getJdbcUrl())) {
+                if (!connection.getMetaData().getURL().equals(postgres.getJdbcUrl())
+                        || (nonce != null && (!java.util.Objects.equals(database, connection.getCatalog())
+                        || !java.util.Objects.equals(username, connection.getMetaData().getUserName())))) {
                     throw new IllegalStateException("Fixture datasource is not the owned container");
                 }
             } catch (java.sql.SQLException e) {
@@ -55,6 +66,22 @@ public final class BrowserFixtureApplication {
                     || !context.getEnvironment().matchesProfiles("test & !local & !prod")
                     || context.getEnvironment().getProperty("spring.docker.compose.enabled", Boolean.class, true)) {
                 throw new IllegalStateException("Unsafe fixture model configuration");
+            }
+            if (nonce != null) {
+                String id = postgres.getContainerId();
+                var info = postgres.getCurrentContainerInfo();
+                if (id == null || !id.matches("[0-9a-f]{64}")
+                        || database == null || !database.matches("[a-z_][a-z0-9_]{0,62}")
+                        || username == null || !username.matches("[a-z_][a-z0-9_]{0,62}")
+                        || !id.equals(info.getId()) || info.getState() == null
+                        || !Boolean.TRUE.equals(info.getState().getRunning())
+                        || info.getConfig() == null || info.getConfig().getLabels() == null
+                        || !nonce.equals(info.getConfig().getLabels().get(NONCE_LABEL))) {
+                    throw new IllegalStateException("Fixture PostgreSQL identity verification failed");
+                }
+                // The private marker lets the owning test runner recheck this container before each mutation.
+                System.out.println("BROWSER_FIXTURE_POSTGRES " + id + " " + database + " " + username + " "
+                        + ProcessHandle.current().pid() + " " + nonce);
             }
             int port = ((WebServerApplicationContext) context).getWebServer().getPort();
             System.out.println("BROWSER_FIXTURE_READY " + port + " " + ProcessHandle.current().pid());
@@ -72,7 +99,10 @@ public final class BrowserFixtureApplication {
 
         @Bean @ServiceConnection
         PostgreSQLContainer browserFixturePostgres() {
-            return new PostgreSQLContainer(DockerImageName.parse("pgvector/pgvector:pg16"));
+            var postgres = new PostgreSQLContainer(DockerImageName.parse("pgvector/pgvector:pg16"));
+            String nonce = System.getenv(NONCE_ENV);
+            if (nonce != null) postgres.withLabel(NONCE_LABEL, nonce);
+            return postgres;
         }
     }
 
