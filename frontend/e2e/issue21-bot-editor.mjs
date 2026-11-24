@@ -2,11 +2,12 @@
 // PDF 第 66 頁：「頁首『＋ 新增 Bot』開啟右側建立表單，取消或 X 收起」；#19：設定共用同一右側面板。
 // 前提：前端 4300、後端 8181（Fake 模型）已啟動且 manager 已嵌入 app-bot-editor。不觸發真模型／GCP。
 import puppeteer from 'puppeteer-core';
-import { assertSafeBackendOrigin } from '../test/verification-harness.mjs';
+import { startOwnedFixture, installOwnedBrowserGuard } from '../test/owned-browser.mjs';
 
 const CHROME_PATH = process.env.CHROME_BIN || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const FRONTEND_URL = process.env.VERIFICATION_FRONTEND_URL || 'http://localhost:4300';
-const BACKEND_URL = process.env.VERIFICATION_BACKEND_URL || 'http://localhost:8181';
+const fixture = await startOwnedFixture();
+const FRONTEND_URL = fixture.origin;
+const BACKEND_URL = fixture.origin;
 const SHOT = (n) => `/tmp/issue21-${n}.png`;
 const RUN = Date.now().toString(36);
 
@@ -27,7 +28,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function gql(query, variables = {}) {
   const res = await fetch(`${BACKEND_URL}/graphql`, {
-    method: 'POST',
+    method: 'POST', redirect: 'error',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query, variables })
   });
@@ -81,17 +82,41 @@ const rectOf = (page, sel) => page.$eval(sel, (e) => {
 
 async function openManager(page) {
   await page.goto(FRONTEND_URL, { waitUntil: 'networkidle2' });
-  await page.waitForSelector(T('bot-manager-nav-btn'));
-  await page.click(T('bot-manager-nav-btn'));
-  await page.waitForSelector(T('create-bot-modal-btn'));
+  await page.waitForSelector('button[aria-label="Bot"]');
+  await page.click('button[aria-label="Bot"]');
+  if (page.viewport().width <= 767) {
+    try { await page.waitForSelector('[role="dialog"][aria-label="側欄導覽"]', { visible: true, timeout: 8000 }); }
+    catch (error) { throw new Error('Mobile Bot navigation drawer did not open', { cause: error }); }
+    await page.click('button[aria-label="關閉導覽"]');
+    try { await page.waitForFunction(() => document.querySelector('.drawer-focus')?.hasAttribute('inert') && document.querySelector('main.main-area') && !document.querySelector('main.main-area').inert, { timeout: 8000 }); }
+    catch (error) { throw new Error('Mobile drawer did not close or main remained inert', { cause: error }); }
+  }
+  const create = T('create-bot-modal-btn');
+  await page.waitForSelector(create, { visible: true, timeout: 8000 });
+  await page.$eval(create, el => el.scrollIntoView({ block: 'center', inline: 'nearest' }));
+  try {
+    await page.waitForFunction(selector => {
+      const el = document.querySelector(selector); if (!el) return false;
+      const r = el.getBoundingClientRect(); const x = r.left + r.width / 2, y = r.top + r.height / 2;
+      const hit = document.elementFromPoint(x, y);
+      return r.width > 0 && r.height > 0 && x >= 0 && x < innerWidth && y >= 0 && y < innerHeight && (el === hit || el.contains(hit));
+    }, { timeout: 8000 }, create);
+  } catch (error) {
+    const state = await page.evaluate(selector => {
+      const el = document.querySelector(selector); const r = el?.getBoundingClientRect();
+      const hit = r && document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return { viewport: [innerWidth, innerHeight], rect: r?.toJSON(), hit: hit?.outerHTML?.slice(0, 250),
+        mainInert: document.querySelector('main.main-area')?.inert, drawerInert: document.querySelector('.drawer-focus')?.hasAttribute('inert') };
+    }, create);
+    throw new Error(`Create Bot control is not hittable: ${JSON.stringify(state)}`, { cause: error });
+  }
 }
 
 async function run() {
-  await assertSafeBackendOrigin(BACKEND_URL);
   const browser = await puppeteer.launch({
     executablePath: CHROME_PATH,
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+    headless: true, env: fixture.browserEnv,
+    args: ['--no-proxy-server', '--disable-background-networking']
   });
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 800 });
@@ -99,24 +124,27 @@ async function run() {
   const mutations = [];
   let failNextMutation = false;
   let failNextBotsQuery = false;
+  let saveReadCount = 0, injectedSaveRead = 0, saveMutationSeen = false;
   let failNextMutationMessage = '模擬保存失敗 (e2e)';
-  await page.setRequestInterception(true);
-  page.on('request', (req) => {
+  const guard = await installOwnedBrowserGuard(page, fixture);
+  guard.addRequestHandler( (req) => {
     if (req.url().includes('/graphql') && req.method() === 'POST') {
       const q = JSON.parse(req.postData() || '{}').query || '';
       if (/mutation\s+(Create|Update)Bot/.test(q)) {
         mutations.push(q.includes('CreateBot') ? 'create' : 'update');
+        if (failNextBotsQuery && q.includes('CreateBot')) saveMutationSeen = true;
         if (failNextMutation) {
           failNextMutation = false;
           return req.respond({ status: 200, contentType: 'application/json',
             body: JSON.stringify({ errors: [{ message: failNextMutationMessage }] }) });
         }
       } else if (failNextBotsQuery && /bots\s*\(/.test(q)) {
+        if (saveMutationSeen && ++saveReadCount < 2) return;
+        if (saveMutationSeen) injectedSaveRead++;
         failNextBotsQuery = false;
         return req.respond({ status: 500, contentType: 'application/json', body: '{}' });
       }
     }
-    req.continue();
   });
 
   const name = `E2E21-${RUN}`;
@@ -193,11 +221,13 @@ async function run() {
     record('保存失敗：面板開啟、錯誤可見、輸入保留、零寫入', true);
 
     // 6. 重試成功；refetch 失敗時只顯示可重試錯誤，不重複建立
-    failNextBotsQuery = true;
+    failNextBotsQuery = true; saveReadCount = 0; injectedSaveRead = 0; saveMutationSeen = false;
     const m0 = mutations.filter((m) => m === 'create').length;
     await page.click(T('submit-bot-btn'));
     await page.waitForFunction((s) => !document.querySelector(s)?.open, {}, T('create-bot-dialog'));
-    await sleep(300);
+    await page.waitForSelector(T('bot-store-error'), { visible: true, timeout: 10000 });
+    assert(saveMutationSeen && saveReadCount === 2 && injectedSaveRead === 1, '未觀察到保存後的第二次 Bot 查詢注入');
+    saveMutationSeen = false;
     assert(mutations.filter((m) => m === 'create').length === m0 + 1, 'create 次數異常');
     assert((await activeTestId(page)) === 'create-bot-modal-btn', `保存後焦點=${await activeTestId(page)}`);
     const storeErr = await page.$(T('bot-store-error'));
@@ -329,6 +359,7 @@ async function run() {
     await page.screenshot({ path: SHOT('failure') }).catch(() => {});
   } finally {
     await browser.close();
+    if (guard.blocked) throw new Error(`Blocked ${guard.blocked} unsafe request(s)`);
   }
 
   const failed = results.filter((r) => !r.passed);
@@ -336,4 +367,4 @@ async function run() {
   return failed.length === 0;
 }
 
-run().then((ok) => process.exit(ok ? 0 : 1));
+try { process.exitCode = await run() ? 0 : 1; } finally { await fixture.close(); }

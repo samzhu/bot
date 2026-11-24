@@ -1,7 +1,4 @@
-// Issue #42 desktop shell browser checks (Chrome, SAFE_MOCK guard).
-// GraphQL reads are stubbed in-page (request interception) so no backend/DB state is read or mutated;
-// any mutation is refused and fails the suite. Run:
-//   BROWSER_URL=http://127.0.0.1:4400 BACKEND_URL=http://127.0.0.1:8282 node e2e/threadplane-shell-desktop.mjs
+// Test-owned browser fixture; GraphQL responses below are synthetic and mutations are refused.
 import assert from 'node:assert/strict';
 import { readFile, copyFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -14,7 +11,7 @@ const shot = name => page.screenshot({ path: join(artifactsDir, `${name}.png`) }
 
 const iso = '2026-11-12T00:00:00Z';
 const workspaces = [
-  { id: 'w1', name: 'Personal Workspace', role: 'OWNER', personal: true },
+  { id: 'w1', name: 'Personal Workspace', role: 'MANAGER', personal: true },
   { id: 'w2', name: 'Team 團隊工作區 with an intentionally very long display name', role: 'MEMBER', personal: false },
 ];
 const conv = (id, title, pinned) => ({ id, workspaceId: 'w1', botId: 'b0', title, pinned, createdAt: iso, updatedAt: iso });
@@ -31,6 +28,10 @@ guard.addRequestHandler(async request => {
   if (/^\s*mutation/.test(q)) { mutations.push(q); await request.respond({ status: 403, contentType: 'application/json', body: '{"errors":[{"message":"blocked by #42 suite"}]}' }); return; }
   if (q.includes('SessionHistory')) {
     await request.respond({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: { conversation: { ...conv(body.variables.id, '釘選的對話', true), messages: [], runs: [] } } }) });
+    return;
+  }
+  if (q.includes('GetDefaultLocalBot')) {
+    await request.respond({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: { defaultLocalBot: localBot } }) });
     return;
   }
   const key = q.includes('Workspaces') ? 'workspaces' : q.includes('GetConversations') ? 'conversations' : q.includes('GetBots') ? 'bots' : null;
@@ -53,8 +54,9 @@ const keyboardTo = async (selector, max = 25) => {
   const trail = await page.evaluate(() => `${document.activeElement?.tagName}#${document.activeElement?.id}.${document.activeElement?.className}`);
   throw new Error(`Tab never reached ${selector}; last focus ${trail}`);
 };
-const load = async () => { await page.goto(browserUrl(), { waitUntil: 'networkidle2' }); await page.waitForSelector('chat-sidenav'); await wait(400); };
+const load = async () => { await page.goto(browserUrl(), { waitUntil: 'networkidle2' }); await page.waitForSelector('app-chat-navigation'); await wait(400); };
 
+let primaryError;
 try {
   page.setDefaultTimeout(8000);
   await page.setViewport({ width: 1440, height: 900 });
@@ -72,120 +74,94 @@ try {
   await check('app css contains no private SDK selectors', async () => {
     for (const f of ['../src/app/app.css', '../src/app/shell/chat-navigation.component.css']) {
       const text = await css(f);
-      assert.ok(!/::ng-deep|(^|[\s,{}>+~])chat-[a-z-]+|\.tplane-|\.chat-(?!pane)/m.test(text.replace(/--tplane-chat-[a-z0-9-]+/g, '').replace(/\/\*[\s\S]*?\*\//g, '')), `${f} references SDK internals`);
+      assert.ok(!/::ng-deep|(^|[\s,{}>+~])chat-[a-z-]+|\.tplane-|\.chat-(?!pane)/m.test(text.replace(/--tplane-chat-[a-z0-9-]+/g, '').replace(/\.chat-view\b/g, '').replace(/\/\*[\s\S]*?\*\//g, '')), `${f} references SDK internals`);
     }
   });
 
-  await check('desktop shell geometry: sidebar 280px, main offset, select fills column', async () => {
-    const g = await page.evaluate(() => {
-      const r = s => document.querySelector(s).getBoundingClientRect();
-      const sel = document.querySelector('#workspace-select');
-      const panel = document.querySelector('.primary-panel');
-      const cs = getComputedStyle(sel);
-      return { side: r('chat-sidenav').width, mainLeft: r('main.main-area').left, sel: sel.getBoundingClientRect().width, panel: panel.getBoundingClientRect().width,
-        border: parseFloat(cs.borderTopWidth), radius: parseFloat(cs.borderTopLeftRadius), panelOverflow: panel.scrollWidth > panel.clientWidth };
+  // Geometry, collapse and peek are verified by app-shell-layout.mjs at 1280×800.
+  await check('workspace panel keeps long names within its boundary', async () => {
+    await page.click('nav[aria-label="主要功能"] button[aria-label="工作區"]');
+    await page.waitForSelector('#workspace-select', { visible: true });
+    const bounds = await page.evaluate(() => {
+      const panel = document.querySelector('#navigation-context').getBoundingClientRect();
+      const select = document.querySelector('#workspace-select').getBoundingClientRect();
+      return { panel: panel.toJSON(), select: select.toJSON(), overflow: document.documentElement.scrollWidth > innerWidth };
     });
-    assert.ok(Math.abs(g.side - 280) <= 1, `sidenav ${g.side}`);
-    assert.ok(g.mainLeft >= 279 && g.mainLeft <= 281, `main left ${g.mainLeft}`);
-    assert.ok(g.sel >= g.panel - 40, `select ${g.sel} vs panel ${g.panel}`);
-    assert.ok(g.border >= 1 && g.radius >= 4 && !g.panelOverflow, JSON.stringify(g));
-  });
-
-  await check('long workspace name does not widen or overflow the sidebar', async () => {
-    await page.select('#workspace-select', 'w2'); await wait(500);
-    const g = await page.evaluate(() => ({ side: document.querySelector('chat-sidenav').getBoundingClientRect().width,
-      sel: document.querySelector('#workspace-select').getBoundingClientRect().right, bodyOverflow: document.documentElement.scrollWidth > innerWidth }));
-    assert.ok(Math.abs(g.side - 280) <= 1 && g.sel <= 280 && !g.bodyOverflow, JSON.stringify(g));
+    assert.ok(bounds.select.left >= bounds.panel.left && bounds.select.right <= bounds.panel.right && !bounds.overflow, JSON.stringify(bounds));
+    await page.select('#workspace-select', 'w2');
+    await page.waitForFunction(() => !document.querySelector('#workspace-select'));
+    assert.ok((await page.$eval('main .workspace-name', e => e.textContent)).includes('Team'));
     await shot('02-long-workspace-name');
-    await page.select('#workspace-select', 'w1'); await wait(400);
   });
 
-  await check('keyboard: Tab reaches select with visible 2px focus ring; type-ahead changes it', async () => {
-    await page.evaluate(() => document.activeElement?.blur());
-    await keyboardTo('#workspace-select');
-    const r = await ring(await page.$('#workspace-select'));
-    assert.ok(r.style !== 'none' && r.width >= 2, JSON.stringify(r));
-    await shot('03-focus-select');
-    await page.keyboard.type('T'); await wait(500); // type-ahead: macOS Chrome opens the popup on arrow keys instead
-    assert.equal(await page.$eval('#workspace-select', e => e.value), 'w2');
-    await wait(1200); await page.keyboard.type('P'); await wait(500); // past the type-ahead buffer reset
-    assert.equal(await page.$eval('#workspace-select', e => e.value), 'w1');
-  });
-
-  await check('keyboard: Tab to nav tabs shows focus ring and Enter/Space switch pressed state', async () => {
-    await keyboardTo('[data-testid="nav-conversations"]');
-    const r = await ring(await page.$('[data-testid="nav-conversations"]'));
-    assert.ok(r.style !== 'none' && r.width >= 2, JSON.stringify(r));
-    await page.keyboard.press('Tab');
-    assert.ok(await page.evaluate(() => document.activeElement?.matches('[data-testid="nav-bots"]')));
-    await shot('04-focus-tab');
-    await page.keyboard.press('Enter'); await page.waitForSelector('[data-testid="bot-item-b1"]');
-    assert.equal(await page.$eval('[data-testid="nav-bots"]', e => e.getAttribute('aria-pressed')), 'true');
-    assert.equal(await page.$eval('[data-testid="nav-conversations"]', e => e.getAttribute('aria-pressed')), 'false');
-    await shot('05-bots-mode');
-    const pressed = await page.evaluate(() => { const s = getComputedStyle(document.querySelector('[data-testid="nav-bots"]')); const o = getComputedStyle(document.querySelector('[data-testid="nav-conversations"]')); return { a: s.backgroundColor, b: o.backgroundColor, w: s.fontWeight }; });
-    assert.notEqual(pressed.a, pressed.b, 'pressed tab must be visually distinct');
-    await page.focus('[data-testid="nav-conversations"]'); await page.keyboard.press('Space');
-    await page.waitForFunction(() => document.querySelector('[data-testid="nav-conversations"]').getAttribute('aria-pressed') === 'true');
-  });
-
-  await check('workspace load error: styled alert from error tokens and retry recovers', async () => {
-    fail.workspaces = 1; await load();
-    await page.waitForSelector('p[role="alert"]');
-    const s = await page.$eval('p[role="alert"]', e => { const c = getComputedStyle(e); const t = getComputedStyle(document.querySelector('.layout-container')); return { bg: c.backgroundColor, border: c.borderTopWidth, token: t.getPropertyValue('--tplane-chat-error-bg').trim() }; });
-    assert.ok(s.bg !== 'rgba(0, 0, 0, 0)' && s.border === '1px', JSON.stringify(s));
-    assert.equal(await page.$eval('#workspace-select', e => e.disabled), true);
-    await shot('06-workspace-error');
-    await keyboardTo('p[role="alert"] button');
-    assert.ok((await ring(await page.$('p[role="alert"] button'))).width >= 2);
+  await check('keyboard opens workspace panel and switches workspace', async () => {
+    await page.focus('nav[aria-label="主要功能"] button[aria-label="工作區"]');
+    assert.ok((await ring(await page.$('nav[aria-label="主要功能"] button[aria-label="工作區"]'))).width >= 2);
     await page.keyboard.press('Enter');
-    await page.waitForFunction(() => !document.querySelector('p[role="alert"]') && !document.querySelector('#workspace-select').disabled);
+    await page.waitForSelector('#workspace-select', { visible: true });
+    await page.focus('#workspace-select');
+    assert.ok((await ring(await page.$('#workspace-select'))).width >= 2);
+    await page.select('#workspace-select', 'w1');
+    await page.waitForFunction(() => !document.querySelector('#workspace-select'));
+    assert.ok((await page.$eval('main .workspace-name', e => e.textContent)).includes('Personal'));
+    await shot('03-focus-select');
+  });
+
+  await check('keyboard switches Bot and conversation features', async () => {
+    await page.focus('nav[aria-label="主要功能"] button[aria-label="Bot"]');
+    assert.ok((await ring(await page.$('nav[aria-label="主要功能"] button[aria-label="Bot"]'))).width >= 2);
+    await page.keyboard.press('Enter'); await page.waitForSelector('[data-testid="bot-item-b1"]');
+    assert.equal(await page.$eval('nav[aria-label="主要功能"] button[aria-label="Bot"]', e => e.getAttribute('aria-pressed')), 'true');
+    await page.focus('nav[aria-label="主要功能"] button[aria-label="對話"]'); await page.keyboard.press('Space');
+    await page.waitForFunction(() => document.querySelector('nav[aria-label="主要功能"] button[aria-label="對話"]').getAttribute('aria-pressed') === 'true');
+    await page.waitForSelector('section[aria-label="近期對話"]');
+  });
+
+  await check('workspace failure offers keyboard retry', async () => {
+    fail.workspaces = 1; await load();
+    await page.click('nav[aria-label="主要功能"] button[aria-label="工作區"]');
+    await page.waitForSelector('[aria-label="工作區選取"] [role="alert"] button');
+    const retry = '[aria-label="工作區選取"] [role="alert"] button';
+    await page.focus(retry); assert.ok((await ring(await page.$(retry))).width >= 2);
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('#workspace-select', { visible: true });
     await shot('07-workspace-recovered');
   });
 
-  await check('workspace loading state is announced and select disabled', async () => {
-    delay.workspaces = 1500; const nav = page.goto(browserUrl(), { waitUntil: 'domcontentloaded' });
-    await page.waitForSelector('p[role="status"]'); await nav;
-    assert.equal(await page.$eval('#workspace-select', e => e.disabled), true);
-    await shot('08-loading');
-    await page.waitForFunction(() => !document.querySelector('#workspace-select').disabled, { timeout: 10000 });
-    await shot('08b-loaded');
+  await check('workspace loading is announced', async () => {
+    delay.workspaces = 1500;
+    const nav = page.goto(browserUrl(), { waitUntil: 'domcontentloaded' });
+    await nav;
+    await page.click('nav[aria-label="主要功能"] button[aria-label="工作區"]');
+    await page.waitForSelector('[aria-label="工作區選取"] [role="status"]');
+    await page.waitForSelector('#workspace-select', { visible: true, timeout: 10000 });
   });
 
-  await check('conversation list error: alert styled, retry reloads list', async () => {
-    await load(); fail.conversations = 2;
-    const reload = await page.evaluateHandle(() => [...document.querySelectorAll('button')].find(b => b.textContent.includes('重新載入對話')));
-    await reload.asElement().click();
-    await page.waitForSelector('p[role="alert"]');
-    const a = await page.$eval('p[role="alert"]', e => { const c = getComputedStyle(e); return { bg: c.backgroundColor, color: c.color }; });
-    assert.ok(a.bg !== 'rgba(0, 0, 0, 0)', JSON.stringify(a));
-    await shot('09-conversation-error');
-    const retry = await page.evaluateHandle(() => [...document.querySelectorAll('p[role="alert"] button')].find(b => b.textContent.includes('重試')));
-    assert.ok(retry.asElement(), 'retry button');
-    await retry.asElement().click();
-    await page.waitForFunction(() => [...document.querySelectorAll('chat-thread-list')].some(e => e.textContent.includes('Recent example')), { timeout: 10000 });
-    await shot('10-conversation-recovered');
+  await check('conversation list failure exposes retry and recovers', async () => {
+    fail.conversations = 2; await load();
+    await page.waitForFunction(() => [...document.querySelectorAll('#navigation-context [role="alert"]')].some(e => e.textContent.includes('對話列表載入失敗')));
+    const retry = await page.evaluateHandle(() => [...document.querySelectorAll('#navigation-context [role="alert"] button')].find(b => b.textContent.includes('重試載入')));
+    assert.ok(retry.asElement()); await retry.asElement().click();
+    await page.waitForFunction(() => [...document.querySelectorAll('chat-thread-list')].some(e => e.textContent.includes('Recent example')));
   });
 
   await check('bot list error and retry', async () => {
-    fail.bots = 1; await page.click('[data-testid="nav-bots"]');
-    await page.waitForSelector('[data-testid="bots-retry"]'); await shot('11-bots-error');
+    await load(); fail.bots = 1;
+    await page.click('nav[aria-label="主要功能"] button[aria-label="Bot"]');
+    await page.waitForSelector('[data-testid="bots-retry"]');
     await page.click('[data-testid="bots-retry"]'); await page.waitForSelector('[data-testid="bot-item-b1"]');
   });
 
-  await check('ThreadPlane components remain package-provided (rendered, not wrapped or restyled by app rules)', async () => {
+  await check('ThreadPlane components render through public elements', async () => {
     await load();
-    for (const s of ['chat-sidenav', 'chat-thread-list', 'chat-window']) assert.ok(await page.$(s), s);
-    const external = await page.evaluate(() => [...document.querySelectorAll('chat-thread-list button, chat-sidenav [aria-label="Search conversations"]')].every(el => !el.hasAttribute('_ngcontent-' + (document.querySelector('app-chat-navigation')?.getAttributeNames().find(n => n.startsWith('_nghost-'))?.slice(8) ?? '#'))));
-    assert.ok(external, 'SDK-owned buttons must not carry app component scope attributes');
+    for (const selector of ['app-chat-navigation', 'chat-thread-list', 'chat-window']) assert.ok(await page.$(selector), selector);
   });
 
   await check('no mutation requests were issued', async () => assert.deepEqual(mutations, []));
-  await check('no console page errors', async () => {
-    // reported through console.json; fail only on uncaught page errors
-  });
   await copyFile(new URL(import.meta.url), join(artifactsDir, 'suite-source.mjs'));
+} catch (error) {
+  primaryError = error;
 } finally {
-  try { await finish(); console.log(`PASSED; artifacts: ${artifactsDir}`); }
+  try { await finish(primaryError); console.log(`PASSED; artifacts: ${artifactsDir}`); }
   catch (error) { console.error(error.message); process.exitCode = 1; }
 }

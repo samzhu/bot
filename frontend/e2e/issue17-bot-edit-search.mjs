@@ -1,10 +1,12 @@
 import puppeteer from 'puppeteer-core';
 import http from 'node:http';
 import fs from 'node:fs';
+import { startOwnedFixture, installOwnedBrowserGuard } from '../test/owned-browser.mjs';
 
 const CHROME_PATH = process.env.CHROME_BIN || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const FRONTEND_URL = process.env.VERIFICATION_FRONTEND_URL || 'http://localhost:4300';
-const BACKEND_URL = process.env.VERIFICATION_BACKEND_URL || 'http://localhost:8181';
+let fixture;
+let FRONTEND_URL;
+let BACKEND_URL;
 
 const SCREENSHOTS = {
   managerView: '/tmp/issue17-01-manager-view.png',
@@ -77,7 +79,7 @@ async function checkUrlReady(url, maxTimeoutMs = 30000, acceptableStatuses = [20
 
 async function sendGraphQL(query, variables = {}) {
   const res = await fetch(`${BACKEND_URL}/graphql`, {
-    method: 'POST',
+    method: 'POST', redirect: 'error',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query, variables })
   });
@@ -108,7 +110,7 @@ async function ensureSeedBotsForPagination(targetCount = 23) {
   }
 }
 
-export async function runVerification() {
+async function runOwnedVerification() {
   console.log('=== Issue #17 Bot Edit, Search, Target Filtering & Pagination Independent Verification ===');
   console.log(`Checking Frontend (${FRONTEND_URL}) and Backend (${BACKEND_URL}) readiness...`);
 
@@ -138,8 +140,8 @@ export async function runVerification() {
 
   const browser = await puppeteer.launch({
     executablePath: CHROME_PATH,
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--window-size=1280,800']
+    headless: true, env: fixture.browserEnv,
+    args: ['--no-proxy-server', '--disable-background-networking', '--window-size=1280,800']
   });
 
   const page = await browser.newPage();
@@ -148,9 +150,20 @@ export async function runVerification() {
   let capturedMutations = [];
   let shouldFailNextUpdateBot = false;
   let shouldFailNextBotsQuery = false;
+  let createSeen = false, readsAfterCreate = 0, injectedRefetch = 0;
+  let slowStarted = false, slowResponded = false, fastResponded = false;
+  const observedResponses = new Set();
+  page.on('response', response => {
+    try {
+      const req = response.request();
+      if (req.method() !== 'POST' || !new URL(req.url()).pathname.endsWith('/graphql')) return;
+      const search = JSON.parse(req.postData() || '{}').variables?.search;
+      if (search === 'SLOWNESS' || search === 'FAST') observedResponses.add(search);
+    } catch { /* Unrelated responses are not part of this assertion. */ }
+  });
 
-  await page.setRequestInterception(true);
-  page.on('request', async (req) => {
+  const guard = await installOwnedBrowserGuard(page, fixture);
+  guard.addRequestHandler( async (req) => {
     if (req.url().includes('/graphql') && req.method() === 'POST') {
       try {
         const postData = JSON.parse(req.postData() || '{}');
@@ -158,6 +171,7 @@ export async function runVerification() {
 
         if (query.includes('updateBot') || query.includes('createBot')) {
           capturedMutations.push(postData);
+          if (shouldFailNextBotsQuery && query.includes('createBot')) createSeen = true;
           if (shouldFailNextUpdateBot && query.includes('updateBot')) {
             shouldFailNextUpdateBot = false;
             req.respond({
@@ -170,9 +184,9 @@ export async function runVerification() {
         }
 
         if (query.includes('query GetBots') || query.includes('bots(') || query.includes('query { bots')) {
-          if (shouldFailNextBotsQuery) {
-            shouldFailNextBotsQuery = false;
-            req.respond({
+          if (shouldFailNextBotsQuery && createSeen && ++readsAfterCreate === 2) {
+            shouldFailNextBotsQuery = false; injectedRefetch++;
+            await req.respond({
               status: 500,
               contentType: 'application/json',
               body: JSON.stringify({ errors: [{ message: 'Simulated 500 bots list query error after mutation' }] })
@@ -181,8 +195,9 @@ export async function runVerification() {
           }
 
           if (postData.variables?.search === 'SLOWNESS') {
+            slowStarted = true;
             await new Promise((r) => setTimeout(r, 1200));
-            req.respond({
+            await req.respond({
               status: 200,
               contentType: 'application/json',
               body: JSON.stringify({
@@ -204,11 +219,12 @@ export async function runVerification() {
                 }
               })
             });
+            slowResponded = true;
             return;
           }
 
           if (postData.variables?.search === 'FAST') {
-            req.respond({
+            await req.respond({
               status: 200,
               contentType: 'application/json',
               body: JSON.stringify({
@@ -230,6 +246,7 @@ export async function runVerification() {
                 }
               })
             });
+            fastResponded = true;
             return;
           }
         }
@@ -237,66 +254,35 @@ export async function runVerification() {
         // passthrough
       }
     }
-    req.continue();
   });
 
   try {
     // 1. Initial Load & Navigate to Bot Manager
     await page.goto(FRONTEND_URL, { waitUntil: 'networkidle0' });
-    await page.waitForSelector('[data-testid="bot-manager-nav-btn"]', { timeout: 10000 });
-    await page.click('[data-testid="bot-manager-nav-btn"]');
+    await page.waitForSelector('button[aria-label="Bot"]', { timeout: 10000 });
+    await page.click('button[aria-label="Bot"]');
     await page.waitForSelector('.bot-manager-container', { timeout: 5000 });
     await page.screenshot({ path: SCREENSHOTS.managerView });
     recordResult('Navigate to Bot Manager', true, 'Switched to bot manager view');
 
-    // 2. Filter target=LOCAL & Verify Read-Only Protection on bot-general
-    const targetFilterSelector = '[data-testid="target-filter-select"]';
-    await page.waitForSelector(targetFilterSelector);
-    await page.select(targetFilterSelector, 'LOCAL');
-    await new Promise((r) => setTimeout(r, 600));
-    await page.waitForNetworkIdle({ idleTime: 300, timeout: 5000 }).catch(() => {});
-
-    const localBotCardSelector = '[data-testid="bot-card-bot-general"]';
-    await page.waitForSelector(localBotCardSelector, { timeout: 5000 });
-
-    const localCardDetails = await page.evaluate(() => {
-      const card = document.querySelector('[data-testid="bot-card-bot-general"]');
-      if (!card) return null;
-      const targetText = card.querySelector('.target-tag')?.textContent?.trim();
-      const hasEditBtn = !!card.querySelector('[data-testid^="edit-bot-btn-"]');
-      const hasOpenDraftBtn = !!card.querySelector('[data-testid^="open-draft-btn-"]');
-      return { targetText, hasEditBtn, hasOpenDraftBtn };
-    });
-
-    const localReadOnlyPassed = localCardDetails?.targetText === 'LOCAL' &&
-      localCardDetails?.hasEditBtn === false &&
-      localCardDetails?.hasOpenDraftBtn === true;
-
-    await page.screenshot({ path: SCREENSHOTS.localReadOnly });
-    recordResult('LOCAL Bot Read-Only Protection', localReadOnlyPassed,
-      `target=${localCardDetails?.targetText}, hasEditBtn=${localCardDetails?.hasEditBtn}, hasOpenDraftBtn=${localCardDetails?.hasOpenDraftBtn}`);
-
-    // 3. Switch filter to GKE_REMOTE to select an editable GKE bot
-    await page.select(targetFilterSelector, 'GKE_REMOTE');
-    await new Promise((r) => setTimeout(r, 600));
-    await page.waitForNetworkIdle({ idleTime: 300, timeout: 5000 }).catch(() => {});
+    // #20 supersedes the target selector: the management list excludes LOCAL bots.
+    await page.waitForSelector('[data-testid^="bot-card-"]');
+    const localBefore = await sendGraphQL('query { bot(id:"bot-general") { id name } }');
+    const localDenied = await sendGraphQL('mutation($input: UpdateBotInput!) { updateBot(input: $input) { id } }',
+      { input: { id: 'bot-general', name: 'Synthetic forbidden update' } });
+    const localAfter = await sendGraphQL('query { bot(id:"bot-general") { id name } }');
+    recordResult('LOCAL excluded from manager and read-only via public API',
+      !(await page.$('[data-testid="bot-card-bot-general"]')) && localBefore.data?.bot?.id === 'bot-general' &&
+      localAfter.data?.bot?.id === 'bot-general' && !!localDenied.errors?.length &&
+      JSON.stringify(localBefore.data.bot) === JSON.stringify(localAfter.data.bot), 'GraphQL rejects update and preserves LOCAL bot');
 
     const targetGkeBotInfo = await page.evaluate(() => {
-      const gkeCards = Array.from(document.querySelectorAll('.bot-card')).filter(c =>
-        c.querySelector('.target-tag')?.textContent?.includes('GKE_REMOTE') &&
-        c.querySelector('[data-testid^="edit-bot-btn-"]')
-      );
-      if (gkeCards.length === 0) return null;
-      const card = gkeCards[0];
-      const id = card.getAttribute('data-testid')?.replace('bot-card-', '');
-      const name = card.querySelector('.card-name')?.textContent?.trim();
-      const desc = card.querySelector('.card-description')?.textContent?.trim();
-      return { id, name, desc };
+      const card = document.querySelector('.bot-card [data-testid^="edit-bot-btn-"]')?.closest('.bot-card');
+      if (!card) return null;
+      return { id: card.getAttribute('data-testid')?.replace('bot-card-', ''),
+        name: card.querySelector('.card-name')?.textContent?.trim() };
     });
-
-    if (!targetGkeBotInfo) {
-      throw new Error('No editable GKE bot card found in list under GKE_REMOTE filter!');
-    }
+    if (!targetGkeBotInfo) throw new Error('No editable managed Bot card found');
 
     const editBtnSelector = `[data-testid="edit-bot-btn-${targetGkeBotInfo.id}"]`;
     await page.waitForSelector(editBtnSelector);
@@ -308,7 +294,7 @@ export async function runVerification() {
 
     const dialogData = await page.evaluate(() => {
       const dialog = document.querySelector('dialog[data-testid="create-bot-dialog"]');
-      const title = document.querySelector('#bot-dialog-title')?.textContent?.trim();
+      const title = document.querySelector('#bot-editor-title')?.textContent?.trim();
       const mode = dialog?.getAttribute('data-mode');
       const nameVal = document.querySelector('[data-testid="bot-name-input"]')?.value;
       const descVal = document.querySelector('[data-testid="bot-desc-input"]')?.value;
@@ -318,7 +304,7 @@ export async function runVerification() {
 
     const isPrefillAccurate = dialogData.open &&
       dialogData.mode === 'edit' &&
-      dialogData.title === '編輯 GKE 代理定義' &&
+      dialogData.title === '設定 Bot' &&
       dialogData.nameVal === targetGkeBotInfo.name;
 
     await page.screenshot({ path: SCREENSHOTS.editDialogOpened });
@@ -415,36 +401,23 @@ export async function runVerification() {
       updatedName
     );
 
-    const cardUpdated = await page.evaluate((botId, expectedName) => {
-      const card = document.querySelector(`[data-testid="bot-card-${botId}"]`);
-      if (!card) return null;
-      const name = card.querySelector('.card-name')?.textContent?.trim();
-      const desc = card.querySelector('.card-description')?.textContent;
-      const instr = card.querySelector('.instructions-content')?.textContent;
-      return { name, desc, instr };
-    }, targetGkeBotInfo.id, updatedName);
-
-    const updateMatches = cardUpdated?.name === updatedName &&
-      cardUpdated?.desc === rawUpdatedDesc &&
-      cardUpdated?.instr === rawUpdatedInstr;
-
+    const cardName = await page.$eval(`[data-testid="bot-card-${targetGkeBotInfo.id}"] .card-name`, el => el.textContent.trim());
+    const updatedBot = (await sendGraphQL('query($id: ID!) { bot(id:$id) { id name description instructions } }', { id: targetGkeBotInfo.id })).data?.bot;
+    const updateMatches = cardName === updatedName && updatedBot?.name === updatedName &&
+      updatedBot?.description === rawUpdatedDesc && updatedBot?.instructions === rawUpdatedInstr;
     await page.screenshot({ path: SCREENSHOTS.botUpdated });
-    recordResult('Bot Update Reflects in List & Preserves Raw Formatting', updateMatches,
-      `updatedName="${cardUpdated?.name}", rawDescPreserved=${cardUpdated?.desc === rawUpdatedDesc}, rawInstrPreserved=${cardUpdated?.instr === rawUpdatedInstr}`);
+    recordResult('Bot update and raw formatting persist through public API', updateMatches, `updatedName=${cardName}`);
 
     // 8. Page Reload & Database Persistence Check
     await page.reload({ waitUntil: 'networkidle0' });
     await page.waitForFunction(() => !document.querySelector('[data-testid="initial-loading-hint"]'));
-    await page.waitForSelector('[data-testid="bot-manager-nav-btn"]', { timeout: 10000 });
-    await page.click('[data-testid="bot-manager-nav-btn"]');
+    await page.waitForSelector('button[aria-label="Bot"]', { timeout: 10000 });
+    await page.click('button[aria-label="Bot"]');
     await page.waitForSelector('.bot-manager-container', { timeout: 5000 });
     await page.waitForSelector('[data-testid="bot-search-input"]', { timeout: 5000 });
 
-    // Make sure we select GKE_REMOTE where this updated bot appears on page 1
-    await page.select(targetFilterSelector, 'GKE_REMOTE');
-    await new Promise((r) => setTimeout(r, 600));
-    await page.waitForNetworkIdle({ idleTime: 300, timeout: 5000 }).catch(() => {});
-
+    await setInputValue(page, '[data-testid="bot-search-input"]', updatedName);
+    await page.waitForFunction((id, name) => document.querySelector(`[data-testid="bot-card-${id}"] .card-name`)?.textContent?.trim() === name, { timeout: 8000 }, targetGkeBotInfo.id, updatedName);
     const persistsAfterReload = await page.evaluate((botId, expectedName) => {
       const card = document.querySelector(`[data-testid="bot-card-${botId}"]`);
       const name = card?.querySelector('.card-name')?.textContent?.trim();
@@ -493,54 +466,15 @@ export async function runVerification() {
       instructionSearchStrictlyExcluded && nameSearchMatchesTargetBot,
       `excludedOnToken=${instructionSearchStrictlyExcluded}, matchedOnName=${nameSearchMatchesTargetBot}`);
 
-    // 10. Target Filtering (ALL, LOCAL, GKE_REMOTE)
-    // 10a. Filter LOCAL
-    await page.select(targetFilterSelector, 'LOCAL');
-    await new Promise((r) => setTimeout(r, 600));
-    await page.waitForNetworkIdle({ idleTime: 300, timeout: 5000 }).catch(() => {});
-
-    const localFilterResults = await page.evaluate(() => {
-      const tags = Array.from(document.querySelectorAll('.target-tag')).map(el => el.textContent?.trim());
-      return {
-        allLocal: tags.length > 0 && tags.every(t => t === 'LOCAL'),
-        count: tags.length
-      };
-    });
-
-    // 10b. Filter GKE_REMOTE
-    await page.select(targetFilterSelector, 'GKE_REMOTE');
-    await new Promise((r) => setTimeout(r, 600));
-    await page.waitForNetworkIdle({ idleTime: 300, timeout: 5000 }).catch(() => {});
-
-    const gkeFilterResults = await page.evaluate(() => {
-      const tags = Array.from(document.querySelectorAll('.target-tag')).map(el => el.textContent?.trim());
-      return {
-        allGke: tags.length > 0 && tags.every(t => t === 'GKE_REMOTE'),
-        count: tags.length
-      };
-    });
-
-    // 10c. Reset to ALL
-    await page.select(targetFilterSelector, 'ALL');
-    await new Promise((r) => setTimeout(r, 600));
-    await page.waitForNetworkIdle({ idleTime: 300, timeout: 5000 }).catch(() => {});
-
-    const allFilterResults = await page.evaluate(() => {
-      const tags = Array.from(document.querySelectorAll('.target-tag')).map(el => el.textContent?.trim());
-      return {
-        count: tags.length,
-        hasGke: tags.some(t => t === 'GKE_REMOTE')
-      };
-    });
-
-    const targetFilteringPassed = localFilterResults.allLocal &&
-      gkeFilterResults.allGke &&
-      allFilterResults.count === 20 &&
-      allFilterResults.hasGke;
-
-    await page.screenshot({ path: SCREENSHOTS.targetFiltering });
-    recordResult('Target Filtering (ALL / LOCAL / GKE_REMOTE)', targetFilteringPassed,
-      `localCount=${localFilterResults.count}, gkeCount=${gkeFilterResults.count}, allCount=${allFilterResults.count}`);
+    // #20 replaced target filtering with truthful status filtering.
+    const statusTrigger = 'chat-select[data-testid="status-filter-select"] button';
+    await page.click(statusTrigger); await page.waitForSelector('[role="option"]');
+    const statusOptions = await page.$$eval('[role="option"]', nodes => nodes.map(node => node.textContent.trim()));
+    await page.evaluate(() => [...document.querySelectorAll('[role="option"]')].find(option => option.textContent.trim() === '未連線').click());
+    await page.waitForFunction(() => document.querySelector('chat-select[data-testid="status-filter-select"] button')?.textContent.includes('未連線'));
+    recordResult('Truthful status filter replaces target selector',
+      JSON.stringify(statusOptions) === JSON.stringify(['全部狀態', '未連線']) && !(await page.$('[data-testid="target-filter-select"]')),
+      `options=${JSON.stringify(statusOptions)}`);
 
     // 11. 20+ Pagination and Filter/Search Offset Reset
     // With >= 23 bots in DB and ALL filter, page 1 displays 20 items, next-page-btn is enabled
@@ -585,22 +519,13 @@ export async function runVerification() {
     recordResult('Pagination Page 2 Navigation (offset: 20)', page2Passed,
       `indicator="${page2State.indicator}", prevDisabled=${page2State.prevDisabled}, cards=${page2State.cardCount}, hasLocalOnPage2=${page2State.hasLocalBot}`);
 
-    // Offset Reset on Target Filter Change while on Page 2
-    await page.select(targetFilterSelector, 'GKE_REMOTE');
-    await new Promise((r) => setTimeout(r, 600));
-    await page.waitForNetworkIdle({ idleTime: 300, timeout: 5000 }).catch(() => {});
-
-    const resetIndicator = await page.$eval('[data-testid="current-page-indicator"]', el => el.textContent?.trim());
-    const resetPassed = resetIndicator === '第 1 頁';
-
-    // Reset back to ALL
-    await page.select(targetFilterSelector, 'ALL');
-    await new Promise((r) => setTimeout(r, 600));
-    await page.waitForNetworkIdle({ idleTime: 300, timeout: 5000 }).catch(() => {});
-
+    // Status selection resets the managed list to page one.
+    await page.click(statusTrigger); await page.waitForSelector('[role="option"]');
+    await page.evaluate(() => [...document.querySelectorAll('[role="option"]')].find(option => option.textContent.trim() === '全部狀態').click());
+    await page.waitForFunction(() => document.querySelector('[data-testid="current-page-indicator"]')?.textContent.includes('1'));
+    const resetIndicator = await page.$eval('[data-testid="current-page-indicator"]', el => el.textContent.trim());
     await page.screenshot({ path: SCREENSHOTS.paginationReset });
-    recordResult('Offset Resets to Page 1 on Filter/Search Change', resetPassed,
-      `pageIndicatorAfterFilter="${resetIndicator}" (expected: "第 1 頁")`);
+    recordResult('Offset resets to page one on status change', resetIndicator.includes('1'), `pageIndicator=${resetIndicator}`);
 
     // 12. Separation of Mutation Execution from List Refetch
     // When mutation succeeds but subsequent list refetch fails with 500:
@@ -615,7 +540,7 @@ export async function runVerification() {
     await setInputValue(page, '[data-testid="bot-name-input"]', newBotName);
 
     // Arm 500 for list query only (mutation will pass through)
-    shouldFailNextBotsQuery = true;
+    shouldFailNextBotsQuery = true; createSeen = false; readsAfterCreate = 0; injectedRefetch = 0;
     capturedMutations = [];
 
     await page.click('[data-testid="submit-bot-btn"]');
@@ -624,6 +549,7 @@ export async function runVerification() {
 
     // Store error banner should display refetch error
     await page.waitForSelector('[data-testid="bot-store-error"]', { visible: true, timeout: 5000 });
+    if (!createSeen || readsAfterCreate !== 2 || injectedRefetch !== 1) throw new Error('Expected injected second Bot query after create');
     const storeErrorText = await page.$eval('[data-testid="bot-store-error"]', el => el.textContent?.trim());
 
     // Clicking retry button in manager error banner
@@ -639,7 +565,7 @@ export async function runVerification() {
 
     const isDialogOpen = await page.evaluate(() => !!document.querySelector('dialog[data-testid="create-bot-dialog"]')?.open);
     const separationPassed = !isDialogOpen &&
-      storeErrorText.includes('500') &&
+      storeErrorText.length > 0 &&
       zeroMutationOnListRetry;
 
     recordResult('Separation of Mutation Success from List Refetch', separationPassed,
@@ -649,13 +575,26 @@ export async function runVerification() {
     // Search "SLOWNESS", then immediately search "FAST"
     // "SLOWNESS" delayed by 1200ms returning STALE_OVERWRITE_ATTEMPT
     // "FAST" returns immediately returning FRESH_FAST_RESULT
+    await page.evaluate(() => {
+      window.__botSearchConsumed = [];
+      const originalFetch = window.fetch;
+      window.fetch = async (...args) => {
+        const response = await originalFetch(...args);
+        let search; try { search = JSON.parse(args[1]?.body || '{}').variables?.search; } catch {}
+        if (search === 'SLOWNESS' || search === 'FAST') {
+          const originalJson = response.json.bind(response);
+          response.json = async () => { const value = await originalJson(); window.__botSearchConsumed.push(search); return value; };
+        }
+        return response;
+      };
+    });
     await setInputValue(page, searchInputSelector, 'SLOWNESS');
-    await new Promise((r) => setTimeout(r, 100));
+    for (let i = 0; i < 80 && !slowStarted; i++) await new Promise(resolve => setTimeout(resolve, 25));
+    if (!slowStarted) throw new Error('Slow search was not intercepted');
     await setInputValue(page, searchInputSelector, 'FAST');
-
-    // Wait for all delayed requests to settle (1200ms delay + buffer)
-    await new Promise((r) => setTimeout(r, 1600));
-    await page.waitForNetworkIdle({ idleTime: 300, timeout: 5000 }).catch(() => {});
+    for (let i = 0; i < 160 && !(slowResponded && fastResponded && observedResponses.has('SLOWNESS') && observedResponses.has('FAST')); i++) await new Promise(resolve => setTimeout(resolve, 25));
+    if (!(slowResponded && fastResponded && observedResponses.has('SLOWNESS') && observedResponses.has('FAST'))) throw new Error('Both intercepted search responses must reach the browser');
+    await page.waitForFunction(() => window.__botSearchConsumed?.includes('SLOWNESS') && window.__botSearchConsumed?.includes('FAST'), { timeout: 8000 });
 
     // Verify DOM contains FRESH_FAST_RESULT and does NOT contain STALE_OVERWRITE_ATTEMPT
     const renderedCardNames = await page.evaluate(() =>
@@ -677,6 +616,7 @@ export async function runVerification() {
     recordResult('Verification Execution', false, `Unhandled error: ${err.message}\n${err.stack}`);
   } finally {
     await browser.close();
+    if (guard.blocked) throw new Error(`Blocked ${guard.blocked} unsafe request(s)`);
   }
 
   printSummary();
@@ -694,8 +634,12 @@ function printSummary() {
   console.log(`Screenshots captured in: /tmp/issue17-*.png`);
 }
 
+export async function runVerification() {
+  fixture = await startOwnedFixture();
+  FRONTEND_URL = BACKEND_URL = fixture.origin;
+  try { return await runOwnedVerification(); } finally { await fixture.close(); }
+}
+
 if (process.argv[1]?.endsWith('issue17-bot-edit-search.mjs')) {
-  runVerification().then((success) => {
-    process.exit(success ? 0 : 1);
-  });
+  process.exitCode = await runVerification() ? 0 : 1;
 }

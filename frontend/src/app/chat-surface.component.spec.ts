@@ -25,6 +25,16 @@ describe('ChatSurfaceComponent', () => {
     fixture.detectChanges(); await fixture.whenStable();
     expect(fixture.nativeElement.textContent).toContain('回覆已停止');
   });
+  it.each([
+    ['error', '回覆失敗'],
+    ['aborted', '回覆已停止'],
+  ] as const)('renders a hydrated %s assistant message with its outcome', async (outcome, label) => {
+    const fixture = TestBed.createComponent(ChatSurfaceComponent);
+    fixture.componentRef.setInput('agent', mockAgent({messages:[{id:'history',role:'assistant',content:'historical partial',delivery:completeDelivery('history', outcome)}]}));
+    fixture.detectChanges(); await fixture.whenStable(); fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('historical partial');
+    expect(fixture.nativeElement.textContent).toContain(label);
+  });
   it('shows a stopped partial response without a retry action', async () => {
     const fixture = TestBed.createComponent(ChatSurfaceComponent);
     fixture.componentRef.setInput('agent', mockAgent({messages:[{id:'a',role:'assistant',content:'partial',delivery:completeDelivery('a','aborted')}]}));

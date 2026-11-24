@@ -5,18 +5,21 @@ import { tmpdir } from 'node:os';
 import { resolve, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import { randomBytes } from 'node:crypto';
+import { parsePostgresMarker } from './owned-postgres-identity.mjs';
 
 const frontend = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const forbidden = /^(?:BROWSER_URL|BACKEND_URL|VERIFICATION_(?:BACKEND|FRONTEND)_URL|SPRING_.*|BOT_AI_PROVIDER|BOT_GOOGLE_API_KEY|GOOGLE_.*|GEMINI_.*|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|GRADLE_OPTS)$/i;
+const forbidden = /^(?:BROWSER_URL|BACKEND_URL|BOT75_FIXTURE_NONCE|VERIFICATION_(?:BACKEND|FRONTEND)_URL|SPRING_.*|BOT_AI_PROVIDER|BOT_GOOGLE_API_KEY|GOOGLE_.*|GEMINI_.*|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|GRADLE_OPTS)$/i;
 
 export function rejectExternalConfiguration(env) {
   const found = Object.keys(env).filter(key => forbidden.test(key));
   if (found.length) throw new Error(`External fixture configuration is forbidden: ${found.join(', ')}`);
 }
 
-export function waitReady(child, timeout = 180000, identity = {}) {
+export function waitReady(child, timeout = 180000, identity = {}, nonce) {
   return new Promise((resolveReady, reject) => {
     let pending = '';
+    const postgresMarkers = [];
     const timer = setTimeout(() => finish(new Error('Fixture startup timed out')), timeout);
     function finish(error, port) {
       clearTimeout(timer); child.stdout.off('data', onData); child.off('exit', onExit); child.off('error', onError);
@@ -29,12 +32,15 @@ export function waitReady(child, timeout = 180000, identity = {}) {
       if (pending.length > 65536) pending = pending.slice(-65536);
       const lines = pending.split(/\r?\n/); pending = lines.pop();
       for (const line of lines) {
+        if (line.startsWith('BROWSER_FIXTURE_POSTGRES')) postgresMarkers.push(line);
         const daemon = /^BROWSER_FIXTURE_DAEMON ([1-9][0-9]*)$/.exec(line);
         if (daemon) identity.daemon = Number(daemon[1]);
         const fixture = /^BROWSER_FIXTURE_PROCESS ([1-9][0-9]*)$/.exec(line);
         if (fixture) identity.fixture = Number(fixture[1]);
         const match = /^BROWSER_FIXTURE_READY ([1-9][0-9]{0,4}) ([1-9][0-9]*)$/.exec(line);
         if (match && Number(match[1]) <= 65535 && identity.daemon && identity.fixture === Number(match[2])) {
+          try { if (nonce) identity.postgres = parsePostgresMarker(postgresMarkers, identity.fixture, nonce); }
+          catch (error) { return finish(error); }
           return finish(null, Number(match[1]));
         }
       }
@@ -66,8 +72,9 @@ export async function installOwnedBrowserGuard(page, fixture, onGeneration = () 
   await page.setBypassServiceWorker(true);
   await page.setCacheEnabled(false);
   await page.setRequestInterception(true);
-  const state = { blocked: 0 };
-  page.on('request', req => {
+  const handlers = [];
+  const state = { blocked: 0, addRequestHandler(handler) { handlers.push(handler); } };
+  page.on('request', async req => {
     let safe = false;
     try {
       safe = new URL(req.url()).origin === fixture.origin && req.redirectChain().length === 0
@@ -75,15 +82,28 @@ export async function installOwnedBrowserGuard(page, fixture, onGeneration = () 
     } catch { /* Invalid URLs fail closed. */ }
     if (req.isInterceptResolutionHandled()) return;
     if (!safe) { state.blocked++; void req.abort(); return; }
+    const originalContinue = req.continue.bind(req);
+    req.continue = (...args) => {
+      if (args.length && args[0] && Object.keys(args[0]).length) throw new Error('Request overrides are forbidden');
+      if (fixture.child.exitCode !== null || fixture.child.signalCode !== null) throw new Error('Fixture has exited');
+      if (!req.isInterceptResolutionHandled()) return originalContinue();
+    };
     try {
       if (req.method() === 'POST' && new URL(req.url()).pathname === '/api/ag-ui') onGeneration(req);
-      void req.continue();
-    } catch { state.blocked++; void req.abort(); }
+      for (const handler of handlers) {
+        await handler(req);
+        if (req.isInterceptResolutionHandled()) return;
+      }
+      if (!req.isInterceptResolutionHandled()) void req.continue();
+    } catch {
+      state.blocked++;
+      if (!req.isInterceptResolutionHandled()) void req.abort();
+    }
   });
   return state;
 }
 
-function hasChild(parent, child) {
+export function hasChild(parent, child) {
   try {
     const output = execFileSync('/usr/bin/pgrep', ['-P', String(parent)], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
     return output.trim().split(/\s+/).some(value => Number(value) === child);
@@ -118,10 +138,12 @@ export async function stopOwnedFixture(child, identity) {
   throw new Error('Owned fixture processes did not exit; temporary home retained');
 }
 
-export async function startOwnedFixture() {
+export async function startOwnedFixture({ postgresAccess = false } = {}) {
   rejectExternalConfiguration(process.env);
   const temp = await mkdtemp(resolve(tmpdir(), 'bot72-'));
   const env = fixtureEnvironment(process.env, temp);
+  const nonce = postgresAccess ? randomBytes(16).toString('hex') : undefined;
+  if (nonce) env.BOT75_FIXTURE_NONCE = nonce;
   if (process.env.BOT72_GRADLE_CACHE) {
     // Reuse only downloaded artifacts; never inherit Gradle init scripts or properties.
     try {
@@ -144,7 +166,7 @@ export async function startOwnedFixture() {
     await rm(temp, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
   };
   try {
-    const port = await waitReady(child, 180000, identity);
+    const port = await waitReady(child, 180000, identity, nonce);
     child.stdout.resume();
     if (child.exitCode !== null || child.signalCode !== null) throw new Error('Fixture exited after readiness');
     const root = resolve(frontend, 'dist/bot-frontend/browser');
@@ -168,6 +190,11 @@ export async function startOwnedFixture() {
     await new Promise((done, fail) => { server.once('error', fail); server.listen(0, '127.0.0.1', done); });
     const origin = `http://127.0.0.1:${server.address().port}`;
     child.once('exit', () => { server.close(); });
-    return { origin, browserEnv: env, backendOrigin: `http://127.0.0.1:${port}`, child, close };
-  } catch (error) { await close(); throw error; }
+    const browserEnv = { ...env };
+    delete browserEnv.BOT75_FIXTURE_NONCE;
+    return { origin, browserEnv, backendOrigin: `http://127.0.0.1:${port}`, child, identity, close };
+  } catch (error) {
+    try { await close(); } catch (cleanupError) { console.error('Fixture startup cleanup also failed:', cleanupError); }
+    throw error;
+  }
 }

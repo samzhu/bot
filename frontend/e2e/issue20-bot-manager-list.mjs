@@ -1,11 +1,12 @@
 // Issue #20 browser verification: 獨立 Bot 管理清單（PDF 第 57、66 頁；保留 #19 認可的「對話列表／Bot 管理」Tabs）。
 // 前提：前端 4300（proxy 到後端 8181，Fake 模型）已啟動。不觸發真模型／GCP；只透過公開 GraphQL 建立合成 Bot。
 import puppeteer from 'puppeteer-core';
-import { assertSafeBackendOrigin } from '../test/verification-harness.mjs';
+import { startOwnedFixture, installOwnedBrowserGuard } from '../test/owned-browser.mjs';
 
 const CHROME_PATH = process.env.CHROME_BIN || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const FRONTEND_URL = process.env.VERIFICATION_FRONTEND_URL || 'http://localhost:4300';
-const BACKEND_URL = process.env.VERIFICATION_BACKEND_URL || 'http://localhost:8181';
+const fixture = await startOwnedFixture();
+const FRONTEND_URL = fixture.origin;
+const BACKEND_URL = fixture.origin;
 const SHOT = (n) => `/tmp/issue20-${n}.png`;
 const RUN = Date.now().toString(36);
 const TAG = `E2E20${RUN}`;
@@ -25,7 +26,7 @@ const T = (id) => `[data-testid="${id}"]`;
 
 async function gql(query, variables = {}) {
   const res = await fetch(`${BACKEND_URL}/graphql`, {
-    method: 'POST',
+    method: 'POST', redirect: 'error',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query, variables })
   });
@@ -58,8 +59,8 @@ async function setValue(page, sel, value) {
 
 async function openManager(page) {
   await page.goto(FRONTEND_URL, { waitUntil: 'networkidle2' });
-  await page.waitForSelector(T('bot-manager-nav-btn'));
-  await page.click(T('bot-manager-nav-btn'));
+  await page.waitForSelector('button[aria-label="Bot"]');
+  await page.click('button[aria-label="Bot"]');
   await page.waitForSelector(T('create-bot-modal-btn'));
   await page.waitForSelector(`${T('bot-pagination')}, ${T('bots-empty-state')}`);
 }
@@ -108,7 +109,6 @@ async function layoutReport(page) {
 }
 
 async function run() {
-  await assertSafeBackendOrigin(BACKEND_URL);
   await seedBots();
   const def = await gql('query{ defaultLocalBot { id name target } }');
   const defaultName = def.data?.defaultLocalBot?.name;
@@ -116,8 +116,8 @@ async function run() {
 
   const browser = await puppeteer.launch({
     executablePath: CHROME_PATH,
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+    headless: true, env: fixture.browserEnv,
+    args: ['--no-proxy-server', '--disable-background-networking']
   });
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 800 });
@@ -125,8 +125,8 @@ async function run() {
   const botsQueries = [];
   const mutations = [];
   let slowSearch = null;
-  await page.setRequestInterception(true);
-  page.on('request', async (req) => {
+  const guard = await installOwnedBrowserGuard(page, fixture);
+  guard.addRequestHandler( async (req) => {
     if (req.url().includes('/graphql') && req.method() === 'POST') {
       const body = JSON.parse(req.postData() || '{}');
       if (/mutation/.test(body.query || '')) mutations.push(body.query);
@@ -137,13 +137,12 @@ async function run() {
         }
       }
     }
-    req.continue();
   });
 
   try {
     // 1. 標題／操作文案（PDF p57），預設助理不混入、管理查詢固定 GKE_REMOTE
     await openManager(page);
-    assert((await page.$eval('h1', (e) => e.textContent.trim())) === '機器人', 'h1 != 機器人');
+    assert((await page.$eval('app-bot-manager h1', (e) => e.textContent.trim())) === '機器人', 'h1 != 機器人');
     assert((await page.$eval(T('create-bot-modal-btn'), (e) => e.textContent.trim())) === '新增 Bot', '新增 Bot 文案');
     assert((await page.$eval(T('bot-search-input'), (e) => e.placeholder)) === '搜尋機器人名稱或用途', 'placeholder');
     // App 初始化也會查預設聊天設定；此處只驗證進入 manager 後最後送出的清單查詢。
@@ -165,10 +164,12 @@ async function run() {
     record('卡片：名稱／用途／開始對話／設定；無虛構最近使用、記憶、總量', true);
 
     // 3. 狀態篩選僅「全部狀態／未連線」
-    const opts = await page.$$eval(`${T('status-filter-select')} option`, (os) => os.map((o) => o.textContent.trim()));
+    await page.click('chat-select[data-testid="status-filter-select"] button');
+    await page.waitForSelector('[role="option"]');
+    const opts = await page.$$eval('[role="option"]', (os) => os.map((o) => o.textContent.trim()));
     assert(JSON.stringify(opts) === JSON.stringify(['全部狀態', '未連線']), `options=${opts}`);
     assert(!(await page.$(T('target-filter-select'))), '仍有 target 選單');
-    await page.select(T('status-filter-select'), 'NOT_CONNECTED');
+    await page.evaluate(() => [...document.querySelectorAll('[role="option"]')].find(e => e.textContent.trim() === '未連線').click());
     await waitFor(async () => (await cardCount(page)) === 20, '未連線篩選後仍為第一頁 20 筆');
     assert(botsQueries.at(-1).target === 'GKE_REMOTE' && botsQueries.at(-1).offset === 0, '狀態篩選後查詢不正確');
     record('狀態選單只含 全部狀態／未連線，篩選回第一頁且範圍不變', true);
@@ -264,6 +265,7 @@ async function run() {
     await page.screenshot({ path: SHOT('failure') }).catch(() => {});
   } finally {
     await browser.close();
+    if (guard.blocked) throw new Error(`Blocked ${guard.blocked} unsafe request(s)`);
   }
 
   const failed = results.filter((r) => !r.passed);
@@ -271,4 +273,4 @@ async function run() {
   return failed.length === 0;
 }
 
-run().then((ok) => process.exit(ok ? 0 : 1));
+try { process.exitCode = await run() ? 0 : 1; } finally { await fixture.close(); }

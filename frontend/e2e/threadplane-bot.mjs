@@ -13,16 +13,9 @@ const fields = 'id name description instructions target executionMode connection
 const set = (selector, value) => page.$eval(selector, (e, v) => { e.value = v; e.dispatchEvent(new Event('input', { bubbles: true })); }, value);
 const shot = name => page.screenshot({ path: join(artifactsDir, name), fullPage: true });
 try {
-  const safe = await check('SAFE_MOCK 三欄與 proxy', async () => {
-    for (const url of [backendUrl(), browserUrl()]) {
-      const response = await fetch(new URL('/api/internal/verification/status', url));
-      assert.equal(response.status, 200);
-      const status = await response.json();
-      assert.equal(status.status, 'SAFE_MOCK'); assert.equal(status.mock, true); assert.equal(status.modelClass, 'MockChatModel');
-    }
-    return true;
+  await check('owned proxy uses the session origin', async () => {
+    assert.equal(backendUrl(), browserUrl());
   });
-  if (!safe) throw new Error('SAFE_MOCK verification failed; no Bot mutations attempted');
   guard.addRequestHandler(async req => {
     if (!req.url().includes('/graphql') || req.method() !== 'POST') return;
     let query = ''; try { query = JSON.parse(req.postData() || '{}').query || ''; } catch { return; }
@@ -38,7 +31,7 @@ try {
   await check('桌面 Bot 導覽與原生狀態選擇', async () => {
     await page.setViewport({ width: 1280, height: 800 });
     await page.goto(browserUrl(), { waitUntil: 'networkidle2' });
-    await page.waitForSelector(t('nav-bots')); await page.click(t('nav-bots')); await page.waitForSelector(t('create-bot-modal-btn'));
+    await page.waitForSelector('button[aria-label="Bot"]'); await page.click('button[aria-label="Bot"]'); await page.waitForSelector(t('create-bot-modal-btn'));
     const trigger = await page.$('chat-select[data-testid="status-filter-select"] button'); assert(trigger);
     await trigger.click(); await page.waitForSelector('[role="option"]');
     assert.deepEqual(await page.$$eval('[role="option"]', els => els.map(e => e.textContent.trim())), ['全部狀態', '未連線']);
@@ -85,14 +78,10 @@ try {
   });
   await check('375px dialog 焦點與 Escape', async () => {
     await page.setViewport({ width: 375, height: 812 }); await page.goto(browserUrl(), { waitUntil: 'networkidle2' });
-    await page.click('button[aria-label="開啟導覽"]'); await page.waitForSelector(t('nav-bots'), { visible: true }); await page.waitForFunction(() => { const r = document.querySelector('[data-testid="nav-bots"]')?.getBoundingClientRect(); return r && r.left >= 0 && r.right <= innerWidth; }); await page.click(t('nav-bots'));
-    const drawerOpen = await page.$eval('chat-sidenav', e => e.getAttribute('data-open') === 'true');
-    if (drawerOpen) {
-      const closeSelector = 'chat-sidenav button[aria-label="Close conversations"]';
-      await page.waitForFunction(sel => { const e = document.querySelector(sel); if (!e) return false; const r = e.getBoundingClientRect(); const style = getComputedStyle(e); return r.width > 0 && r.height > 0 && r.left >= 0 && r.right <= innerWidth && style.visibility === 'visible'; }, {}, closeSelector);
-      await page.click(closeSelector);
-      await page.waitForFunction(() => document.querySelector('chat-sidenav')?.getAttribute('data-open') === 'false');
-    }
+    await page.click('button[aria-label="Bot"]');
+    await page.waitForSelector('[role="dialog"][aria-label="側欄導覽"]');
+    await page.click('button[aria-label="關閉導覽"]');
+    await page.waitForFunction(() => document.querySelector('.drawer-focus')?.hasAttribute('inert'));
     await page.waitForSelector(t('create-bot-modal-btn'), { visible: true });
     await page.waitForFunction(sel => { const e = document.querySelector(sel); if (!e) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) === e || (r.width > 0 && r.height > 0 && e.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2))); }, {}, t('create-bot-modal-btn'));
     await page.click(t('create-bot-modal-btn'));

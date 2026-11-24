@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { rejectExternalConfiguration } from './owned-browser.mjs';
 
 test('rejects external origins and unsafe provider or proxy configuration', () => {
-  for (const name of ['BROWSER_URL', 'BACKEND_URL', 'VERIFICATION_BACKEND_URL', 'SPRING_PROFILES_ACTIVE', 'SPRING_AI_GOOGLE_GENAI_API_KEY', 'GOOGLE_API_KEY', 'HTTPS_PROXY', 'JAVA_TOOL_OPTIONS']) {
+  for (const name of ['BROWSER_URL', 'BACKEND_URL', 'BOT75_FIXTURE_NONCE', 'VERIFICATION_BACKEND_URL', 'SPRING_PROFILES_ACTIVE', 'SPRING_AI_GOOGLE_GENAI_API_KEY', 'GOOGLE_API_KEY', 'HTTPS_PROXY', 'JAVA_TOOL_OPTIONS']) {
     assert.throws(() => rejectExternalConfiguration({ [name]: 'synthetic' }), /External fixture configuration/);
   }
   assert.doesNotThrow(() => rejectExternalConfiguration({ PATH: '/bin', JAVA_HOME: '/jdk' }));
@@ -146,4 +146,47 @@ test('records fixture identity before readiness so failed startup can be stopped
   child.stdout.write('BROWSER_FIXTURE_DAEMON 123\nBROWSER_FIXTURE_PROCESS 456\n');
   await assert.rejects(result, /timed out/);
   assert.equal(identity.fixture, 456);
+});
+
+test('owned guard allows controlled fault responses but never redirects a request', async () => {
+  const { installOwnedBrowserGuard } = await import('./owned-browser.mjs');
+  let handler, redirected = 0, aborted = 0, responded = 0;
+  const page = { async setBypassServiceWorker() {}, async setCacheEnabled() {}, async setRequestInterception() {}, on(_event, fn) { handler = fn; } };
+  const fixture = { origin: 'http://127.0.0.1:12345', child: { exitCode: null, signalCode: null } };
+  const guard = await installOwnedBrowserGuard(page, fixture);
+  guard.addRequestHandler(async request => {
+    if (request.url().endsWith('/graphql')) return request.respond({ status: 503 });
+    return request.continue({ url: 'http://127.0.0.1:54321/api/ag-ui' });
+  });
+  function request(path) {
+    let handled = false;
+    return { url: () => fixture.origin + path, method: () => 'POST', redirectChain: () => [],
+      isInterceptResolutionHandled: () => handled,
+      abort: () => { handled = true; aborted++; }, respond: () => { handled = true; responded++; },
+      continue: options => { handled = true; if (options?.url) redirected++; } };
+  }
+  await handler(request('/graphql'));
+  await handler(request('/api/ag-ui'));
+  assert.equal(responded, 1);
+  assert.equal(redirected, 0);
+  assert.equal(aborted, 1);
+});
+
+test('PostgreSQL access requires a single session marker before readiness', async () => {
+  const { EventEmitter } = await import('node:events');
+  const { PassThrough } = await import('node:stream');
+  const { waitReady } = await import('./owned-browser.mjs');
+  const nonce = 'b'.repeat(32), id = 'a'.repeat(64);
+  for (const marker of ['', `BROWSER_FIXTURE_POSTGRES ${id} test test 456 ${nonce}\n`.repeat(2), `BROWSER_FIXTURE_POSTGRES ${id} test test 999 ${nonce}\n`]) {
+    const child = new EventEmitter(); child.stdout = new PassThrough();
+    const ready = waitReady(child, 1000, {}, nonce);
+    child.stdout.write(`BROWSER_FIXTURE_DAEMON 123\nBROWSER_FIXTURE_PROCESS 456\n${marker}BROWSER_FIXTURE_READY 1234 456\n`);
+    await assert.rejects(ready);
+  }
+  const child = new EventEmitter(); child.stdout = new PassThrough();
+  const identity = {};
+  const ready = waitReady(child, 1000, identity, nonce);
+  child.stdout.write(`BROWSER_FIXTURE_DAEMON 123\nBROWSER_FIXTURE_PROCESS 456\nBROWSER_FIXTURE_POSTGRES ${id} test test 456 ${nonce}\nBROWSER_FIXTURE_READY 1234 456\n`);
+  assert.equal(await ready, 1234);
+  assert.equal(identity.postgres.containerId, id);
 });

@@ -4,7 +4,6 @@ throw new Error('Retired legacy browser verification; use the current ThreadPlan
 // PDF p110/114: public API + real browser + PostgreSQL; never use a paid model.
 import puppeteer from 'puppeteer-core';
 import assert from 'node:assert/strict';
-import { assertSafeBackendOrigin } from '../test/verification-harness.mjs';
 
 const backend = process.env.VERIFICATION_BACKEND_URL || 'http://127.0.0.1:8181';
 const frontend = process.env.VERIFICATION_FRONTEND_URL || 'http://127.0.0.1:4300';

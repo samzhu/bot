@@ -1,4 +1,4 @@
-// #47: run only against a fresh, isolated SAFE_MOCK database; this saves one budget.
+// #47: run only against a fresh, test-owned database; this saves one budget.
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { browserUrl, startVerification } from './threadplane-support.mjs';

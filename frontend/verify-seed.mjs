@@ -2,7 +2,6 @@
 throw new Error('Retired legacy browser verification; use the current ThreadPlane browser matrix.');
 
 import puppeteer from 'puppeteer-core';
-import { installBrowserGuard, getVerificationOrigins } from './test/verification-harness.mjs';
 
 const { frontendUrl: BASE_URL } = getVerificationOrigins();
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';

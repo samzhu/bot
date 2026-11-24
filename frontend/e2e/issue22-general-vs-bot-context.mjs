@@ -2,7 +2,6 @@
 throw new Error('Retired legacy browser verification; use the current ThreadPlane browser matrix.');
 
 import puppeteer from 'puppeteer-core';
-import { assertSafeBackendOrigin } from '../test/verification-harness.mjs';
 
 /*
  * Issue #22 browser verification: general chat vs specified Bot context.

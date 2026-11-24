@@ -40,12 +40,16 @@ const verify = async (name, fn) => { if (!process.env.CHAT_ONLY && name.startsWi
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const editor = 'chat-input textarea';
-const ensureNavigation = async () => { const closed = await page.evaluate(() => !!document.querySelector('.drawer-focus[inert]')); if (closed) { await page.click('button[aria-label="開啟導覽"]'); await page.waitForFunction(() => !document.querySelector('.drawer-focus[inert]')); await page.waitForFunction(() => { const b = document.querySelector('[aria-label="New chat"]'); if (!b) return false; const r = b.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth && r.width > 0; }); } };
-const newChat = async () => { await ensureNavigation(); await page.click('[aria-label="New chat"]'); await page.waitForSelector(editor); };
+const closeDrawer = async () => {
+  const button = await page.$('[role="dialog"][aria-label="側欄導覽"] button[aria-label="關閉導覽"]');
+  if (button) { await button.click(); await page.waitForFunction(() => document.querySelector('.drawer-focus')?.hasAttribute('inert')); }
+};
+const newChat = async () => { await closeDrawer(); await page.click('main button[aria-label="新對話"]'); await page.waitForSelector(editor); };
 const write = async value => { await page.$eval(editor, (element, text) => { element.value = text; element.dispatchEvent(new Event('input', { bubbles: true })); }, value); };
 const send = async value => { await write(value); await page.waitForFunction(() => { const button = document.querySelector('chat-input button[aria-label="Send message"]'); return button && !button.disabled; }); await page.click('chat-input button[aria-label="Send message"]'); };
 const search = async title => {
-  await ensureNavigation(); await page.click('button[aria-label="Search conversations"]'); await page.waitForSelector('[role="combobox"]');
+  await closeDrawer();
+  await page.click('button[aria-label="搜尋對話"]'); await page.waitForSelector('[role="combobox"]');
   await page.$eval('[role="combobox"]', (element, value) => { element.value = value; element.dispatchEvent(new Event('input', { bubbles: true })); }, title);
   await page.waitForFunction(value => [...document.querySelectorAll('[role="option"]')].some(element => element.textContent.includes(value)), { timeout: 8000 }, title);
   await page.evaluate(value => [...document.querySelectorAll('[role="option"]')].find(element => element.textContent.includes(value)).click(), title);
@@ -82,10 +86,12 @@ try {
   await page.setViewport({ width, height: width <= 767 ? 812 : 800 });
   await page.goto(browserUrl(), { waitUntil: 'networkidle2' });
   await verify('native components and deferred creation', async () => {
+    const bot = (await graphql('query { defaultLocalBot { id } }')).defaultLocalBot;
+    await graphql('mutation($bot: ID!, $title: String) { createConversation(botId: $bot, title: $title) { id } }', { bot: bot.id, title: 'browser navigation fixture' });
     for (const selector of ['chat-window', 'chat-input', 'chat-message-list']) assert(await page.$(selector), `missing ${selector}`);
     const before = createCount; await newChat(); await write('  retained\n '); await wait(150);
     assert(createCount === before, 'new draft created a conversation');
-    await search('COMPLETED'); await newChat(); await wait(150);
+    await search('browser navigation fixture'); await newChat(); await wait(150);
     assert(await page.$eval(editor, e => e.value) === '  retained\n ', 'raw draft changed after selection');
   });
   await verify('create failure restores raw draft (injected HTTP 503)', async () => {
@@ -115,7 +121,7 @@ try {
   await verify('OFF bot Enter preserves input (injected GraphQL fixture)', async () => {
     injectUnavailableBot = true;
     try {
-      await page.reload({ waitUntil: 'networkidle2' }); await ensureNavigation(); await page.click('[data-testid="nav-bots"]');
+      await page.reload({ waitUntil: 'networkidle2' }); await closeDrawer(); await page.click('button[aria-label="Bot"]');
       await page.waitForSelector('[data-testid="bot-item-canonical-off-fixture"]');
       await page.click('[data-testid="bot-item-canonical-off-fixture"]'); await page.waitForSelector(editor);
       await write('  OFF raw\n '); const before = createCount;
@@ -234,10 +240,6 @@ try {
     await page.evaluate(() => { window.__fault.clipboardReject = true; }); await copies.at(-1).click();
     await page.waitForFunction(() => document.querySelector('main')?.innerText.includes('無法複製回覆'));
     await page.screenshot({ path: `${artifactsDir}/chat-mobile.png` });
-  });
-  for (const status of ['FAILED', 'CANCELLED']) await verify(`history ${status}`, async () => {
-    await search(status); await page.waitForFunction(value => document.querySelector('[data-testid="chat-header-title"]')?.textContent.includes(value), {}, status);
-    await page.waitForFunction(value => document.querySelector('main')?.innerText.includes(value), { timeout: 8000 }, status === 'FAILED' ? '回覆失敗' : '回覆已停止');
   });
   await page.screenshot({ path: `${artifactsDir}/chat-final.png` });
 } finally { await finish(); }

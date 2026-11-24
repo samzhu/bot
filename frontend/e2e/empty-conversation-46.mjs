@@ -1,4 +1,4 @@
-// Isolated #46 browser verification. Both origins must identify as SAFE_MOCK.
+// Isolated #46 browser verification. Uses a test-owned Fake backend and isolated database.
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { browserUrl, startVerification } from './threadplane-support.mjs';

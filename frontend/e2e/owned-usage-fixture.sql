@@ -1,9 +1,8 @@
--- Synthetic simulated Usage fixtures. Run only through threadplane-usage-fixture.py setup.
+-- Explicit synthetic Usage fixture, executed only by the guarded owned-PG driver.
 BEGIN;
 DO $$ BEGIN
- IF current_database() <> 'bot40_usage_e2e' OR NOT EXISTS (
-   SELECT 1 FROM workspace_member m JOIN workspace w ON w.id=m.workspace_id WHERE w.id='32000000-0000-4000-8000-000000000002' AND w.name='ISSUE40 synthetic usage workspace' AND m.user_id='dev-user' AND m.active
- ) THEN RAISE EXCEPTION 'wrong database or missing active fixture membership'; END IF;
+ IF EXISTS (SELECT 1 FROM workspace WHERE id='32000000-0000-4000-8000-000000000002')
+ THEN RAISE EXCEPTION 'fixture workspace ID already exists'; END IF;
  IF EXISTS (SELECT 1 FROM provider_attempt WHERE id LIKE 'issue33-browser-a-%' AND
    (workspace_id<>'32000000-0000-4000-8000-000000000002' OR actor_id IS DISTINCT FROM 'dev-user' OR provider<>'FAKE' OR model<>'issue33-browser-synthetic' OR NOT simulation))
  THEN RAISE EXCEPTION 'fixture attempt ID collision'; END IF;
@@ -11,6 +10,8 @@ DO $$ BEGIN
    (attempt_id<>'issue33-browser-a-001' OR source_layer<>'FAKE_RAW'))
  THEN RAISE EXCEPTION 'fixture snapshot ID collision'; END IF;
 END $$;
+INSERT INTO workspace(id,name) VALUES ('32000000-0000-4000-8000-000000000002','ISSUE40 synthetic usage workspace');
+INSERT INTO workspace_member(workspace_id,user_id,role,active) VALUES ('32000000-0000-4000-8000-000000000002','dev-user','MANAGER',true);
 INSERT INTO provider_attempt(id,run_id,workspace_id,actor_id,provider,endpoint,model,channel,adapter_version,simulation,attempt_coverage,prepared_at,started_at,finished_at,execution_outcome,usage_presence,capture_completeness,projection_state,projection_version)
 SELECT 'issue33-browser-a-'||lpad(n::text,3,'0'),NULL,'32000000-0000-4000-8000-000000000002','dev-user','FAKE','generateContent','issue33-browser-synthetic','FAKE','issue33-fixture',true,'UNKNOWN',
        TIMESTAMPTZ '2026-11-13 01:00:00+08' - (n * interval '1 second'),

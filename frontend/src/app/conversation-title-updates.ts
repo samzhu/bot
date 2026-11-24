@@ -68,7 +68,7 @@ export class ConversationTitleUpdates {
             if (chunk.done) break;
             buffer += decoder.decode(chunk.value, {stream:true});
             let newline: number;
-            while ((newline = buffer.indexOf('\n')) >= 0) {
+            while (!terminal && (newline = buffer.indexOf('\n')) >= 0) {
               let line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
               if (line.endsWith('\r')) line = line.slice(0, -1);
               if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));

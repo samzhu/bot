@@ -3,7 +3,6 @@ throw new Error('Retired legacy browser verification; use the current ThreadPlan
 
 import puppeteer from 'puppeteer-core';
 import path from 'node:path';
-import { installBrowserGuard, getVerificationOrigins, assertSafeExecutionEnvironment } from './test/verification-harness.mjs';
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const { frontendUrl: BASE_URL, backendUrl: BACKEND_URL } = getVerificationOrigins();

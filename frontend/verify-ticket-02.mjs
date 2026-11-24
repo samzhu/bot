@@ -3,7 +3,6 @@ throw new Error('Retired legacy browser verification; use the current ThreadPlan
 
 import puppeteer from 'puppeteer-core';
 import path from 'node:path';
-import { installNodeFetchGuard, installBrowserGuard, getVerificationOrigins, assertSafeExecutionEnvironment } from './test/verification-harness.mjs';
 
 installNodeFetchGuard({ mode: 'verified-backend' });
 

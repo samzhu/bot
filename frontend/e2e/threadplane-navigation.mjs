@@ -2,12 +2,13 @@ import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { backendUrl, browserUrl, startVerification } from './threadplane-support.mjs';
+import { ownedFixturePostgres } from '../test/owned-fixture-postgres.mjs';
 
-// Synthetic fixtures are intentionally retained; no database cleanup is performed.
-const session = await startVerification('final-navigation');
+// Synthetic fixtures live only in the test-owned database.
+const session = await startVerification('final-navigation', { postgresAccess: true });
 const { page, guard, graphql, check, finish, artifactsDir } = session;
 // Browser has one local identity: cross-owner isolation is verified by the backend real-PostgreSQL multi-owner tests, not this suite.
-const tag = process.env.NAV_FIXTURE_TAG || `final-nav-${Date.now()}`;
+const tag = `final-nav-${Date.now()}`;
 let injection = null;
 let delaySearch = false;
 let delayedStarted = false;
@@ -48,36 +49,42 @@ const selectText = async (selector, text) => {
   await element.click();
   await handle.dispose();
 };
-const openSearch = async () => { await page.click('button[aria-label="Search conversations"]'); await page.waitForSelector('[role="combobox"]'); };
+const openSearch = async () => { await page.click('button[aria-label="搜尋對話"]'); await page.waitForSelector('[role="combobox"]'); };
 const setSearch = async text => page.$eval('[role="combobox"]', (el, value) => { el.value = value; el.dispatchEvent(new Event('input', { bubbles: true })); }, text);
 const closeSearch = async () => { await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role="combobox"]')); };
 const querySeen = (text) => requests.some(r => r.query.includes('SearchConversations') && r.variables.search === text);
 let bot;
+let workspaceId;
+let primaryError;
 try {
   await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
   page.setDefaultTimeout(8000);
+  workspaceId = (await graphql('query { personalWorkspace { id } }')).personalWorkspace.id;
   bot = (await graphql('query { defaultLocalBot { id } }')).defaultLocalBot;
   assert.ok(bot?.id, 'defaultLocalBot required');
-  const create = 'mutation($bot: ID!, $title: String) { createConversation(botId: $bot, title: $title) { id title } }';
+  const create = 'mutation($bot: ID!, $title: String) { createConversation(botId: $bot, title: $title) { id title botId } }';
   // Enough records in each section for a real next page and a 20-result search cap.
-  for (let i = 0; !process.env.NAV_FIXTURE_TAG && i < 44; i++) {
+  for (let i = 0; i < 44; i++) {
     const title = `${tag} ${String(i).padStart(2, '0')}${i === 0 ? ' literal%_\\繁體' : ''}`;
     const created = (await graphql(create, { bot: bot.id, title })).createConversation;
     if (i < 22) await graphql('mutation($id: ID!, $pinned: Boolean!) { setConversationPinned(id: $id, pinned: $pinned) { id } }', { id: created.id, pinned: true });
   }
-  if (!process.env.NAV_FIXTURE_TAG) {
-    const syntheticBot = (await graphql('mutation($input: CreateBotInput!) { createBot(input: $input) { id } }', { input: { name: `${tag}-bot`, instructions: 'Synthetic navigation verification' } })).createBot;
-    await graphql(create, { bot: syntheticBot.id, title: `${tag} bot-conversation` });
+  {
+    const fixtureBotId = ownedFixturePostgres(session.fixture).setupNavigationBot();
+    assert.notEqual(fixtureBotId, bot.id);
+    const alternate = (await graphql(create, { bot: fixtureBotId, title: `${tag} bot-conversation` })).createConversation;
+    assert.ok(alternate.id, 'alternate Bot conversation must be created through GraphQL');
+    assert.equal(alternate.botId, fixtureBotId, 'alternate conversation belongs to the test LOCAL bot');
   }
   console.log(`Browser: ${browserUrl()}; backend: ${backendUrl()}; synthetic fixtures: ${tag}; artifacts: ${artifactsDir}`);
   await page.setViewport({ width: 1280, height: 800 });
   await page.goto(browserUrl(), { waitUntil: 'networkidle2' });
   await verify('desktop native navigation and 20-result search limit', async () => {
-    for (const s of ['chat-window', 'chat-sidenav', 'chat-thread-list']) assert.ok(await page.$(s), s);
+    for (const s of ['chat-window', 'app-chat-navigation', 'chat-thread-list']) assert.ok(await page.$(s), s);
     await openSearch(); await setSearch(tag);
     await page.waitForFunction(() => document.querySelectorAll('[role="option"]').length === 20, { timeout: 10000 });
     const search = requests.findLast(r => r.query.includes('SearchConversations') && r.variables.search === tag);
-    assert.deepEqual(search.variables, { search: tag, limit: 20, offset: 0 });
+    assert.deepEqual(search.variables, { search: tag, limit: 20, offset: 0, workspaceId });
     assert.equal((await graphql('query($s: String) { conversations(search: $s, limit: 20, offset: 0) { id } }', { s: tag })).conversations.length, 20);
     await closeSearch();
   });
@@ -159,13 +166,15 @@ try {
     assert.equal(retried.variables.offset, failed.variables.offset);
   });
   await verify('collapsed sidenav expands to Bot mode', async () => {
-    await page.click('button[aria-label="Collapse sidenav"]');
-    await page.waitForSelector('chat-sidenav[data-mode="collapsed"]');
-    await page.click('button[aria-label="Expand sidenav"]');
-    await page.waitForSelector('chat-sidenav[data-mode="expanded"]');
-    await page.click('[data-testid="nav-bots"]');
-    await page.waitForFunction(() => document.querySelector('[data-testid="nav-bots"]')?.getAttribute('aria-pressed') === 'true');
-    await page.click('[data-testid="nav-conversations"]');
+    await page.click('button[aria-label="收合側欄"]');
+    await page.waitForFunction(() => document.querySelector('#navigation-context')?.hidden);
+    await page.click('nav[aria-label="主要功能"] button[aria-label="Bot"]');
+    await page.waitForSelector('app-chat-navigation.peek #navigation-context:not([hidden])');
+    await page.click('button[aria-label="固定側欄"]');
+    await page.waitForSelector('app-chat-navigation:not(.peek) #navigation-context:not([hidden])');
+    await page.click('nav[aria-label="主要功能"] button[aria-label="Bot"]');
+    await page.waitForFunction(() => document.querySelector('nav[aria-label="主要功能"] button[aria-label="Bot"]')?.getAttribute('aria-pressed') === 'true');
+    await page.click('nav[aria-label="主要功能"] button[aria-label="對話"]');
     await page.waitForSelector('section[aria-label="近期對話"] chat-thread-list li');
   });
   await verify('pin mutation uses authoritative GraphQL and moves thread', async () => {
@@ -185,20 +194,33 @@ try {
   await verify('mobile drawer inert, scrolling and keyboard palette', async () => {
     assert.equal(await page.$eval('.drawer-focus', e => e.hasAttribute('inert')), true);
     await page.click('button[aria-label="開啟導覽"]'); await page.waitForSelector('[role="dialog"][aria-label="側欄導覽"]');
-    const info = await page.$eval('[sidenavSections]', e => { e.scrollTop = e.scrollHeight; const b = [...e.querySelectorAll('button')].find(x => x.textContent.includes('載入更多對話')); const r=e.getBoundingClientRect(), br=b?.getBoundingClientRect(); return { top:e.scrollTop, scroll:e.scrollHeight, height:e.clientHeight, visible:!!br && br.top>=r.top && br.bottom<=r.bottom }; });
+    const info = await page.$eval('#navigation-context .navigation', e => { e.scrollTop = e.scrollHeight; const b = [...e.querySelectorAll('button')].find(x => x.textContent.includes('載入更多對話')); const r=e.getBoundingClientRect(), br=b?.getBoundingClientRect(); return { top:e.scrollTop, scroll:e.scrollHeight, height:e.clientHeight, visible:!!br && br.top>=r.top && br.bottom<=r.bottom }; });
     assert.ok(info.scroll > info.height && info.top > 0 && info.visible, JSON.stringify(info));
-    await openSearch(); await page.focus('[role="combobox"]'); await page.keyboard.down('Shift'); await page.keyboard.press('Tab'); await page.keyboard.up('Shift');
-    assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Close');
-    await page.keyboard.press('Tab'); assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('role')), 'combobox');
-    await page.keyboard.down('Shift'); await page.keyboard.press('Tab'); await page.keyboard.up('Shift'); await closeSearch();
-    await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Search conversations');
+    await page.keyboard.down('Control'); await page.keyboard.press('k'); await page.keyboard.up('Control');
+    await page.waitForSelector('[role="combobox"]');
+    try {
+      await page.focus('[role="combobox"]');
+      for (let i = 0; i < 6; i++) {
+        await page.keyboard.down('Shift'); await page.keyboard.press('Tab'); await page.keyboard.up('Shift');
+        assert.ok(await page.evaluate(() => !!document.activeElement?.closest('chat-history-search-palette [role="dialog"]')), 'Shift+Tab stays in palette');
+      }
+      for (let i = 0; i < 6; i++) {
+        await page.keyboard.press('Tab');
+        assert.ok(await page.evaluate(() => !!document.activeElement?.closest('chat-history-search-palette [role="dialog"]')), 'Tab stays in palette');
+      }
+    } finally { await closeSearch(); }
+    await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === '搜尋對話');
+    await page.click('button[aria-label="開啟導覽"]'); await page.waitForSelector('[role="dialog"][aria-label="側欄導覽"]');
     await page.keyboard.press('Escape'); await page.waitForFunction(() => document.querySelector('.drawer-focus')?.hasAttribute('inert'));
     assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), '開啟導覽');
   });
   await verify('mobile backdrop closes drawer and Bot reachable', async () => {
-    await page.click('button[aria-label="開啟導覽"]'); await page.waitForSelector('[role="dialog"][aria-label="側欄導覽"]'); await wait(400); await page.click('[data-testid="nav-bots"]');
-    await page.waitForFunction(() => document.querySelector('[data-testid="nav-bots"]')?.getAttribute('aria-pressed') === 'true');
+    await page.reload({ waitUntil: 'networkidle2' });
+    await page.click('button[aria-label="開啟導覽"]'); await page.waitForSelector('[role="dialog"][aria-label="側欄導覽"]'); await wait(400);
     await page.mouse.click(365, 250); await page.waitForFunction(() => document.querySelector('.drawer-focus')?.hasAttribute('inert'));
+    await page.click('nav[aria-label="主要功能"] button[aria-label="Bot"]');
+    await page.waitForFunction(() => document.querySelector('nav[aria-label="主要功能"] button[aria-label="Bot"]')?.getAttribute('aria-pressed') === 'true');
+    await page.click('button[aria-label="關閉導覽"]'); await page.waitForFunction(() => document.querySelector('.drawer-focus')?.hasAttribute('inert'));
   });
   await verify('375px standard height drawer', async () => {
     await page.setViewport({ width: 375, height: 812 }); await page.reload({ waitUntil: 'networkidle2' });
@@ -207,14 +229,14 @@ try {
     await page.keyboard.press('Escape'); await page.waitForFunction(() => document.querySelector('.drawer-focus')?.hasAttribute('inert'));
     assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), '開啟導覽');
     await page.click('button[aria-label="開啟導覽"]'); await page.waitForSelector('[role="dialog"][aria-label="側欄導覽"]');
-    await page.focus('[data-testid="nav-conversations"]');
+    await page.focus('nav[aria-label="主要功能"] button[aria-label="對話"]');
     await page.$eval('button[aria-label="開啟導覽"]', e => { window.__navFocusCount = 0; const focus = e.focus.bind(e); e.focus = (...args) => { window.__navFocusCount++; focus(...args); }; });
     await page.keyboard.press('Escape');
     await page.waitForFunction(() => document.querySelector('.drawer-focus')?.hasAttribute('inert'));
     await wait(100); assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), '開啟導覽');
     assert.equal(await page.evaluate(() => window.__navFocusCount), 1, 'child Escape must restore focus exactly once');
   });
-  // [DELAY] is a real SAFE_MOCK Run; no generation or status response is injected.
+  // [DELAY] is a real test Fake Run; no generation or status response is injected.
   // Each action has its own Run because the model delay is only ~600ms.
   let activeFixtureTitle;
   let activeFixtureId;
@@ -243,8 +265,7 @@ try {
     }
     await page.setViewport({ width: mobile ? 375 : 1280, height: mobile ? 812 : 800 });
     await page.reload({ waitUntil: 'networkidle2' });
-    if (mobile) { await page.click('button[aria-label="開啟導覽"]'); await page.waitForSelector('[role="dialog"][aria-label="側欄導覽"]'); await wait(350); }
-    await page.click('button[aria-label="New chat"]'); await page.waitForSelector('chat-input textarea');
+    await page.click('main button[aria-label="新對話"]'); await page.waitForSelector('chat-input textarea');
     await page.$eval('chat-input textarea', (e, value) => { e.value = value; e.dispatchEvent(new Event('input', { bubbles: true })); }, `[DELAY] ${tag} ${mobile ? 'mobile' : 'desktop'} ${name}`);
     const count = runRequests.length;
     await page.waitForFunction(() => !document.querySelector('chat-input button[aria-label="Send message"]')?.disabled);
@@ -256,7 +277,7 @@ try {
     assert.ok(['PENDING','RUNNING'].includes(state), `${name}: Run already ${state} before action`);
     if (mobile) {
       await page.click('button[aria-label="開啟導覽"]'); await page.waitForSelector('[role="dialog"][aria-label="側欄導覽"]');
-      await page.waitForFunction(() => document.querySelector('chat-sidenav nav')?.getBoundingClientRect().left >= -1, { timeout: 5000 });
+      await page.waitForFunction(() => document.querySelector('#navigation-context .navigation')?.getBoundingClientRect().left >= -1, { timeout: 5000 });
     }
     state = await status();
     assert.ok(['PENDING','RUNNING'].includes(state), `${name}: Run was ${state} immediately before action`);
@@ -292,19 +313,26 @@ try {
       ['pin', async () => { await pinDuringRun(false); }],
       ['unpin', async () => { await pinDuringRun(true); }],
       ['conversation and Bot mode switches', async () => {
-        await page.click('[data-testid="nav-bots"]'); await page.waitForFunction(() => document.querySelector('[data-testid="nav-bots"]')?.getAttribute('aria-pressed') === 'true');
-        await page.click('[data-testid="nav-conversations"]'); await page.waitForSelector('section[aria-label="近期對話"] chat-thread-list li');
+        if (mobile) { await page.keyboard.press('Escape'); await page.waitForFunction(() => document.querySelector('.drawer-focus')?.hasAttribute('inert')); }
+        await page.click('nav[aria-label="主要功能"] button[aria-label="Bot"]'); await page.waitForFunction(() => document.querySelector('nav[aria-label="主要功能"] button[aria-label="Bot"]')?.getAttribute('aria-pressed') === 'true');
+        if (mobile) { await page.click('button[aria-label="關閉導覽"]'); await page.waitForFunction(() => document.querySelector('.drawer-focus')?.hasAttribute('inert')); }
+        await page.click('nav[aria-label="主要功能"] button[aria-label="對話"]'); await page.waitForSelector('section[aria-label="近期對話"] chat-thread-list li');
         const item = await page.$('section[aria-label="近期對話"] chat-thread-list button[title]'); await item.click();
       }]
     ]) {
       await check(`active Run ${size}: ${name}`, () => duringRun(mobile, name, act));
     }
   }
+} catch (error) {
+  primaryError = error;
 } finally {
   try {
     await writeFile(join(artifactsDir, 'active-runs.json'), JSON.stringify(activeEvidence, null, 2) + '\n');
     await writeFile(join(artifactsDir, 'requested-urls.json'), JSON.stringify({ browserUrl: browserUrl(), backendUrl: backendUrl(), fixtureTag: tag, ownerIsolation: 'Browser uses one local identity; cross-owner isolation is covered by backend real-PostgreSQL tests.' }, null, 2) + '\n');
+  } catch (error) {
+    if (primaryError) console.error('Writing navigation evidence also failed:', error);
+    else primaryError = error;
   } finally {
-    await finish();
+    await finish(primaryError);
   }
 }

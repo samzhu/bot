@@ -2,39 +2,41 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import puppeteer from 'puppeteer-core';
-import { assertSafeBackendOrigin, installBrowserGuard } from '../test/verification-harness.mjs';
+import { startOwnedFixture, installOwnedBrowserGuard, rejectExternalConfiguration } from '../test/owned-browser.mjs';
+
+let activeFixture;
 
 export function browserUrl() {
-  return process.env.BROWSER_URL || 'http://127.0.0.1:4300';
+  if (!activeFixture) throw new Error('No owned verification session');
+  return activeFixture.origin;
 }
 
-export function backendUrl() {
-  return process.env.BACKEND_URL || 'http://127.0.0.1:8181';
-}
+export function backendUrl() { return browserUrl(); }
 
 /** Create one guarded browser session. The caller owns navigation and viewport setup. */
-export async function startVerification(suite) {
+export async function startVerification(suite, options = {}) {
+  rejectExternalConfiguration(process.env);
   if (typeof suite !== 'string' || !suite.trim()) {
     throw new TypeError('A nonempty verification suite name is required');
   }
-  // Check both paths: the browser proxy could point at a different backend.
-  await assertSafeBackendOrigin(backendUrl());
-  await assertSafeBackendOrigin(browserUrl());
-
+  if (activeFixture) throw new Error('A verification session is already active');
   const safeSuite = suite.trim().replace(/[^a-zA-Z0-9_-]+/g, '-').slice(0, 80) || 'suite';
   const artifactsDir = await mkdtemp(join(tmpdir(), `threadplane-${safeSuite}-`));
-  const browser = await puppeteer.launch({
-    executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    headless: true,
-  });
-
+  const fixture = await startOwnedFixture(options);
+  activeFixture = fixture;
+  let browser;
   let page;
   let guard;
   try {
+    browser = await puppeteer.launch({
+      executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      headless: true, env: fixture.browserEnv, args: ['--no-proxy-server', '--disable-background-networking'],
+    });
     page = await browser.newPage();
-    guard = await installBrowserGuard(page, { mode: 'verified-backend' });
+    guard = await installOwnedBrowserGuard(page, fixture);
   } catch (error) {
-    await browser.close();
+    try { if (browser) await browser.close(); } catch (closeError) { console.error('Browser cleanup also failed:', closeError); }
+    try { await fixture.close(); } catch (closeError) { console.error('Fixture cleanup also failed:', closeError); } finally { activeFixture = undefined; }
     throw error;
   }
 
@@ -92,22 +94,33 @@ export async function startVerification(suite) {
   }
 
   let finished;
-  function finish() {
+  function finish(primaryError) {
+    if (!finished && primaryError) results.push({ name: 'suite setup or execution', status: 'failed', error: String(primaryError?.stack || primaryError) });
     if (!finished) finished = (async () => {
       let closeError;
       try { await browser.close(); } catch (error) { closeError = error; }
-      await Promise.all([
+      try { await fixture.close(); } catch (error) { closeError ||= error; } finally { activeFixture = undefined; }
+      try { await Promise.all([
         writeFile(join(artifactsDir, 'results.json'), JSON.stringify({ suite, results }, null, 2) + '\n'),
         writeFile(join(artifactsDir, 'console.json'), JSON.stringify(consoleMessages, null, 2) + '\n'),
         writeFile(join(artifactsDir, 'network.json'), JSON.stringify(network, null, 2) + '\n'),
-      ]);
+      ]); } catch (error) {
+        if (primaryError) console.error('Writing verification evidence also failed:', error);
+        else closeError ||= error;
+      }
       const failures = results.filter(result => result.status === 'failed');
+      if (primaryError) {
+        if (closeError) console.error('Fixture cleanup also failed:', closeError);
+        throw primaryError;
+      }
+      if (closeError && (results.length === 0 || failures.length || guard.blocked)) console.error('Verification cleanup or evidence also failed:', closeError);
       if (results.length === 0) throw new Error(`No verification checks executed; artifacts: ${artifactsDir}`);
       if (failures.length) throw new Error(`${failures.length} verification check(s) failed; artifacts: ${artifactsDir}`);
+      if (guard.blocked) throw new Error(`Blocked ${guard.blocked} unsafe request(s); artifacts: ${artifactsDir}`);
       if (closeError) throw closeError;
     })();
     return finished;
   }
 
-  return { browser, page, guard, graphql, check, finish, artifactsDir };
+  return { browser, page, guard, graphql, check, finish, artifactsDir, fixture };
 }

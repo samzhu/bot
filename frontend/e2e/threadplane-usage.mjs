@@ -1,51 +1,30 @@
-// Dedicated synthetic Usage browser suite. No fixture setup or model generation occurs here.
-// Before running, provision the explicitly labelled isolated container/database and marked
-// synthetic workspace, then run: python3 frontend/e2e/threadplane-usage-fixture.py setup
-// Supply BROWSER_URL, BACKEND_URL, USAGE_E2E_CONTAINER, USAGE_E2E_CONTAINER_ID (full ID),
-// USAGE_E2E_DB_USER and USAGE_E2E_ALLOW_REVOCATION=1. Both origins must pass SAFE_MOCK.
-// The fixture controller temporarily revokes only the marked membership and restores it in
-// finally. SIGKILL or container failure can prevent restoration; check its status afterwards.
-// Latency checks hold real responses in the test browser; they do not mock response contents.
-import { spawn, execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+// Synthetic usage fixture is explicitly created in this session's owned PostgreSQL.
 import { startVerification, browserUrl } from './threadplane-support.mjs';
+import { ownedFixturePostgres } from '../test/owned-fixture-postgres.mjs';
 import { readFile, writeFile, mkdir, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
-if (process.env.USAGE_E2E_ALLOW_REVOCATION !== '1') throw new Error('Explicit USAGE_E2E_ALLOW_REVOCATION=1 is required for the controlled membership test');
-const fixtureControl = fileURLToPath(new URL('./threadplane-usage-fixture.py', import.meta.url));
-if (execFileSync('python3', [fixtureControl, 'status'], {
-  encoding: 'utf8'
-}).trim() !== 'active=true') throw new Error('Synthetic membership must be active');
-if (!process.env.BROWSER_URL || !process.env.BACKEND_URL) throw new Error('Explicit BROWSER_URL and BACKEND_URL are required');
-const v = await startVerification('usage-canonical');
-const {
-  page,
-  check,
-  artifactsDir
-} = v;
+const v = await startVerification('usage-canonical', { postgresAccess: true });
+const { page, check, artifactsDir } = v;
+let database;
 const metrics = [];
 const expected = '{"nested": {"text": "中文", "large": 123456789012345678901234567890, "explicitNull": null}, "promptTokenCount": 9007199254740993}';
+let otherWorkspace;
+async function selectWorkspace(id) {
+  const close = await page.$('[role="dialog"][aria-label="側欄導覽"] button[aria-label="關閉導覽"]');
+  if (close) await close.click();
+  await page.click('button[aria-label="工作區"]');
+  await page.waitForSelector('#workspace-select', { visible: true });
+  await page.select('#workspace-select', id);
+  await page.waitForFunction(() => !document.querySelector('#workspace-select'));
+}
 const setup = async width => {
-  await page.setViewport({
-    width,
-    height: 900
-  });
-  await page.goto(browserUrl(), {
-    waitUntil: 'networkidle2'
-  });
-  await page.waitForSelector('#workspace-select option');
-  if (width === 375) {
-    await page.click('button[aria-label="開啟導覽"]');
-    await new Promise(r => setTimeout(r, 500));
-  }
-  await page.select('#workspace-select', '32000000-0000-4000-8000-000000000002');
-  if (width === 375) {
-    await page.click('button[aria-label="開啟導覽"]');
-    await new Promise(r => setTimeout(r, 500));
-  }
-  let u = await page.evaluateHandle(() => [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '個人用量'));
-  await u.asElement().click();
+  await page.setViewport({ width, height: 900 });
+  await page.goto(browserUrl(), { waitUntil: 'networkidle2' });
+  await selectWorkspace('32000000-0000-4000-8000-000000000002');
+  await page.click('button[aria-label="個人用量"]');
+  await page.waitForSelector('nav[aria-label="用量頁面"]');
+  await page.evaluate(() => [...document.querySelectorAll('nav[aria-label="用量頁面"] button')].find(b => b.textContent.trim() === '逐次用量').click());
   await page.waitForSelector('app-usage tbody tr button');
 };
 const visible = async selector => page.evaluate(s => [...document.querySelectorAll(s)].map(e => {
@@ -69,6 +48,10 @@ const measure = async label => metrics.push({
   })))
 });
 try {
+  database = ownedFixturePostgres(v.fixture);
+  await database.setup();
+  otherWorkspace = (await v.graphql('query { personalWorkspace { id } }')).personalWorkspace.id;
+  assert.ok(otherWorkspace);
   await check('synthetic fixture GraphQL source and raw precision', async () => {
     const data = await v.graphql(`query($w: ID!, $id: ID!){myUsageAttempt(workspaceId:$w,id:$id){id simulation model snapshots(first:20){nodes{id sourceLayer rawUsage} pageInfo{hasNextPage}}}}`, {
       w: '32000000-0000-4000-8000-000000000002',
@@ -281,21 +264,8 @@ try {
           return original.apply(this, args);
         };
       });
-      const child = spawn('python3', [fixtureControl, 'inactive', '--', process.execPath, '-e', 'process.stdin.resume()'], {
-        stdio: ['pipe', 'pipe', 'pipe']
-      });
-      let out = '',
-        err = '';
-      child.stdin.on('error', () => {}); // A failed control process may close stdin first.
-      child.stdout.on('data', d => out += d);
-      child.stderr.on('data', d => err += d);
-      const completion = new Promise((resolve, reject) => {
-        child.on('error', reject);
-        child.on('exit', code => code === 0 ? resolve() : reject(new Error(`fixture control exit ${code}: ${err}`)));
-      });
       try {
-        for (let i = 0; i < 100 && !out.includes('membership inactive'); i++) await new Promise(r => setTimeout(r, 100));
-        assert.match(out, /membership inactive/);
+        database.setMembership(false);
         const response = page.waitForResponse(r => r.url().endsWith('/graphql') && r.request().postData()?.includes('AuthorizeUsageDownload'));
         await page.$eval('app-usage article button', e => e.click());
         const body = await (await response).json();
@@ -305,10 +275,8 @@ try {
         assert.equal(await page.$$eval('app-usage article', a => a.length), 0);
         assert.equal(await page.$$eval('app-usage tbody tr', a => a.length), 0);
       } finally {
-        child.stdin.end();
-        await completion;
+        database.setMembership(true);
       }
-      assert.match(out, /membership restored active=true/);
     });
     await check(`${width} raw draft survives navigation`, async () => {
       await setup(width);
@@ -316,11 +284,7 @@ try {
       await page.waitForSelector('chat-input textarea:not([disabled])');
       const raw = '  Usage draft 中文  ';
       await page.type('chat-input textarea', raw);
-      if (width === 375) {
-        await page.click('button[aria-label="開啟導覽"]');
-        await new Promise(r => setTimeout(r, 500));
-      }
-      await page.evaluate(() => [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '個人用量').click());
+      await page.click('button[aria-label="個人用量"]');
       await page.waitForSelector('app-usage');
       await page.evaluate(() => [...document.querySelectorAll('app-usage button')].find(b => b.textContent.trim() === '返回對話').click());
       await page.waitForSelector('chat-input textarea');
@@ -328,7 +292,7 @@ try {
     });
     await check(`${width} injected delay: stale workspace detail ignored`, async () => {
       await setup(width);
-      const originalWorkspace = await page.$eval('#workspace-select', e => [...e.options].find(o => o.value !== '32000000-0000-4000-8000-000000000002')?.value);
+      const originalWorkspace = otherWorkspace;
       assert.ok(originalWorkspace, 'A second workspace is required');
       await page.evaluate(() => {
         const original = fetch;
@@ -342,12 +306,7 @@ try {
       });
       await page.evaluate(() => [...document.querySelectorAll('app-usage tbody tr')].find(r => r.innerText.includes('2026-11-12T16:59:59Z')).querySelector('button').click());
       await page.waitForFunction(() => !!window.__usageRelease);
-      if (width === 375) {
-        await page.click('button[aria-label="開啟導覽"]');
-        await new Promise(r => setTimeout(r, 500));
-      }
-      await page.select('#workspace-select', originalWorkspace);
-      await page.waitForFunction(id => document.querySelector('#workspace-select').value === id, {}, originalWorkspace);
+      await selectWorkspace(originalWorkspace);
       await page.evaluate(() => window.__usageRelease());
       await new Promise(r => setTimeout(r, 300));
       assert.equal(await page.$$eval('app-usage article', x => x.length), 0);
@@ -355,13 +314,9 @@ try {
     });
     await check(`${width} injected delay: stale workspace list ignored`, async () => {
       await setup(width);
-      const other = await page.$eval('#workspace-select', e => [...e.options].find(o => o.value !== '32000000-0000-4000-8000-000000000002')?.value);
+      const other = otherWorkspace;
       assert.ok(other, 'A second workspace is required');
-      if (width === 375) {
-        await page.click('button[aria-label="開啟導覽"]');
-        await new Promise(r => setTimeout(r, 500));
-      }
-      await page.select('#workspace-select', other);
+      await selectWorkspace(other);
       await page.evaluate(() => {
         const original = fetch;
         window.__usageRelease = null;
@@ -371,17 +326,9 @@ try {
           return response;
         };
       });
-      if (width === 375) {
-        await page.click('button[aria-label="開啟導覽"]');
-        await new Promise(r => setTimeout(r, 500));
-      }
-      await page.select('#workspace-select', '32000000-0000-4000-8000-000000000002');
+      await selectWorkspace('32000000-0000-4000-8000-000000000002');
       await page.waitForFunction(() => !!window.__usageRelease);
-      if (width === 375) {
-        await page.click('button[aria-label="開啟導覽"]');
-        await new Promise(r => setTimeout(r, 500));
-      }
-      await page.select('#workspace-select', other);
+      await selectWorkspace(other);
       await page.evaluate(() => window.__usageRelease());
       await new Promise(r => setTimeout(r, 300));
       assert.ok(!(await page.$eval('app-usage', e => e.innerText)).includes('issue33-browser-synthetic'));
