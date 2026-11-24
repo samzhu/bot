@@ -21,6 +21,7 @@ class ReleaseProvisioningIntegrationTests {
             });
             var jdbc = new JdbcTemplate(new DriverManagerDataSource(
                     postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+            PostgresCommentsIntegrationTests.assertReleaseReceipts(jdbc);
             assertEquals(1, jdbc.queryForObject("select count(*) from bot where id='bot-general'", Integer.class));
             assertEquals(1, jdbc.queryForObject("select count(*) from pricing_catalog_revision where source_revision='gemini-standard-2026-11-16'", Integer.class));
             launcher.getMethod("main", String[].class).invoke(null, (Object) new String[] {

@@ -105,7 +105,9 @@ cd backend
 
 Run the admin image once against the release PostgreSQL with the same `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD`, and catalog configuration as the service. Supply credentials through the deployment environment. A successful exit applies pending versioned migrations, ensures the default Bot exists, and publishes the configured catalog using its existing validation and conflict checks. Re-running preserves existing records; a conflicting catalog revision fails the release. Start service instances only after the command succeeds. An unprepared schema, missing default Bot, or missing published catalog prevents service readiness. Investigate the reported failure and rerun the admin process before starting the service.
 
-For the initial cutover from an older release:
+For a database fully provisioned by release #76, the admin command checks the exact legacy filename receipts and representative schema, then uses Liquibase to register only the verified historical changes before applying newer changes. The legacy `schema_version` remains as an audit record. A partial, unknown or mismatched baseline is refused; investigate the diagnostic and preserve the database rather than editing receipts or clearing checksums. The old filename receipts do not prove historical SQL checksums.
+
+For the initial cutover from #76:
 
 1. Stop new traffic and quiesce all old application instances, including their in-flight work. Confirm they have stopped before running the new release's admin command; do not overlap old runtime instances with the new release.
 2. Run the new release's admin command against the intended database. On failure, stop the cutover and investigate; do not start the new service until preparation succeeds.
@@ -121,6 +123,8 @@ cd backend
 docker compose up -d pgvector
 ./gradlew bootRun -PreleaseAdmin
 ```
+
+Liquibase records each migration in `databasechangelog`; `schema_version` is retained as legacy audit structure and is empty on a fresh installation. If provisioning fails, inspect the diagnostic and database history, resolve the cause, and rerun the same admin release. Do not clear checksums or remove tracking rows to bypass a mismatch.
 
 The Compose file maps PostgreSQL to `localhost:5432` and specifies its database name and user. Set `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, and `SPRING_DATASOURCE_PASSWORD` for that database before invoking `bootRun`; supply the password privately. The base configuration disables Spring Boot's Compose integration for this command, so it does not start other services or a chat model. If your database or port differs, use its actual connection settings. The subsequent `dev.sh` uses its normal Compose service connection; ensure that it points to the same database. Repeat the preparation after a release that changes migrations or configured catalog.
 

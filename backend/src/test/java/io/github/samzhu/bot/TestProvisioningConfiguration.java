@@ -1,6 +1,7 @@
 package io.github.samzhu.bot;
 
-import io.github.samzhu.bot.bootstrap.DatabaseInitializer;
+import io.github.samzhu.bot.bootstrap.ReleaseMigration;
+import io.github.samzhu.bot.bootstrap.ReleaseProvisioner;
 import io.github.samzhu.bot.bootstrap.DefaultBotInitializer;
 import io.github.samzhu.bot.usage.PricingCatalogRelease;
 import org.springframework.boot.ApplicationRunner;
@@ -8,19 +9,20 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.core.annotation.Order;
 import org.springframework.jdbc.core.JdbcTemplate;
+import javax.sql.DataSource;
 
 /** Explicit test-owned provisioning before the service readiness gate. */
 @TestConfiguration(proxyBeanMethods = false)
 public class TestProvisioningConfiguration {
-    @Bean DatabaseInitializer testDatabaseInitializer(JdbcTemplate jdbc) { return new DatabaseInitializer(jdbc); }
-
-    @Bean @Order(0)
-    ApplicationRunner provisionTestDatabase(DatabaseInitializer migrations, JdbcTemplate jdbc,
+    @Bean ReleaseMigration testReleaseMigration(JdbcTemplate jdbc, DataSource dataSource) {
+        return new ReleaseMigration(jdbc, dataSource);
+    }
+    @Bean ReleaseProvisioner testReleaseProvisioner(JdbcTemplate jdbc, ReleaseMigration migration,
             PricingCatalogRelease catalog) {
-        return args -> {
-            migrations.run(args);
-            new DefaultBotInitializer(jdbc).run(args);
-            catalog.publishConfigured();
-        };
+        return new ReleaseProvisioner(jdbc, migration, new DefaultBotInitializer(jdbc), catalog);
+    }
+    @Bean @Order(0)
+    ApplicationRunner provisionTestDatabase(ReleaseProvisioner provisioner) {
+        return args -> provisioner.run();
     }
 }

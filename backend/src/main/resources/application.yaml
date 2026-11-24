@@ -61,6 +61,8 @@ bot:
     execution-mode: 'OFF'
 
 spring:
+  liquibase:
+    enabled: false # Migrations run only through the one-off release command.
   profiles:
     group:
       dev: local

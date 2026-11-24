@@ -2,7 +2,7 @@ package io.github.samzhu.bot;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.samzhu.bot.bootstrap.DatabaseInitializer;
+import io.github.samzhu.bot.bootstrap.ReleaseProvisioner;
 import io.github.samzhu.bot.bot.internal.BotRepository;
 import io.github.samzhu.bot.conversation.ConversationOperations;
 import io.github.samzhu.bot.conversation.ConversationView;
@@ -70,7 +70,7 @@ class LocalChatBackendIntegrationTests {
     private BotRepository botRepository;
 
     @Autowired
-    private DatabaseInitializer databaseInitializer;
+    private ReleaseProvisioner releaseProvisioner;
 
     @Autowired
     private org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
@@ -948,15 +948,15 @@ class LocalChatBackendIntegrationTests {
         );
         jdbcAggregateTemplate.insert(orphan);
 
-        // Trigger DatabaseInitializer simulation of server restart
-        databaseInitializer.run(null);
+        // Repeat release provisioning without rewriting Run state
+        releaseProvisioner.run();
 
         ChatRun recovered = chatRunRepository.findById(orphanRunId).orElseThrow();
         assertEquals(RunStatus.RUNNING.name(), recovered.status());
         assertNull(recovered.errorMessage());
 
-        // Re-run databaseInitializer to test SQL re-entrancy
-        assertDoesNotThrow(() -> databaseInitializer.run(null));
+        // Repeat release provisioning
+        assertDoesNotThrow(() -> releaseProvisioner.run());
         jdbcTemplate.update("delete from chat_run where id = ?", orphanRunId);
     }
 
@@ -2099,41 +2099,6 @@ class LocalChatBackendIntegrationTests {
         Instant conv2UpdatedAfter = conversationRepository.findById(conv2).orElseThrow().updatedAt();
         assertEquals(tConv2.toEpochMilli(), conv2UpdatedAfter.toEpochMilli(),
                 "Non-target conversation updated_at must remain strictly unchanged");
-    }
-
-    @Test
-    void test_DatabaseInitializer_NumericSorting_WithRealPostgresDDL() throws Exception {
-        // Clean up test tables if exist from previous run
-        jdbcTemplate.execute("DROP TABLE IF EXISTS test_child CASCADE;");
-        jdbcTemplate.execute("DROP TABLE IF EXISTS test_parent CASCADE;");
-        jdbcTemplate.execute("DROP TABLE IF EXISTS test_schema_version CASCADE;");
-
-        // Execute migrations against controlled test resources (V2__test_parent.sql and V10__test_child.sql)
-        // If alphabetical sorting was used, V10 would execute before V2 and fail with FK target missing error!
-        int applied = databaseInitializer.applyMigrations("classpath:db/test-migration/*.sql", "test_schema_version");
-        assertEquals(2, applied, "Both V2 and V10 migrations must be applied successfully in numeric order");
-
-        // Verify ledger recorded both scripts
-        List<String> ledger = jdbcTemplate.query(
-                "SELECT script_name FROM test_schema_version",
-                (rs, rowNum) -> rs.getString("script_name")
-        );
-        assertEquals(2, ledger.size());
-        assertTrue(ledger.containsAll(List.of("V2__test_parent.sql", "V10__test_child.sql")),
-                "Ledger must record both migrations");
-
-        // Verify test_child exists and references test_parent by inserting a row
-        jdbcTemplate.execute("INSERT INTO test_parent (id) VALUES (1)");
-        assertDoesNotThrow(() -> jdbcTemplate.execute("INSERT INTO test_child (id, parent_id) VALUES (10, 1)"));
-
-        // Running a second time must be completely idempotent (0 applied)
-        int repeatApplied = databaseInitializer.applyMigrations("classpath:db/test-migration/*.sql", "test_schema_version");
-        assertEquals(0, repeatApplied, "Re-running migrations must be idempotent and apply 0 scripts");
-
-        // Clean up
-        jdbcTemplate.execute("DROP TABLE IF EXISTS test_child CASCADE;");
-        jdbcTemplate.execute("DROP TABLE IF EXISTS test_parent CASCADE;");
-        jdbcTemplate.execute("DROP TABLE IF EXISTS test_schema_version CASCADE;");
     }
 
     @Test

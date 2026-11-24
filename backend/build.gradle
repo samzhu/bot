@@ -40,7 +40,7 @@ dependencies {
 	// implementation 'org.springframework.boot:spring-boot-starter-cache'
 	implementation 'org.springframework.boot:spring-boot-starter-data-jdbc'
 	implementation 'org.springframework.boot:spring-boot-starter-graphql'
-	// implementation 'org.springframework.boot:spring-boot-starter-liquibase'
+	implementation 'org.springframework.boot:spring-boot-starter-liquibase'
 	implementation 'org.springframework.boot:spring-boot-starter-opentelemetry'
 	// implementation 'org.springframework.boot:spring-boot-starter-security'
 	// implementation 'org.springframework.boot:spring-boot-starter-security-oauth2-resource-server'
@@ -120,6 +120,7 @@ dependencyManagement {
 
 tasks.named('test') {
 	useJUnitPlatform()
+	systemProperty 'release.test.classpath', sourceSets.main.runtimeClasspath.asPath
 }
 
 springBoot {

@@ -4,7 +4,6 @@ import io.github.samzhu.bot.usage.PricingCatalogRelease;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.core.annotation.Order;
-import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
@@ -23,11 +22,9 @@ public class ReleaseReadiness implements ApplicationRunner {
     @Override
     public void run(ApplicationArguments args) throws Exception {
         try {
-            var applied = new java.util.HashSet<>(jdbc.queryForList("select script_name from schema_version", String.class));
-            for (var resource : new PathMatchingResourcePatternResolver().getResources("classpath:db/migration/*.sql")) {
-                if (!applied.contains(resource.getFilename())) {
-                    throw new IllegalStateException("Release provisioning required: unapplied migration " + resource.getFilename());
-                }
+            int missing = ReleaseSchema.verifiedPrefix(jdbc);
+            if (missing != 0) {
+                throw new IllegalStateException("Release provisioning required: " + missing + " unapplied migration(s)");
             }
             if (!Boolean.TRUE.equals(jdbc.queryForObject("select exists(select 1 from bot where id='bot-general' and target='LOCAL')", Boolean.class))) {
                 throw new IllegalStateException("Release provisioning required: LOCAL default Bot is missing");

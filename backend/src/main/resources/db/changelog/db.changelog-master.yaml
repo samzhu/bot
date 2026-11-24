@@ -1,0 +1,145 @@
+databaseChangeLog:
+  - changeSet:
+      id: V1__initial_schema.sql
+      author: bot
+      changes:
+        - sqlFile:
+            path: db/migration/V1__initial_schema.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false
+  - changeSet:
+      id: V3__session_schema.sql
+      author: bot
+      changes:
+        - sqlFile:
+            path: db/migration/V3__session_schema.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false
+  - changeSet:
+      id: V4__add_conversation_pinned.sql
+      author: bot
+      changes:
+        - sqlFile:
+            path: db/migration/V4__add_conversation_pinned.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false
+  - changeSet:
+      id: V5__gke_bot_and_run_mode.sql
+      author: bot
+      changes:
+        - sqlFile:
+            path: db/migration/V5__gke_bot_and_run_mode.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false
+  - changeSet:
+      id: V6__workspace.sql
+      author: bot
+      changes:
+        - sqlFile:
+            path: db/migration/V6__workspace.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false
+  - changeSet:
+      id: V7__usage_ledger.sql
+      author: bot
+      changes:
+        - sqlFile:
+            path: db/migration/V7__usage_ledger.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false
+  - changeSet:
+      id: V8__usage_pricing.sql
+      author: bot
+      changes:
+        - sqlFile:
+            path: db/migration/V8__usage_pricing.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false
+  - changeSet:
+      id: V9__usage_cost_revision.sql
+      author: bot
+      changes:
+        - sqlFile:
+            path: db/migration/V9__usage_cost_revision.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false
+  - changeSet:
+      id: V10__workspace_monthly_budget.sql
+      author: bot
+      changes:
+        - sqlFile:
+            path: db/migration/V10__workspace_monthly_budget.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false
+  - changeSet:
+      id: V11__member_weekly_budget.sql
+      author: bot
+      changes:
+        - sqlFile:
+            path: db/migration/V11__member_weekly_budget.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false
+  - changeSet:
+      id: V12__pricing_catalog_entry_metadata.sql
+      author: bot
+      changes:
+        - sqlFile:
+            path: db/migration/V12__pricing_catalog_entry_metadata.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false
+  - changeSet:
+      id: V13__conversation_title_work.sql
+      author: bot
+      changes:
+        - sqlFile:
+            path: db/migration/V13__conversation_title_work.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false
+  - changeSet:
+      id: V14__conversation_title_recovery.sql
+      author: bot
+      changes:
+        - sqlFile:
+            path: db/migration/V14__conversation_title_recovery.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false
+  - changeSet:
+      id: V15__conversation_title_reservation.sql
+      author: bot
+      changes:
+        - sqlFile:
+            path: db/migration/V15__conversation_title_reservation.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false
+  - changeSet:
+      id: V16__run_ownership.sql
+      author: bot
+      changes:
+        - sqlFile:
+            path: db/migration/V16__run_ownership.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false
+  - changeSet:
+      id: V17__postgres_comments.sql
+      author: bot
+      changes:
+        - sqlFile:
+            path: db/migration/V17__postgres_comments.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false
