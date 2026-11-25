@@ -15,9 +15,14 @@ import org.springframework.context.ConfigurableApplicationContext;
 
 @io.github.samzhu.bot.UseTestFakes
 @SpringBootTest
-@Import(TestcontainersConfiguration.class)
+@Import(UsageCostRevisionRestartIntegrationTests.IsolatedPostgres.class)
 @ActiveProfiles("test")
 class UsageCostRevisionRestartIntegrationTests {
+    // Restart evidence must use only the database state arranged by this class.
+    @org.springframework.boot.test.context.TestConfiguration(proxyBeanMethods = false)
+    @Import(TestcontainersConfiguration.class)
+    static class IsolatedPostgres { }
+
     @Autowired JdbcTemplate jdbc;
     @Autowired javax.sql.DataSource dataSource;
 

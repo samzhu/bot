@@ -119,13 +119,17 @@ class LegacyBaselineIntegrationTests {
             pg.start(); var db = db(pg); legacy(db);
             var root = java.nio.file.Files.createTempDirectory("future-changelog-");
             try {
-                // Replace the resources directory in this child process so Liquibase sees one master path.
+                // Merge service and admin resources into one child fixture, keeping one changelog URL.
                 var resourcesRoot = java.nio.file.Path.of(getClass().getResource("/application.yaml").toURI()).getParent();
-                try (var files = java.nio.file.Files.walk(resourcesRoot)) {
-                    for (var source : files.toList()) {
-                        var destination = root.resolve(resourcesRoot.relativize(source));
-                        if (java.nio.file.Files.isDirectory(source)) java.nio.file.Files.createDirectories(destination);
-                        else java.nio.file.Files.copy(source, destination);
+                var adminRoot = java.nio.file.Path.of(getClass().getResource("/db/changelog/db.changelog-master.yaml").toURI());
+                for (int i = 0; i < 3; i++) adminRoot = adminRoot.getParent();
+                for (var sourceRoot : List.of(resourcesRoot, adminRoot)) {
+                    try (var files = java.nio.file.Files.walk(sourceRoot)) {
+                        for (var source : files.toList()) {
+                            var destination = root.resolve(sourceRoot.relativize(source));
+                            if (java.nio.file.Files.isDirectory(source)) java.nio.file.Files.createDirectories(destination);
+                            else java.nio.file.Files.copy(source, destination, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                        }
                     }
                 }
                 var path = root.resolve("db/changelog/db.changelog-master.yaml");
@@ -142,8 +146,9 @@ class LegacyBaselineIntegrationTests {
                 }
                 var command = new java.util.ArrayList<String>();
                 command.add(java.nio.file.Path.of(System.getProperty("java.home"), "bin", "java").toString());
+                var fixtureAdminRoot = adminRoot;
                 var classpath = java.util.Arrays.stream(System.getProperty("release.test.classpath").split(java.util.regex.Pattern.quote(java.io.File.pathSeparator)))
-                        .filter(entry -> !java.nio.file.Path.of(entry).equals(resourcesRoot)).toList();
+                        .filter(entry -> !java.nio.file.Path.of(entry).equals(resourcesRoot) && !java.nio.file.Path.of(entry).equals(fixtureAdminRoot)).toList();
                 command.add("-cp"); command.add(root + java.io.File.pathSeparator + String.join(java.io.File.pathSeparator, classpath));
                 command.add(ReleaseProvisioningApplication.class.getName()); command.addAll(List.of(args(pg)));
                 var log = root.resolve("admin.log");

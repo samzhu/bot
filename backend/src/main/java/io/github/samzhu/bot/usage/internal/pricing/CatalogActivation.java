@@ -52,7 +52,7 @@ public class CatalogActivation {
 
     private Revision persist(String sourceRevision, String sourceReference, List<PriceCatalog.Entry> entries) {
         String id=UUID.randomUUID().toString();
-        String hash=contentHash(sourceReference,entries);
+        String hash=io.github.samzhu.bot.pricing.CatalogHash.contentHash(sourceReference,entries);
         var inserted=jdbc.query("insert into pricing_catalog_revision(id,source_reference,source_revision,content_hash) values (?,?,?,?) on conflict (source_revision) do nothing returning id,generation",(rs,n)->new Revision(rs.getString(1),rs.getLong(2)),id,sourceReference,sourceRevision,hash);
         if (inserted.isEmpty()) {
             var existing=jdbc.queryForMap("select id,generation,content_hash from pricing_catalog_revision where source_revision=?",sourceRevision);
@@ -95,28 +95,17 @@ public class CatalogActivation {
             }
         }
     }
-    private String contentHash(String source, List<PriceCatalog.Entry> entries) {
-        try {
-            var normalized=entries.stream().map(e -> {
-                var p=e.snapshot();
-                try {
-                    var fields=new java.util.ArrayList<Object>(List.of(p.provider(),p.endpoint(),p.model(),p.channel(),p.revision(),e.fromInclusive().toString(),e.untilExclusive().toString(),new java.util.TreeMap<>(p.rates())));
-                    // Preserve historical hashes when legacy entries have no metadata.
-                    if (e.metadata()!=null) fields.add(e.metadata());
-                    return json.writeValueAsString(fields);
-                }
-                catch (Exception ex) { throw new IllegalArgumentException(ex); }
-            }).sorted().toList();
-            byte[] bytes=json.writeValueAsBytes(List.of(source,normalized));
-            return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
-        } catch(Exception e) { throw new IllegalArgumentException("Invalid catalog",e); }
-    }
     public void verifyPublished(String revision, String source, List<PriceCatalog.Entry> entries) {
         validateEntries(entries);
         var hashes = jdbc.queryForList("select content_hash from pricing_catalog_revision where source_revision=?", String.class, revision);
         if (hashes.isEmpty()) throw new IllegalStateException("Release provisioning required: configured pricing catalog is missing");
-        if (!contentHash(source, entries).equals(hashes.getFirst()))
+        if (!io.github.samzhu.bot.pricing.CatalogHash.contentHash(source, entries).equals(hashes.getFirst()))
             throw new IllegalStateException("Catalog revision payload conflict");
+    }
+    public void verifyExpectedHash(String revision, String expectedHash) {
+        var hashes = jdbc.queryForList("select content_hash from pricing_catalog_revision where source_revision=?", String.class, revision);
+        if (hashes.isEmpty()) throw new IllegalStateException("Release provisioning required: configured pricing catalog is missing");
+        if (!expectedHash.equals(hashes.getFirst())) throw new IllegalStateException("Catalog revision payload conflict");
     }
     public void restoreRevision(String revision) {
         var rows = jdbc.query("select id,generation from pricing_catalog_revision where source_revision=?",

@@ -29,11 +29,11 @@ public class ReleaseReadiness implements ApplicationRunner {
                 throw new IllegalStateException("Release provisioning required: " + missing + " unapplied migration(s)");
             }
             String selected = environment.acceptsProfiles(org.springframework.core.env.Profiles.of("dev & !test & !prod")) ? "dev" : "prod";
-            var expected = new InitializationSql(selected).read();
-            if (!Boolean.TRUE.equals(jdbc.queryForObject("select exists(select 1 from bot where id=? and target=?)", Boolean.class, expected.bot().id(), expected.bot().target()))) {
+            var expected = ReleaseMetadata.load(selected);
+            if (!Boolean.TRUE.equals(jdbc.queryForObject("select exists(select 1 from bot where id=? and target=?)", Boolean.class, expected.path("botId").asText(), expected.path("botTarget").asText()))) {
                 throw new IllegalStateException("Release provisioning required: LOCAL default Bot is missing");
             }
-            catalog.restorePublished(expected.revision(), expected.source(), expected.entries());
+            catalog.restoreExpected(expected.path("revision").asText(), expected.path("contentHash").asText());
         } catch (org.springframework.dao.DataAccessException ex) {
             throw new IllegalStateException("Release provisioning required: database schema or catalog is not ready", ex);
         }

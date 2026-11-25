@@ -13,10 +13,43 @@ import static org.junit.jupiter.api.Assertions.*;
 @org.junit.jupiter.api.TestMethodOrder(org.junit.jupiter.api.MethodOrderer.OrderAnnotation.class)
 // This suite explicitly covers dispatch before any catalog exists.
 @io.github.samzhu.bot.UseTestFakes
-@SpringBootTest(properties={"spring.config.location=optional:classpath:/no-catalog-test/", "bot.budget.monthly.default-cap-usd=10"})
-@Import(TestcontainersConfiguration.class)
+@SpringBootTest(properties={"spring.config.location=optional:classpath:/no-catalog-test/", "spring.liquibase.enabled=false", "bot.budget.monthly.default-cap-usd=10"})
+@Import(PricingPublishIntegrationTests.NoCatalogFixture.class)
 @ActiveProfiles("test")
 class PricingPublishIntegrationTests {
+    // This test needs an empty catalog at startup; online publication remains the real implementation.
+    @org.springframework.boot.test.context.TestConfiguration(proxyBeanMethods = false)
+    static class NoCatalogFixture {
+        @org.springframework.context.annotation.Bean
+        @org.springframework.boot.testcontainers.service.connection.ServiceConnection
+        org.testcontainers.postgresql.PostgreSQLContainer postgresContainer() {
+            return PostgresTestImage.container();
+        }
+
+        @org.springframework.context.annotation.Bean
+        @org.springframework.core.annotation.Order(0)
+        org.springframework.boot.ApplicationRunner schemaAndBot(JdbcTemplate jdbc, javax.sql.DataSource dataSource) {
+            return args -> {
+                new io.github.samzhu.bot.bootstrap.ReleaseMigration(jdbc, dataSource).run();
+                jdbc.update("insert into bot(id,name,target) values ('bot-general','Test bot','LOCAL')");
+            };
+        }
+
+        @org.springframework.context.annotation.Bean
+        @org.springframework.context.annotation.Primary
+        io.github.samzhu.bot.usage.PricingCatalogRelease emptyCatalogReadiness(JdbcTemplate jdbc) {
+            return new io.github.samzhu.bot.usage.PricingCatalogRelease() {
+                @Override public void restoreExpected(String revision, String contentHash) {
+                    if (jdbc.queryForObject("select count(*) from pricing_catalog_revision", Integer.class) != 0)
+                        throw new IllegalStateException("No-catalog fixture requires an empty catalog");
+                }
+                @Override public void publishRelease(String revision, String source,
+                        java.util.List<io.github.samzhu.bot.pricing.PriceCatalog.Entry> entries) {
+                    throw new UnsupportedOperationException("No-catalog fixture does not initialize a release catalog");
+                }
+            };
+        }
+    }
     @Autowired UsageLedger ledger;
     @Autowired PricingPublisher publisher;
     @Autowired JdbcTemplate jdbc;

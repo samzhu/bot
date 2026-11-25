@@ -34,13 +34,29 @@ ext {
 	set('springModulithVersion', "2.2.0")
 }
 
+sourceSets {
+    admin
+    dev
+    metadataTool {
+        java {
+            setSrcDirs(['src/metadata/java', 'src/main/java', 'src/admin/java'])
+            include 'io/github/samzhu/bot/bootstrap/GenerateReleaseMetadata.java'
+            include 'io/github/samzhu/bot/bootstrap/InitializationSql.java'
+            include 'io/github/samzhu/bot/pricing/PriceCatalog.java'
+            include 'io/github/samzhu/bot/pricing/PriceSnapshot.java'
+            include 'io/github/samzhu/bot/pricing/CatalogHash.java'
+        }
+    }
+}
+
 dependencies {
 	implementation 'com.ag-ui.community:ag-ui-spring-server-core:4.1.0'
 	implementation 'org.springframework.boot:spring-boot-starter-actuator'
 	// implementation 'org.springframework.boot:spring-boot-starter-cache'
 	implementation 'org.springframework.boot:spring-boot-starter-data-jdbc'
 	implementation 'org.springframework.boot:spring-boot-starter-graphql'
-	implementation 'org.springframework.boot:spring-boot-starter-liquibase'
+	adminImplementation 'org.springframework.boot:spring-boot-starter-liquibase'
+	metadataToolImplementation 'org.springframework.boot:spring-boot-starter-liquibase'
 	implementation 'org.springframework.boot:spring-boot-starter-opentelemetry'
 	// implementation 'org.springframework.boot:spring-boot-starter-security'
 	// implementation 'org.springframework.boot:spring-boot-starter-security-oauth2-resource-server'
@@ -120,14 +136,59 @@ dependencyManagement {
 	}
 }
 
+configurations {
+    adminImplementation.extendsFrom implementation
+    adminRuntimeOnly.extendsFrom runtimeOnly
+    devImplementation.extendsFrom adminImplementation, developmentOnly
+    devRuntimeOnly.extendsFrom adminRuntimeOnly
+    metadataToolImplementation.extendsFrom implementation
+    testImplementation.extendsFrom adminImplementation
+    testRuntimeOnly.extendsFrom adminRuntimeOnly
+}
+
+sourceSets.admin.compileClasspath += sourceSets.main.output.classesDirs
+sourceSets.admin.runtimeClasspath += sourceSets.main.output
+sourceSets.dev.compileClasspath += sourceSets.main.output.classesDirs + sourceSets.admin.output.classesDirs
+sourceSets.dev.runtimeClasspath += sourceSets.main.output + sourceSets.admin.output
+sourceSets.test.compileClasspath += sourceSets.admin.output + sourceSets.dev.output
+sourceSets.test.runtimeClasspath += sourceSets.admin.output + sourceSets.dev.output
+
+ def prodMetadata = layout.buildDirectory.dir('generated/release-metadata/prod')
+ def devMetadata = layout.buildDirectory.dir('generated/release-metadata/dev')
+ def generateReleaseMetadata = tasks.register('generateReleaseMetadata', JavaExec) {
+    dependsOn tasks.named('metadataToolClasses')
+    classpath = sourceSets.metadataTool.runtimeClasspath + files('src/admin/resources')
+    mainClass = 'io.github.samzhu.bot.bootstrap.GenerateReleaseMetadata'
+    args prodMetadata.get().asFile.absolutePath, devMetadata.get().asFile.absolutePath
+    inputs.files(fileTree('src/admin/resources/db'))
+    outputs.dirs(prodMetadata, devMetadata)
+ }
+sourceSets.main.output.dir([builtBy: generateReleaseMetadata], prodMetadata)
+sourceSets.admin.output.dir([builtBy: generateReleaseMetadata], devMetadata)
+
+tasks.named('bootRun') {
+    classpath = sourceSets.dev.runtimeClasspath
+    mainClass = project.hasProperty('releaseAdmin') ?
+            'io.github.samzhu.bot.bootstrap.ReleaseProvisioningApplication' : 'io.github.samzhu.bot.BotApplication'
+}
+
+tasks.register('adminBootJar', org.springframework.boot.gradle.tasks.bundling.BootJar) {
+    targetJavaVersion = JavaVersion.VERSION_25
+    archiveClassifier = 'admin'
+    mainClass = 'io.github.samzhu.bot.bootstrap.ReleaseProvisioningApplication'
+    classpath = sourceSets.admin.runtimeClasspath
+}
+
 tasks.named('test') {
+	dependsOn tasks.named('adminBootJar')
+	systemProperty 'release.admin.archive', tasks.named('adminBootJar').get().archiveFile.get().asFile.absolutePath
 	useJUnitPlatform()
-	systemProperty 'release.test.classpath', sourceSets.main.runtimeClasspath.asPath
+	systemProperty 'release.test.classpath', sourceSets.admin.runtimeClasspath.asPath
+	systemProperty 'service.production.classpath', (sourceSets.main.output + configurations.productionRuntimeClasspath).asPath
 }
 
 springBoot {
-	mainClass = project.hasProperty('releaseAdmin') ?
-			'io.github.samzhu.bot.bootstrap.ReleaseProvisioningApplication' : 'io.github.samzhu.bot.BotApplication'
+    mainClass = 'io.github.samzhu.bot.BotApplication'
 }
 
 tasks.named('bootBuildImage') {

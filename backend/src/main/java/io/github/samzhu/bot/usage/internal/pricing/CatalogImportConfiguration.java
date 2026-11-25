@@ -24,9 +24,8 @@ public class CatalogImportConfiguration implements io.github.samzhu.bot.usage.Pr
         activation.publishRelease(revision, source, entries);
     }
     @Override
-    public void restorePublished(String revision, String source, List<PriceCatalog.Entry> entries) {
-        validateMetadata(entries);
-        activation.verifyPublished(revision, source, entries);
+    public void restoreExpected(String revision, String contentHash) {
+        activation.verifyExpectedHash(revision, contentHash);
         activation.restoreRevision(revision);
     }
     private void validateMetadata(List<PriceCatalog.Entry> entries) {

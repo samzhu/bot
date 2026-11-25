@@ -28,6 +28,7 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import javax.sql.DataSource;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -40,8 +41,27 @@ import static org.mockito.Mockito.*;
 @Import({TestcontainersConfiguration.class,SupersededExecutionIntegrationTests.Scheduling.class})
 @ActiveProfiles("test")
 class SupersededExecutionIntegrationTests {
-    @TestConfiguration @EnableScheduling static class Scheduling {}
-    @MockitoSpyBean WorkspaceAdmission admission;
+    @TestConfiguration @EnableScheduling static class Scheduling {
+        @org.springframework.context.annotation.Bean ScanGate scanGate() { return new ScanGate(); }
+        @org.springframework.context.annotation.Bean
+        org.springframework.beans.factory.SmartInitializingSingleton installScanGate(WorkspaceAdmission admission, ScanGate gate) {
+            // Install once before scheduled scans start; mutating Mockito stubs during scans races the spy.
+            return () -> doAnswer(call -> {
+                var observed=gate.once.getAndSet(null);
+                if (observed != null) {
+                    observed.countDown();
+                    return java.util.concurrent.CompletableFuture.completedFuture(new WorkspaceAdmission.SupersededPage.Unknown());
+                }
+                return gate.held.get() ? java.util.concurrent.CompletableFuture.completedFuture(new WorkspaceAdmission.SupersededPage.Unknown()) : call.callRealMethod();
+            }).when(admission).scanSupersededNotDispatched(any(),any(),anyInt());
+        }
+    }
+    static class ScanGate {
+        final AtomicBoolean held=new AtomicBoolean();
+        final AtomicReference<CountDownLatch> once=new AtomicReference<>();
+    }
+    @MockitoSpyBean(reset=org.springframework.test.context.bean.override.mockito.MockReset.NONE) WorkspaceAdmission admission;
+    @Autowired ScanGate gate;
     @Autowired WorkspaceOperations workspaces;
     @Autowired ConversationOperations conversations;
     @Autowired ExecutionOperations execution;
@@ -107,22 +127,17 @@ class SupersededExecutionIntegrationTests {
         awaitConvergence(fixture,RunStatus.FAILED,"BUDGET_CANCELLATION_SUPERSEDED");
     }
     @Test void twoAttemptsAndUnknownScanAutomaticallyRecoverWithoutCaller() throws Exception {
-        var fixture=fixture(2); var injected=new AtomicBoolean(true); var observed=new CountDownLatch(1);
-        doAnswer(call -> {
-            if(injected.compareAndSet(true,false)) { observed.countDown(); return java.util.concurrent.CompletableFuture.completedFuture(new WorkspaceAdmission.SupersededPage.Unknown()); }
-            return call.callRealMethod();
-        }).when(admission).scanSupersededNotDispatched(any(),any(),anyInt());
+        var fixture=fixture(2); var observed=new CountDownLatch(1);
+        gate.once.set(observed);
         try {
             insertSyntheticStale(fixture);
             assertTrue(observed.await(5,TimeUnit.SECONDS),"scanner must observe an injected Unknown and retry");
             awaitConvergence(fixture,RunStatus.FAILED,"BUDGET_CANCELLATION_SUPERSEDED");
             for(String attempt:fixture.attempts()) assertEquals("BUDGET_CANCELLATION_SUPERSEDED",jdbc.queryForObject("select terminal_reason from workspace_admission_finalization where attempt_id=?",String.class,attempt));
-        } finally { reset(admission); }
+        } finally { gate.once.set(null); }
     }
     @Test void cancelWinsBeforeReadyFactIsConsumed() throws Exception {
-        var fixture=fixture(0); var blocked=new AtomicBoolean(true);
-        doAnswer(call -> blocked.get() ? java.util.concurrent.CompletableFuture.completedFuture(new WorkspaceAdmission.SupersededPage.Unknown()) : call.callRealMethod())
-                .when(admission).scanSupersededNotDispatched(any(),any(),anyInt());
+        var fixture=fixture(0); gate.held.set(true);
         try {
             insertSyntheticStale(fixture);
             long deadline=System.nanoTime()+Duration.ofSeconds(12).toNanos(); int facts=0;
@@ -133,15 +148,13 @@ class SupersededExecutionIntegrationTests {
             assertEquals(1,facts);
             var cancelled=execution.cancelRun(fixture.registration().runId(),fixture.registration().actorId());
             assertEquals(RunStatus.CANCELLED,cancelled.finalStatus());
-            blocked.set(false);
+            gate.held.set(false);
             awaitConvergence(fixture,RunStatus.CANCELLED,null);
-        } finally { blocked.set(false); reset(admission); }
+        } finally { gate.held.set(false); }
     }
 
     @Test void freshContextCompletesSettledSupersededDispositionWithoutInventingReceipt() throws Exception {
-        var fixture=fixture(1); var blocked=new AtomicBoolean(true);
-        doAnswer(call -> blocked.get() ? java.util.concurrent.CompletableFuture.completedFuture(new WorkspaceAdmission.SupersededPage.Unknown()) : call.callRealMethod())
-                .when(admission).scanSupersededNotDispatched(any(),any(),anyInt());
+        var fixture=fixture(1); gate.held.set(true);
         try {
             insertSyntheticStale(fixture);
             long deadline=System.nanoTime()+Duration.ofSeconds(15).toNanos(); int ready=0;
@@ -163,7 +176,7 @@ class SupersededExecutionIntegrationTests {
                 verify(freshModel,never()).stream(any(org.springframework.ai.chat.prompt.Prompt.class));
                 assertEquals("BUDGET_CANCELLATION_SUPERSEDED",jdbc.queryForObject("select terminal_reason from workspace_admission_finalization where attempt_id=?",String.class,fixture.attempts().getFirst()));
             }
-        } finally { blocked.set(false); reset(admission); }
+        } finally { gate.held.set(false); }
     }
 }
 

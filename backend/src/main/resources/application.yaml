@@ -12,7 +12,7 @@ bot:
 
 spring:
   autoconfigure:
-    # The provisioner must verify migration history before Liquibase writes to the database.
+    # Admin and dev invoke Liquibase only after the serialized preflight.
     exclude: org.springframework.boot.liquibase.autoconfigure.LiquibaseAutoConfiguration
   profiles:
     group:

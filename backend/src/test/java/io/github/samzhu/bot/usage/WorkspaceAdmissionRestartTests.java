@@ -24,10 +24,15 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @io.github.samzhu.bot.UseTestFakes
 @SpringBootTest
-@Import(TestcontainersConfiguration.class)
+@Import(WorkspaceAdmissionRestartTests.IsolatedPostgres.class)
 @ActiveProfiles("test")
 @org.springframework.test.annotation.DirtiesContext(classMode=org.springframework.test.annotation.DirtiesContext.ClassMode.AFTER_EACH_TEST_METHOD)
 class WorkspaceAdmissionRestartTests {
+    // Keep recovery fixtures independent of earlier classes' persistent Run state.
+    @org.springframework.boot.test.context.TestConfiguration(proxyBeanMethods = false)
+    @Import(TestcontainersConfiguration.class)
+    static class IsolatedPostgres { }
+
     @Autowired WorkspaceAdmission admission;
     @Autowired WorkspaceOperations workspaces;
     @Autowired ConversationOperations conversations;
