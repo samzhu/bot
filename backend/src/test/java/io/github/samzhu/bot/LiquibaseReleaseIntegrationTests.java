@@ -17,7 +17,12 @@ class LiquibaseReleaseIntegrationTests {
     @TempDir Path output;
     private static String[] args(PostgreSQLContainer pg) {
         return new String[]{"--spring.datasource.url=" + pg.getJdbcUrl(),
-                "--spring.datasource.username=" + pg.getUsername(), "--spring.datasource.password=" + pg.getPassword()};
+                "--spring.datasource.username=" + pg.getUsername(), "--spring.datasource.password=" + pg.getPassword(), "--bot.release.action=schema-only"};
+    }
+    private static void initialize(PostgreSQLContainer pg) throws Exception {
+        ReleaseProvisioningApplication.main(new String[]{"--spring.datasource.url=" + pg.getJdbcUrl(),
+            "--spring.datasource.username=" + pg.getUsername(), "--spring.datasource.password=" + pg.getPassword(),
+            "--bot.release.action=initialize-prod", "--bot.release.expected-jdbc-url=" + pg.getJdbcUrl()});
     }
     private static JdbcTemplate jdbc(PostgreSQLContainer pg) {
         return new JdbcTemplate(new DriverManagerDataSource(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword()));
@@ -73,6 +78,7 @@ class LiquibaseReleaseIntegrationTests {
             var a = admin(pg, "first.log");
             var b = admin(pg, "second.log");
             succeeded(a, "first.log"); succeeded(b, "second.log");
+            initialize(pg);
             var db = jdbc(pg);
             PostgresCommentsIntegrationTests.assertReleaseReceipts(db);
             assertEquals(1, db.queryForObject("select count(*) from bot where id='bot-general'", Integer.class));
@@ -153,6 +159,7 @@ class LiquibaseReleaseIntegrationTests {
             assertTrue(causes(ex).contains("Release provisioning required"), causes(ex));
             assertEquals(before, snapshot(db));
             ReleaseProvisioningApplication.main(args(pg));
+            initialize(pg);
             db.update("delete from databasechangelog where id in ('V16__run_ownership.sql','V17__postgres_comments.sql')");
             before = snapshot(db);
             ex = assertThrows(Exception.class, () -> service(pg));

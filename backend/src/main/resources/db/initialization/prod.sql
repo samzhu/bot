@@ -1,0 +1,69 @@
+INSERT INTO pg_temp.release_initialization (payload) VALUES ($bootstrap$
+{
+  "environment": "prod",
+  "bot": {
+    "id": "bot-general",
+    "name": "General Assistant",
+    "target": "LOCAL",
+    "systemPrompt": "You are a helpful, accurate, and concise AI coding assistant."
+  },
+  "catalog": {
+    "revision": "gemini-standard-2026-11-16",
+    "sourceReference": "https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash (checked 2026-11-16; Standard; UTC boundaries are deployment convention)",
+    "entries": [
+      {
+        "provider": "GOOGLE",
+        "endpoint": "generateContent",
+        "model": "gemini-3.8-flash",
+        "channel": "GEMINI_API",
+        "priceRevision": "gemini-3.8-flash-standard-2026",
+        "fromInclusive": "2026-11-16T00:00:00Z",
+        "untilExclusive": "2027-01-01T00:00:00Z",
+        "metadata": {
+          "serviceTier": "STANDARD",
+          "tokenUnit": "USD_PER_1000000_TOKENS",
+          "sources": [
+            "https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash"
+          ],
+          "verifiedDate": "2026-11-16",
+          "storageRate": "0.50",
+          "storageUnit": "USD_PER_1000000_TOKEN_HOURS"
+        },
+        "rates": {
+          "input": "0.75",
+          "cache_read": "0.075",
+          "output": "3.75",
+          "thoughts": "3.75",
+          "tool_input": "0.75"
+        }
+      },
+      {
+        "provider": "GOOGLE",
+        "endpoint": "generateContent",
+        "model": "gemini-3.8-flash",
+        "channel": "GEMINI_API",
+        "priceRevision": "gemini-3.8-flash-standard-2027",
+        "fromInclusive": "2027-01-01T00:00:00Z",
+        "untilExclusive": "9999-12-31T00:00:00Z",
+        "metadata": {
+          "serviceTier": "STANDARD",
+          "tokenUnit": "USD_PER_1000000_TOKENS",
+          "sources": [
+            "https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash"
+          ],
+          "verifiedDate": "2026-11-16",
+          "storageRate": "1.00",
+          "storageUnit": "USD_PER_1000000_TOKEN_HOURS"
+        },
+        "rates": {
+          "input": "1.50",
+          "cache_read": "0.15",
+          "output": "7.50",
+          "thoughts": "7.50",
+          "tool_input": "1.50"
+        }
+      }
+    ]
+  }
+}
+$bootstrap$::jsonb);

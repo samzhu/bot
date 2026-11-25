@@ -86,6 +86,8 @@ dependencies {
 	// implementation 'org.springframework.modulith:spring-modulith-starter-jdbc'
 	// implementation 'org.springframework.security:spring-security-webauthn'
 	// implementation 'org.thymeleaf.extras:thymeleaf-extras-springsecurity6'
+	// Dev startup verifies the origin of the Compose connection without shipping Compose.
+	compileOnly 'org.springframework.boot:spring-boot-docker-compose'
 	developmentOnly 'org.springframework.boot:spring-boot-docker-compose'
 	runtimeOnly 'org.postgresql:postgresql'
 	developmentOnly 'org.springframework.ai:spring-ai-spring-boot-docker-compose'

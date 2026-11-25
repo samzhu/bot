@@ -949,14 +949,14 @@ class LocalChatBackendIntegrationTests {
         jdbcAggregateTemplate.insert(orphan);
 
         // Repeat release provisioning without rewriting Run state
-        releaseProvisioner.run();
+        releaseProvisioner.initializeProd(jdbcTemplate.execute((org.springframework.jdbc.core.ConnectionCallback<String>) c -> c.getMetaData().getURL()));
 
         ChatRun recovered = chatRunRepository.findById(orphanRunId).orElseThrow();
         assertEquals(RunStatus.RUNNING.name(), recovered.status());
         assertNull(recovered.errorMessage());
 
         // Repeat release provisioning
-        assertDoesNotThrow(() -> releaseProvisioner.run());
+        assertDoesNotThrow(() -> releaseProvisioner.initializeProd(jdbcTemplate.execute((org.springframework.jdbc.core.ConnectionCallback<String>) c -> c.getMetaData().getURL())));
         jdbcTemplate.update("delete from chat_run where id = ?", orphanRunId);
     }
 

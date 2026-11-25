@@ -22,7 +22,10 @@ public class TestProvisioningConfiguration {
         return new ReleaseProvisioner(jdbc, migration, new DefaultBotInitializer(jdbc), catalog);
     }
     @Bean @Order(0)
-    ApplicationRunner provisionTestDatabase(ReleaseProvisioner provisioner) {
-        return args -> provisioner.run();
+    ApplicationRunner provisionTestDatabase(ReleaseProvisioner provisioner, JdbcTemplate jdbc) {
+        return args -> {
+            provisioner.migrateSchema();
+            provisioner.initializeProd(jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<String>) c -> c.getMetaData().getURL()));
+        };
     }
 }

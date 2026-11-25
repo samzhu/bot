@@ -2,56 +2,6 @@ bot:
   budget:
     monthly:
       default-cap-usd: "10"
-  pricing:
-    catalog:
-      revision: "gemini-standard-2026-11-16"
-      source-reference: "https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash (checked 2026-11-16; Standard; UTC boundaries are deployment convention)"
-      entries:
-        - provider: "GOOGLE"
-          endpoint: "generateContent"
-          model: "gemini-3.8-flash"
-          # This route uses synchronous generation without service_tier, which defaults to Standard.
-          # A future Batch, Flex, or Priority route must carry tier identity before pricing is enabled.
-          channel: "GEMINI_API"
-          price-revision: "gemini-3.8-flash-standard-2026"
-          # The check date is our coverage start, not a claimed provider effective date.
-          from-inclusive: "2026-11-16T00:00:00Z"
-          until-exclusive: "2027-01-01T00:00:00Z"
-          metadata:
-            service-tier: "STANDARD"
-            token-unit: "USD_PER_1000000_TOKENS"
-            sources:
-              - "https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash"
-            verified-date: "2026-11-16"
-            storage-rate: "0.50"
-            storage-unit: "USD_PER_1000000_TOKEN_HOURS"
-          rates:
-            input: "0.75"
-            cache_read: "0.075"
-            output: "3.75"
-            thoughts: "3.75"
-            tool_input: "0.75"
-        - provider: "GOOGLE"
-          endpoint: "generateContent"
-          model: "gemini-3.8-flash"
-          channel: "GEMINI_API"
-          price-revision: "gemini-3.8-flash-standard-2027"
-          from-inclusive: "2027-01-01T00:00:00Z"
-          until-exclusive: "9999-12-31T00:00:00Z"
-          metadata:
-            service-tier: "STANDARD"
-            token-unit: "USD_PER_1000000_TOKENS"
-            sources:
-              - "https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash"
-            verified-date: "2026-11-16"
-            storage-rate: "1.00"
-            storage-unit: "USD_PER_1000000_TOKEN_HOURS"
-          rates:
-            input: "1.50"
-            cache_read: "0.15"
-            output: "7.50"
-            thoughts: "7.50"
-            tool_input: "1.50"
   conversation:
     window-turns: 10
   run:
@@ -61,8 +11,9 @@ bot:
     execution-mode: 'OFF'
 
 spring:
-  liquibase:
-    enabled: false # Migrations run only through the one-off release command.
+  autoconfigure:
+    # The provisioner must verify migration history before Liquibase writes to the database.
+    exclude: org.springframework.boot.liquibase.autoconfigure.LiquibaseAutoConfiguration
   profiles:
     group:
       dev: local

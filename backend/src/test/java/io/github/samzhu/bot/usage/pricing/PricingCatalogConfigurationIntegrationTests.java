@@ -9,26 +9,20 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Isolated synthetic configuration; these rates are not a production price list. */
+/** Isolated synthetic live publication; these rates are not a production price list. */
 @io.github.samzhu.bot.UseTestFakes
-@SpringBootTest(properties = {
-    "bot.pricing.catalog.revision=synthetic-config-v1",
-    "bot.pricing.catalog.source-reference=synthetic-only",
-    "bot.pricing.catalog.entries[0].provider=GOOGLE",
-    "bot.pricing.catalog.entries[0].endpoint=generateContent",
-    "bot.pricing.catalog.entries[0].model=synthetic-model",
-    "bot.pricing.catalog.entries[0].channel=GEMINI_API",
-    "bot.pricing.catalog.entries[0].price-revision=synthetic-price-v1",
-    "bot.pricing.catalog.entries[0].from-inclusive=2000-01-01T00:00:00Z",
-    "bot.pricing.catalog.entries[0].until-exclusive=2100-01-01T00:00:00Z",
-    "bot.pricing.catalog.entries[0].rates.input=1"
-})
+@SpringBootTest
 @Import(TestcontainersConfiguration.class)
 @ActiveProfiles("test")
 class PricingCatalogConfigurationIntegrationTests {
     @Autowired JdbcTemplate jdbc;
     @Autowired UsageLedger ledger;
-    @Test void externalConfigurationIsPersistedBeforeUse() {
+    @Autowired io.github.samzhu.bot.usage.internal.pricing.CatalogActivation activation;
+    @Test void controlledPublicationIsPersistedBeforeUse() {
+        activation.publish("synthetic-config-v1", "synthetic-only", java.util.List.of(
+                new io.github.samzhu.bot.pricing.PriceCatalog.Entry(
+                        new io.github.samzhu.bot.pricing.PriceSnapshot("GOOGLE", "generateContent", "synthetic-model", "GEMINI_API", "synthetic-price-v1", java.util.Map.of("input", "1")),
+                        java.time.Instant.parse("2000-01-01T00:00:00Z"), java.time.Instant.parse("2100-01-01T00:00:00Z"))));
         String workspace="pricing-config-"+java.util.UUID.randomUUID();
         jdbc.update("insert into workspace(id,name) values (?,?)",workspace,"fixture");
         String attempt=ledger.begin(new UsageLedger.Dispatch(null,workspace,null,"GOOGLE","generateContent","synthetic-model","GEMINI_API","1",true,"VERIFIED"));

@@ -9,7 +9,6 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 
 @Configuration(proxyBeanMethods = false)
-// The release invokes Liquibase only after its serialized preflight.
-@EnableAutoConfiguration(exclude = org.springframework.boot.liquibase.autoconfigure.LiquibaseAutoConfiguration.class)
+@EnableAutoConfiguration
 @Import({ReleaseMigration.class, ReleaseProvisioner.class, DefaultBotInitializer.class, PricingCatalogReleaseConfiguration.class})
 public class ReleaseConfiguration {}

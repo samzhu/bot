@@ -88,193 +88,6 @@ class OfficialGeminiCatalogGraphQLTests {
         assertEquals(0,new BigDecimal("1.1775").compareTo(new BigDecimal(retained.path("knownSubtotal").asText())));
     }
 
-    @Test void negativeCatalogRateFailsStartupBeforeActivation() {
-        var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
-        String revision="negative-"+UUID.randomUUID();
-        var error=assertThrows(Exception.class, () -> {
-            try (var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
-                    .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
-                    .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
-                            "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false")
-                    .run("--bot.pricing.catalog.revision="+revision,
-                            "--bot.pricing.catalog.entries[0].provider=GOOGLE",
-                            "--bot.pricing.catalog.entries[0].endpoint=generateContent",
-                            "--bot.pricing.catalog.entries[0].model=gemini-3.8-flash",
-                            "--bot.pricing.catalog.entries[0].channel=GEMINI_API",
-                            "--bot.pricing.catalog.entries[0].price-revision=negative-fixture",
-                            "--bot.pricing.catalog.entries[0].from-inclusive=2026-11-16T00:00:00Z",
-                            "--bot.pricing.catalog.entries[0].until-exclusive=2027-01-01T00:00:00Z",
-                            "--bot.pricing.catalog.entries[0].metadata.service-tier=STANDARD",
-                            "--bot.pricing.catalog.entries[0].metadata.token-unit=USD_PER_1000000_TOKENS",
-                            "--bot.pricing.catalog.entries[0].metadata.sources[0]=https://ai.google.dev/gemini-api/docs/pricing",
-                            "--bot.pricing.catalog.entries[0].metadata.verified-date=2026-11-16",
-                            "--bot.pricing.catalog.entries[0].metadata.storage-rate=0.50",
-                            "--bot.pricing.catalog.entries[0].metadata.storage-unit=USD_PER_1000000_TOKEN_HOURS",
-                            "--bot.pricing.catalog.entries[0].rates.input=-1",
-                            "--bot.pricing.catalog.entries[0].rates.cache_read=0.075",
-                            "--bot.pricing.catalog.entries[0].rates.output=3.75",
-                            "--bot.pricing.catalog.entries[0].rates.thoughts=3.75",
-                            "--bot.pricing.catalog.entries[0].rates.tool_input=0.75")) { }
-        });
-        Throwable cause=error;
-        while (cause.getCause()!=null) cause=cause.getCause();
-        assertEquals("Invalid catalog rate",cause.getMessage());
-        assertEquals(0,jdbc.queryForObject("select count(*) from pricing_catalog_revision where source_revision=?",Integer.class,revision));
-    }
-
-    @Test void missingProductionMetadataFailsStartupBeforeActivation() {
-        var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
-        String revision="metadata-missing-"+UUID.randomUUID();
-        var error=assertThrows(Exception.class, () -> {
-            try (var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
-                    .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
-                    .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
-                            "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false")
-                    .run("--bot.pricing.catalog.revision="+revision,
-                            "--bot.pricing.catalog.entries[0].provider=GOOGLE",
-                            "--bot.pricing.catalog.entries[0].endpoint=generateContent",
-                            "--bot.pricing.catalog.entries[0].model=gemini-3.8-flash",
-                            "--bot.pricing.catalog.entries[0].channel=GEMINI_API",
-                            "--bot.pricing.catalog.entries[0].price-revision=metadata-missing-fixture",
-                            "--bot.pricing.catalog.entries[0].from-inclusive=2026-11-16T00:00:00Z",
-                            "--bot.pricing.catalog.entries[0].until-exclusive=2027-01-01T00:00:00Z",
-                            "--bot.pricing.catalog.entries[0].rates.input=0.75",
-                            "--bot.pricing.catalog.entries[0].rates.cache_read=0.075",
-                            "--bot.pricing.catalog.entries[0].rates.output=3.75",
-                            "--bot.pricing.catalog.entries[0].rates.thoughts=3.75",
-                            "--bot.pricing.catalog.entries[0].rates.tool_input=0.75")) { }
-        });
-        Throwable cause=error;
-        while (cause.getCause()!=null) cause=cause.getCause();
-        assertEquals("Invalid catalog metadata",cause.getMessage());
-        assertEquals(0,jdbc.queryForObject("select count(*) from pricing_catalog_revision where source_revision=?",Integer.class,revision));
-    }
-
-    @Test void overlappingCatalogIntervalsFailStartupBeforeActivation() {
-        var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
-        String revision="overlap-"+UUID.randomUUID();
-        var error=assertThrows(Exception.class, () -> {
-            try (var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
-                    .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
-                    .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
-                            "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false")
-                    .run("--bot.pricing.catalog.revision="+revision,
-                            "--bot.pricing.catalog.entries[0].provider=GOOGLE",
-                            "--bot.pricing.catalog.entries[0].endpoint=generateContent",
-                            "--bot.pricing.catalog.entries[0].model=gemini-3.8-flash",
-                            "--bot.pricing.catalog.entries[0].channel=GEMINI_API",
-                            "--bot.pricing.catalog.entries[0].price-revision=overlap-fixture",
-                            "--bot.pricing.catalog.entries[0].from-inclusive=2026-11-16T00:00:00Z",
-                            "--bot.pricing.catalog.entries[0].until-exclusive=2027-01-01T00:00:00Z",
-                            "--bot.pricing.catalog.entries[0].metadata.service-tier=STANDARD",
-                            "--bot.pricing.catalog.entries[0].metadata.token-unit=USD_PER_1000000_TOKENS",
-                            "--bot.pricing.catalog.entries[0].metadata.sources[0]=https://ai.google.dev/gemini-api/docs/pricing",
-                            "--bot.pricing.catalog.entries[0].metadata.verified-date=2026-11-16",
-                            "--bot.pricing.catalog.entries[0].metadata.storage-rate=0.50",
-                            "--bot.pricing.catalog.entries[0].metadata.storage-unit=USD_PER_1000000_TOKEN_HOURS",
-                            "--bot.pricing.catalog.entries[0].rates.input=0.75",
-                            "--bot.pricing.catalog.entries[0].rates.cache_read=0.075",
-                            "--bot.pricing.catalog.entries[0].rates.output=3.75",
-                            "--bot.pricing.catalog.entries[0].rates.thoughts=3.75",
-                            "--bot.pricing.catalog.entries[0].rates.tool_input=0.75",
-                            "--bot.pricing.catalog.entries[1].provider=GOOGLE",
-                            "--bot.pricing.catalog.entries[1].endpoint=generateContent",
-                            "--bot.pricing.catalog.entries[1].model=gemini-3.8-flash",
-                            "--bot.pricing.catalog.entries[1].channel=GEMINI_API",
-                            "--bot.pricing.catalog.entries[1].price-revision=overlap-fixture2",
-                            "--bot.pricing.catalog.entries[1].from-inclusive=2026-12-01T00:00:00Z",
-                            "--bot.pricing.catalog.entries[1].until-exclusive=2027-02-01T00:00:00Z",
-                            "--bot.pricing.catalog.entries[1].metadata.service-tier=STANDARD",
-                            "--bot.pricing.catalog.entries[1].metadata.token-unit=USD_PER_1000000_TOKENS",
-                            "--bot.pricing.catalog.entries[1].metadata.sources[0]=https://ai.google.dev/gemini-api/docs/pricing",
-                            "--bot.pricing.catalog.entries[1].metadata.verified-date=2026-11-16",
-                            "--bot.pricing.catalog.entries[1].metadata.storage-rate=0.50",
-                            "--bot.pricing.catalog.entries[1].metadata.storage-unit=USD_PER_1000000_TOKEN_HOURS",
-                            "--bot.pricing.catalog.entries[1].rates.input=0.75",
-                            "--bot.pricing.catalog.entries[1].rates.cache_read=0.075",
-                            "--bot.pricing.catalog.entries[1].rates.output=3.75",
-                            "--bot.pricing.catalog.entries[1].rates.thoughts=3.75",
-                            "--bot.pricing.catalog.entries[1].rates.tool_input=0.75")) { }
-        });
-        Throwable cause=error;
-        while (cause.getCause()!=null) cause=cause.getCause();
-        assertEquals("Overlapping catalog entries",cause.getMessage());
-        assertEquals(0,jdbc.queryForObject("select count(*) from pricing_catalog_revision where source_revision=?",Integer.class,revision));
-    }
-
-    @Test void missingRequiredGeminiRateFailsStartupBeforeActivation() {
-        var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
-        String revision="missing-"+UUID.randomUUID();
-        var error=assertThrows(Exception.class, () -> {
-            try (var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
-                    .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
-                    .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
-                            "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false")
-                    .run("--bot.pricing.catalog.revision="+revision,
-                            "--bot.pricing.catalog.entries[0].provider=GOOGLE",
-                            "--bot.pricing.catalog.entries[0].endpoint=generateContent",
-                            "--bot.pricing.catalog.entries[0].model=gemini-3.8-flash",
-                            "--bot.pricing.catalog.entries[0].channel=GEMINI_API",
-                            "--bot.pricing.catalog.entries[0].price-revision=missing-fixture",
-                            "--bot.pricing.catalog.entries[0].from-inclusive=2026-11-16T00:00:00Z",
-                            "--bot.pricing.catalog.entries[0].until-exclusive=2027-01-01T00:00:00Z",
-                            "--bot.pricing.catalog.entries[0].metadata.service-tier=STANDARD",
-                            "--bot.pricing.catalog.entries[0].metadata.token-unit=USD_PER_1000000_TOKENS",
-                            "--bot.pricing.catalog.entries[0].metadata.sources[0]=https://ai.google.dev/gemini-api/docs/pricing",
-                            "--bot.pricing.catalog.entries[0].metadata.verified-date=2026-11-16",
-                            "--bot.pricing.catalog.entries[0].metadata.storage-rate=0.50",
-                            "--bot.pricing.catalog.entries[0].metadata.storage-unit=USD_PER_1000000_TOKEN_HOURS",
-                            "--bot.pricing.catalog.entries[0].rates.input=0.75",
-                            "--bot.pricing.catalog.entries[0].rates.cache_read=0.075",
-                            "--bot.pricing.catalog.entries[0].rates.thoughts=3.75",
-                            "--bot.pricing.catalog.entries[0].rates.tool_input=0.75")) { }
-        });
-        Throwable cause=error;
-        while (cause.getCause()!=null) cause=cause.getCause();
-        assertEquals("Missing required catalog rate",cause.getMessage());
-        assertEquals(0,jdbc.queryForObject("select count(*) from pricing_catalog_revision where source_revision=?",Integer.class,revision));
-    }
-
-    @Test void configuredCatalogRestartIsIdempotentAndConflictingRevisionIsRejected() {
-        var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
-        String revision="gemini-standard-2026-11-16";
-        String id=jdbc.queryForObject("select id from pricing_catalog_revision where source_revision=?",String.class,revision);
-        try (var restarted=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
-                .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
-                .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
-                        "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false").run()) {
-            assertEquals(1,jdbc.queryForObject("select count(*) from pricing_catalog_revision where source_revision=?",Integer.class,revision));
-            assertEquals(id,jdbc.queryForObject("select id from pricing_catalog_revision where source_revision=?",String.class,revision));
-        }
-        var error=assertThrows(Exception.class,() -> {
-            try (var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
-                    .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
-                    .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
-                            "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false")
-                    .run("--bot.pricing.catalog.entries[0].provider=GOOGLE",
-                            "--bot.pricing.catalog.entries[0].endpoint=generateContent",
-                            "--bot.pricing.catalog.entries[0].model=gemini-3.8-flash",
-                            "--bot.pricing.catalog.entries[0].channel=GEMINI_API",
-                            "--bot.pricing.catalog.entries[0].price-revision=changed",
-                            "--bot.pricing.catalog.entries[0].from-inclusive=2026-11-16T00:00:00Z",
-                            "--bot.pricing.catalog.entries[0].until-exclusive=2027-01-01T00:00:00Z",
-                            "--bot.pricing.catalog.entries[0].metadata.service-tier=STANDARD",
-                            "--bot.pricing.catalog.entries[0].metadata.token-unit=USD_PER_1000000_TOKENS",
-                            "--bot.pricing.catalog.entries[0].metadata.sources[0]=https://ai.google.dev/gemini-api/docs/pricing",
-                            "--bot.pricing.catalog.entries[0].metadata.verified-date=2026-11-16",
-                            "--bot.pricing.catalog.entries[0].metadata.storage-rate=0.50",
-                            "--bot.pricing.catalog.entries[0].metadata.storage-unit=USD_PER_1000000_TOKEN_HOURS",
-                            "--bot.pricing.catalog.entries[0].rates.input=9",
-                            "--bot.pricing.catalog.entries[0].rates.cache_read=0.075",
-                            "--bot.pricing.catalog.entries[0].rates.output=3.75",
-                            "--bot.pricing.catalog.entries[0].rates.thoughts=3.75",
-                            "--bot.pricing.catalog.entries[0].rates.tool_input=0.75")) { }
-        });
-        Throwable cause=error; while(cause.getCause()!=null) cause=cause.getCause();
-        assertEquals("Catalog revision payload conflict",cause.getMessage());
-        assertEquals(id,jdbc.queryForObject("select id from pricing_catalog_revision where source_revision=?",String.class,revision));
-    }
-
     @Test void actualSdkCaptureAndLaterSourceVersionConvergeWithoutCompleteClaim() throws Exception {
         String actor="dev-user", workspace=workspaces.personal(actor).id();
         var adapter=new io.github.samzhu.bot.execution.internal.capture.GoogleUsageCaptureAdapter("gemini-3.8-flash");
@@ -317,28 +130,6 @@ class OfficialGeminiCatalogGraphQLTests {
         assertEquals("USD_PER_1000000_TOKEN_HOURS",metadata.path("storageUnit").asText());
     }
 
-    @Test void sameRevisionWithChangedMetadataFailsBeforeReplacement(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws Exception {
-        String revision="gemini-standard-2026-11-16";
-        String original=jdbc.queryForObject("select id from pricing_catalog_revision where source_revision=?",String.class,revision);
-        String yaml;
-        try(var in=getClass().getResourceAsStream("/application.yaml")) { yaml=new String(in.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8); }
-        assertTrue(yaml.contains("storage-rate: \"0.50\""));
-        var config=dir.resolve("application.yaml");
-        java.nio.file.Files.writeString(config,yaml.replace("storage-rate: \"0.50\"","storage-rate: \"0.51\""));
-        var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
-        var error=assertThrows(Exception.class,() -> {
-            try(var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
-                    .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
-                    .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
-                            "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false")
-                    .run("--spring.config.additional-location="+config.toUri())) { }
-        });
-        Throwable cause=error; while(cause.getCause()!=null) cause=cause.getCause();
-        assertEquals("Catalog revision payload conflict",cause.getMessage());
-        assertEquals(original,jdbc.queryForObject("select id from pricing_catalog_revision where source_revision=?",String.class,revision));
-        assertEquals("0.50",jdbc.queryForObject("select e.metadata->>'storageRate' from pricing_catalog_entry e join pricing_catalog_revision r on r.id=e.revision_id where r.source_revision=? and e.price_revision='gemini-3.8-flash-standard-2026'",String.class,revision));
-    }
-
     @Test void dispatchAndReconciliationReferenceSameImmutableCatalogMetadata() throws Exception {
         String actor="dev-user",workspace=workspaces.personal(actor).id();
         String id=syntheticAttempt(workspace,actor,Instant.parse("2026-12-31T23:59:59Z"));
@@ -369,13 +160,13 @@ class OfficialGeminiCatalogGraphQLTests {
                 .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
                 .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
                         "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false")
-                .run("--bot.pricing.catalog.revision="+revision,"--bot.pricing.catalog.source-reference=legacy-source",
-                        "--bot.pricing.catalog.entries[0].provider=FAKE","--bot.pricing.catalog.entries[0].endpoint=fixture",
-                        "--bot.pricing.catalog.entries[0].model=model","--bot.pricing.catalog.entries[0].channel=FAKE",
-                        "--bot.pricing.catalog.entries[0].price-revision=old-price",
-                        "--bot.pricing.catalog.entries[0].from-inclusive=2020-01-01T00:00:00Z",
-                        "--bot.pricing.catalog.entries[0].until-exclusive=2030-01-01T00:00:00Z",
-                        "--bot.pricing.catalog.entries[0].rates.input=1")) {
+                .run()) {
+            var catalog = context.getBean(io.github.samzhu.bot.usage.internal.pricing.CatalogActivation.class);
+            var published = catalog.publish(revision, "legacy-source", java.util.List.of(
+                    new io.github.samzhu.bot.pricing.PriceCatalog.Entry(
+                            new io.github.samzhu.bot.pricing.PriceSnapshot("FAKE", "fixture", "model", "FAKE", "old-price", java.util.Map.of("input", "1")),
+                            Instant.parse("2020-01-01T00:00:00Z"), Instant.parse("2030-01-01T00:00:00Z"))));
+            assertEquals(id, published.id());
             assertEquals(id,jdbc.queryForObject("select id from pricing_catalog_revision where source_revision=?",String.class,revision));
             assertEquals(1,jdbc.queryForObject("select count(*) from pricing_catalog_entry where id=? and metadata is null",Integer.class,entry));
         }

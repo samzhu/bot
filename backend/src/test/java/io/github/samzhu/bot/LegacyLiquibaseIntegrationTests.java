@@ -19,7 +19,7 @@ class LegacyLiquibaseIntegrationTests {
             pg.start(); fresh.start();
             var args = new String[]{"--spring.datasource.url=" + pg.getJdbcUrl(),
                     "--spring.datasource.username=" + pg.getUsername(),
-                    "--spring.datasource.password=" + pg.getPassword(), "--management.otlp.metrics.export.enabled=false"};
+                    "--spring.datasource.password=" + pg.getPassword(), "--management.otlp.metrics.export.enabled=false", "--bot.release.action=schema-only"};
             var command = new java.util.ArrayList<String>();
             command.add(Path.of(System.getProperty("java.home"), "bin", "java").toString());
             command.add("-jar"); command.add(System.getenv("BOT_76_ADMIN_JAR"));
@@ -57,7 +57,7 @@ class LegacyLiquibaseIntegrationTests {
 
             var freshArgs = new String[]{"--spring.datasource.url=" + fresh.getJdbcUrl(),
                     "--spring.datasource.username=" + fresh.getUsername(),
-                    "--spring.datasource.password=" + fresh.getPassword(), "--management.otlp.metrics.export.enabled=false"};
+                    "--spring.datasource.password=" + fresh.getPassword(), "--management.otlp.metrics.export.enabled=false", "--bot.release.action=schema-only"};
             ReleaseProvisioningApplication.main(freshArgs);
             var freshDb = new JdbcTemplate(new DriverManagerDataSource(fresh.getJdbcUrl(), fresh.getUsername(), fresh.getPassword()));
             assertEquals(comments(freshDb), comments(jdbc));

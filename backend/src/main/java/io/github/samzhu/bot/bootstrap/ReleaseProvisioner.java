@@ -20,11 +20,32 @@ public class ReleaseProvisioner {
     }
 
     @Transactional(rollbackFor = Exception.class)
-    public void run() throws Exception {
+    public void initializeProd(String expectedJdbcUrl) throws Exception {
+        // Use the transaction-bound connection, before acquiring the release lock or writing.
+        boolean matches = expectedJdbcUrl != null && !expectedJdbcUrl.isBlank()
+                && Boolean.TRUE.equals(jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection -> {
+                    var metadata = connection.getMetaData();
+                    return "PostgreSQL".equals(metadata.getDatabaseProductName())
+                            && expectedJdbcUrl.equals(metadata.getURL());
+                }));
+        if (!matches) throw new IllegalStateException("Initialization PostgreSQL endpoint mismatch");
         lockRelease();
-        migration.run();
-        bot.run(null);
-        catalog.publishConfigured();
+        if (ReleaseSchema.verifiedPrefix(jdbc) != 0)
+            throw new IllegalStateException("Release schema is not ready");
+        initialize("prod");
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public void initializeDev() throws Exception {
+        lockRelease();
+        if (ReleaseSchema.verifiedPrefix(jdbc) != 0) throw new IllegalStateException("Release schema is not ready");
+        initialize("dev");
+    }
+
+    private void initialize(String environment) throws Exception {
+        var data = new InitializationSql(environment).execute(jdbc);
+        bot.run(data.bot());
+        catalog.publishRelease(data.revision(), data.source(), data.entries());
     }
 
     @Transactional(rollbackFor = Exception.class)

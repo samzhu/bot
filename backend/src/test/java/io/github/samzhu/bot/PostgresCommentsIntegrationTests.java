@@ -37,7 +37,7 @@ class PostgresCommentsIntegrationTests {
                     "--spring.datasource.url=" + pg.getJdbcUrl(),
                     "--spring.datasource.username=" + pg.getUsername(),
                     "--spring.datasource.password=" + pg.getPassword(),
-                    "--management.otlp.metrics.export.enabled=false"});
+                    "--management.otlp.metrics.export.enabled=false", "--bot.release.action=schema-only"});
             var db = new JdbcTemplate(new DriverManagerDataSource(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword()));
             assertEquals("一次使用者請求從發起至完成、失敗或取消的完整 Run 生命週期；可包含多筆 ProviderAttempt。",
                     db.queryForObject("select obj_description('chat_run'::regclass, 'pg_class')", String.class));
@@ -51,7 +51,7 @@ class PostgresCommentsIntegrationTests {
             String[] args = {"--spring.datasource.url=" + pg.getJdbcUrl(),
                     "--spring.datasource.username=" + pg.getUsername(),
                     "--spring.datasource.password=" + pg.getPassword(),
-                    "--management.otlp.metrics.export.enabled=false"};
+                    "--management.otlp.metrics.export.enabled=false", "--bot.release.action=schema-only"};
             ReleaseProvisioningApplication.main(args);
             var db = new JdbcTemplate(new DriverManagerDataSource(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword()));
             String applicationTables = """

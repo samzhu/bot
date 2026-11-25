@@ -90,7 +90,7 @@ class SchemaMigrationCommandIntegrationTests {
     void rejectedActionNeverWritesEvenOnEmptyDatabase() throws Exception {
         try (var pg = PostgresTestImage.container()) {
             pg.start(); var db = jdbc(pg); String before = snapshot(db);
-            List<List<String>> invalid = List.of(List.of("--bot.release.action=unknown"),
+            List<List<String>> invalid = List.of(List.of(), List.of("--bot.release.action=unknown"),
                     List.of("--bot.release.action="), List.of("--bot.release.action"),
                     List.of("--bot.release.action=schema-only", "--bot.release.action=schema-only"),
                     List.of("--bot.release.action", "--bot.release.action=schema-only"));

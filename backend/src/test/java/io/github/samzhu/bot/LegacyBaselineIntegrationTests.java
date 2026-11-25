@@ -27,7 +27,7 @@ class LegacyBaselineIntegrationTests {
             "V15__conversation_title_reservation.sql", "V16__run_ownership.sql");
     private static String[] args(PostgreSQLContainer pg) {
         return new String[]{"--spring.datasource.url=" + pg.getJdbcUrl(), "--spring.datasource.username=" + pg.getUsername(),
-                "--spring.datasource.password=" + pg.getPassword(), "--management.otlp.metrics.export.enabled=false"};
+                "--spring.datasource.password=" + pg.getPassword(), "--management.otlp.metrics.export.enabled=false", "--bot.release.action=schema-only"};
     }
     private static JdbcTemplate db(PostgreSQLContainer pg) {
         return new JdbcTemplate(new DriverManagerDataSource(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword()));
@@ -99,6 +99,9 @@ class LegacyBaselineIntegrationTests {
             PostgresCommentsIntegrationTests.assertReleaseReceipts(db);
             assertEquals("legacy fixture comment", db.queryForObject("select obj_description('workspace'::regclass)", String.class));
             assertEquals("Existing", db.queryForObject("select title from conversation where id='c79'", String.class));
+            ReleaseProvisioningApplication.main(new String[]{"--spring.datasource.url=" + pg.getJdbcUrl(),
+                    "--spring.datasource.username=" + pg.getUsername(), "--spring.datasource.password=" + pg.getPassword(),
+                    "--bot.release.action=initialize-prod", "--bot.release.expected-jdbc-url=" + pg.getJdbcUrl()});
             var stable = snapshot(db);
             ReleaseProvisioningApplication.main(args(pg));
             assertEquals(stable, snapshot(db));
