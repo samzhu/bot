@@ -73,6 +73,32 @@ class OfficialGeminiCatalogGraphQLTests {
 
     }
 
+    @Test void unrecognizedGoogleAdapterDoesNotPublishAnEstimateFromItsCounters() throws Exception {
+        String actor="dev-user", workspace=workspaces.personal(actor).id();
+        String id=ledger.begin(new UsageLedger.Dispatch(null,workspace,actor,"GOOGLE","generateContent","gemini-3.8-flash","GEMINI_API","unknown-adapter",false,"UNKNOWN"));
+        assertTrue(ledger.markDispatched(id,clock -> Instant.parse("2026-11-16T00:00:00Z")));
+        ledger.append(id,new UsageLedger.Snapshot("fixture-"+UUID.randomUUID(),1,"CUMULATIVE","SDK_NATIVE","1","unknown-adapter","1","INCOMPLETE",
+                "{\"promptTokenCount\":1000000,\"cachedContentTokenCount\":200000,\"candidatesTokenCount\":100000,\"thoughtsTokenCount\":50000,\"toolUsePromptTokenCount\":0}"));
+        ledger.finish(id,"SUCCEEDED");
+        JsonNode cost=awaitCost(workspace,id);
+        assertEquals("UNKNOWN",cost.path("status").asText(),cost.toString());
+        assertTrue(cost.path("knownSubtotal").isNull(),cost.toString());
+        assertTrue(cost.path("reasons").toString().contains("UNSUPPORTED_ENDPOINT"),cost.toString());
+    }
+
+    @Test void fakeUsageCannotBePricedOnRealGoogleRoute() throws Exception {
+        String actor="dev-user", workspace=workspaces.personal(actor).id();
+        String id=ledger.begin(new UsageLedger.Dispatch(null,workspace,actor,"GOOGLE","generateContent","gemini-3.8-flash","GEMINI_API","2.1.0",false,"UNKNOWN"));
+        assertTrue(ledger.markDispatched(id,clock -> Instant.parse("2026-11-16T00:00:00Z")));
+        ledger.append(id,new UsageLedger.Snapshot("fixture-"+UUID.randomUUID(),1,"FINAL","FAKE_RAW","pricing-fixture-v1","1","1","COMPLETE",
+                "{\"promptTokenCount\":1000000,\"cachedContentTokenCount\":200000,\"candidatesTokenCount\":100000,\"thoughtsTokenCount\":50000,\"toolUsePromptTokenCount\":0}"));
+        ledger.finish(id,"SUCCEEDED");
+        JsonNode cost=awaitCost(workspace,id);
+        assertEquals("UNKNOWN",cost.path("status").asText(),cost.toString());
+        assertTrue(cost.path("knownSubtotal").isNull(),cost.toString());
+        assertTrue(cost.path("reasons").toString().contains("UNSUPPORTED_ENDPOINT"),cost.toString());
+    }
+
     @Test void announcedBoundarySelectsNewRatesWithoutChangingEarlierSnapshot() throws Exception {
         String actor="dev-user", workspace=workspaces.personal(actor).id();
         String before=syntheticAttempt(workspace,actor,Instant.parse("2026-12-31T23:59:59Z"));
@@ -142,6 +168,12 @@ class OfficialGeminiCatalogGraphQLTests {
         String mutation="mutation { reconcileCost(input:{workspaceId:\""+workspace+"\",attemptId:\""+id+"\",expectedRevision:\""+first.path("currentRevision").asText()+"\",expectedSourceProjectionVersion:\""+first.path("sourceProjectionVersion").asText()+"\",idempotencyKey:\"meta-"+UUID.randomUUID()+"\",catalogRevisionId:\""+catalog+"\",evidenceReference:\"test\",reason:\"test\"}) { outcome revision { priceSnapshotId } } }";
         JsonNode response=graph(mutation); assertFalse(response.has("errors"),response.toString());
         assertEquals("APPLIED",response.path("data").path("reconcileCost").path("outcome").asText());
+        JsonNode reconciled=awaitCost(workspace,id);
+        assertEquals(first.path("status"),reconciled.path("status"));
+        assertEquals(first.path("knownSubtotal"),reconciled.path("knownSubtotal"));
+        assertEquals(first.path("completeAmount"),reconciled.path("completeAmount"));
+        assertEquals(first.path("reasons"),reconciled.path("reasons"));
+        assertEquals(first.path("lineItems"),reconciled.path("lineItems"));
         String audited=response.path("data").path("reconcileCost").path("revision").path("priceSnapshotId").asText();
         assertEquals(entry,jdbc.queryForObject("select catalog_entry_id from usage_price_snapshot where id=?",String.class,audited));
         assertEquals(metadata,jdbc.queryForObject("select metadata::text from pricing_catalog_entry where id=?",String.class,entry));
@@ -182,7 +214,7 @@ class OfficialGeminiCatalogGraphQLTests {
     }
 
     private JsonNode awaitCost(String workspace,String attempt) throws Exception {
-        String query="{ workspaceUsageAttempt(workspaceId:\""+workspace+"\",id:\""+attempt+"\") { cost { status knownSubtotal completeAmount needsReprice priceSnapshotId currentRevision sourceProjectionVersion reasons } } }";
+        String query="{ workspaceUsageAttempt(workspaceId:\""+workspace+"\",id:\""+attempt+"\") { cost { status knownSubtotal completeAmount needsReprice priceSnapshotId currentRevision sourceProjectionVersion reasons lineItems { category nativeQuantity unit meaning rate rateBasis exactAmount storedAmount reasons } } } }";
         JsonNode cost=null; long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
         do {
             JsonNode result=graph(query); assertFalse(result.has("errors"),result.toString());

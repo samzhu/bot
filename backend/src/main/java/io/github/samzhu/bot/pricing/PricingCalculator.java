@@ -49,82 +49,17 @@ public final class PricingCalculator {
         catch (Exception ex) { ctx.reasons.add(Reason.INVALID_USAGE); return ctx.result(); }
         if (raw == null || !raw.isObject()) { ctx.reasons.add(Reason.MISSING_USAGE); return ctx.result(); }
         switch (input.provider() + ":" + input.endpoint()) {
-            case "openai:responses" -> openAi(raw, ctx, false);
-            case "openai:responses-fixture-ttl" -> openAi(raw, ctx, true);
-            case "anthropic:messages" -> anthropic(raw, ctx);
-            case "gemini:generateContent" -> gemini(raw, ctx);
-            case "gemini:interactions" -> interactions(raw, ctx);
+            case "openai:responses" -> OpenAiResponsesPricing.calculate(raw, ctx, false);
+            case "openai:responses-fixture-ttl" -> OpenAiResponsesPricing.calculate(raw, ctx, true);
+            case "anthropic:messages" -> AnthropicMessagesPricing.calculate(raw, ctx);
+            case "gemini:generateContent" -> GeminiGenerateContentPricing.calculate(raw, ctx);
+            case "gemini:interactions" -> GeminiInteractionsPricing.calculate(raw, ctx);
             default -> ctx.reasons.add(Reason.UNSUPPORTED_ENDPOINT);
         }
         return ctx.result();
     }
 
-    private static void openAi(JsonNode raw, Context c, boolean fixtureTtl) {
-        var input = c.count(raw, "input_tokens");
-        var read = c.count(raw, "input_tokens_details", "cached_tokens");
-        var write = c.count(raw, "input_tokens_details", "cache_write_tokens");
-        var shortTtl = fixtureTtl ? c.count(raw, "input_tokens_details", "cache_write", "30m") : null;
-        var longTtl = fixtureTtl ? c.count(raw, "input_tokens_details", "cache_write", "12h") : null;
-        var output = c.count(raw, "output_tokens");
-        // Reasoning is an output subcount; billing it again would double-charge its parent.
-        var reasoning = c.optionalCount(raw, "output_tokens_details", "reasoning_tokens");
-        if (input != null && read != null && write != null) {
-            var ordinary = input.subtract(read).subtract(write);
-            if (ordinary.signum() < 0) c.reasons.add(Reason.INVALID_USAGE);
-            else {
-                c.line("input", ordinary);
-                c.line("cache_read", read);
-                if (fixtureTtl) c.ttl(write, shortTtl, longTtl, "cache_write_30m", "cache_write_12h");
-                else c.line("cache_write", write);
-            }
-        }
-        if (output != null && reasoning != null && reasoning.compareTo(output) > 0) c.reasons.add(Reason.INVALID_USAGE);
-        else c.line("output", output);
-    }
-    private static void anthropic(JsonNode raw, Context c) {
-        var input = c.count(raw, "input_tokens");
-        var read = c.count(raw, "cache_read_input_tokens");
-        var write = c.count(raw, "cache_creation_input_tokens");
-        // Cache creation TTL children partition the reported parent; do not charge both levels.
-        var shortTtl = c.count(raw, "cache_creation", "ephemeral_5m_input_tokens");
-        var longTtl = c.count(raw, "cache_creation", "ephemeral_1h_input_tokens");
-        var output = c.count(raw, "output_tokens");
-        c.line("input", input); c.line("cache_read", read);
-        c.ttl(write, shortTtl, longTtl, "cache_write_5m", "cache_write_1h");
-        c.line("output", output);
-    }
-    private static void gemini(JsonNode raw, Context c) {
-        var prompt = c.count(raw, "promptTokenCount");
-        var cached = c.count(raw, "cachedContentTokenCount");
-        var output = c.count(raw, "candidatesTokenCount");
-        var thoughts = c.count(raw, "thoughtsTokenCount");
-        var tool = c.count(raw, "toolUsePromptTokenCount");
-        // Gemini cached content is already included in prompt; preserve raw and price the disjoint parts.
-        if (prompt != null && cached != null) {
-            var ordinary = prompt.subtract(cached);
-            if (ordinary.signum() < 0) c.reasons.add(Reason.INVALID_USAGE);
-            else { c.line("input", ordinary); c.line("cache_read", cached); }
-        }
-        c.line("output", output); c.line("thoughts", thoughts); c.line("tool_input", tool);
-    }
-    private static void interactions(JsonNode raw, Context c) {
-        var input=c.count(raw,"total_input_tokens");
-        var cached=c.count(raw,"total_cached_tokens");
-        var output=c.count(raw,"total_output_tokens");
-        var thought=c.count(raw,"total_thought_tokens");
-        var tool=c.count(raw,"total_tool_use_tokens");
-        var total=c.count(raw,"total_tokens");
-        if (input!=null && cached!=null) {
-            var ordinary=input.subtract(cached);
-            if (ordinary.signum()<0) c.reasons.add(Reason.INVALID_USAGE);
-            else { c.line("input",ordinary); c.line("cache_read",cached); }
-        }
-        c.line("output",output); c.line("thoughts",thought);
-        if (tool!=null && tool.signum()!=0) c.reasons.add(Reason.EXTRA_COST_UNKNOWN);
-        if (input!=null && output!=null && thought!=null && total!=null && !input.add(output).add(thought).equals(total))
-            c.reasons.add(Reason.INVALID_USAGE);
-    }
-    private static final class Context {
+    static final class Context {
         final PriceSnapshot price;
         final List<LineItem> lines = new ArrayList<>();
         final EnumSet<Reason> reasons = EnumSet.noneOf(Reason.class);

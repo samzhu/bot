@@ -51,6 +51,12 @@ class ConversationTitleRecoveryHttpIntegrationTests {
         }
     }
     @TestConfiguration(proxyBeanMethods = false)
+    static class RealTitlePartition {
+        @Bean @Primary io.github.samzhu.bot.usage.ConversationTitlePartition realTitlePartition() {
+            return () -> io.github.samzhu.bot.usage.WorkspaceAdmission.Partition.REAL;
+        }
+    }
+    @TestConfiguration(proxyBeanMethods = false)
     static class ChatOnly {
         @Bean @Primary ControlledChatModel controlledChatModel() { return new ControlledChatModel(); }
     }
@@ -69,9 +75,13 @@ class ConversationTitleRecoveryHttpIntegrationTests {
     }
     ConfigurableApplicationContext start() { return start(true); }
     ConfigurableApplicationContext start(boolean titleEnabled) { return start(titleEnabled, "60s"); }
-    ConfigurableApplicationContext start(boolean titleEnabled, String executionTimeout) {
-        SpringApplication app = new SpringApplication(BotApplication.class, TestUsageCaptureConfiguration.class, TestProvisioningConfiguration.class,
-                titleEnabled ? Fakes.class : ChatOnly.class);
+    ConfigurableApplicationContext start(boolean titleEnabled, String executionTimeout) { return start(titleEnabled, executionTimeout, false); }
+    ConfigurableApplicationContext start(boolean titleEnabled, String executionTimeout, boolean realTitle) {
+        SpringApplication app = realTitle
+                ? new SpringApplication(BotApplication.class, TestUsageCaptureConfiguration.class, TestProvisioningConfiguration.class,
+                    titleEnabled ? Fakes.class : ChatOnly.class, RealTitlePartition.class)
+                : new SpringApplication(BotApplication.class, TestUsageCaptureConfiguration.class, TestProvisioningConfiguration.class,
+                    titleEnabled ? Fakes.class : ChatOnly.class);
         app.setAdditionalProfiles("test");
         app.addInitializers(context -> {
             context.getEnvironment().setActiveProfiles("test");
@@ -112,6 +122,28 @@ class ConversationTitleRecoveryHttpIntegrationTests {
         assertTrue(events.contains("TEXT_MESSAGE_CONTENT"), events);
         assertTrue(events.contains("RUN_FINISHED"), events);
         return id;
+    }
+    @Test void liveUncappedRealTitleDoesNotBlockPeerStartup() throws Exception {
+        try (var first = start(true, "60s", true)) {
+            var jdbc = first.getBean(JdbcTemplate.class);
+            String scope = "live-uncapped-" + UUID.randomUUID();
+            jdbc.update("insert into workspace(id,name) values (?,?)", scope, "Synthetic live peer");
+            jdbc.update("insert into workspace_member(workspace_id,user_id,role,active) values (?,'dev-user','MANAGER',true)", scope);
+            jdbc.update("insert into bot(id,name,system_prompt,created_at) values ('bot-general','General','test',current_timestamp) on conflict(id) do nothing");
+            String id = createAndReply(port(first), scope, "live uncapped title");
+            var fake = first.getBean(TitleFake.class);
+            long limit = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (fake.calls.get() == 0 && System.nanoTime() < limit) Thread.sleep(10);
+            assertEquals(1, fake.calls.get());
+            assertEquals(1, jdbc.queryForObject("select count(*) from provider_attempt where purpose='CONVERSATION_TITLE' and title_conversation_id=? and simulation=false and execution_outcome='IN_PROGRESS'", Integer.class, id));
+            assertEquals(0, jdbc.queryForObject("select count(*) from workspace_title_reservation where conversation_id=?", Integer.class, id));
+            try (var second = start(true, "60s", true)) {
+                var response = json.readTree(post(port(second), "/graphql", Map.of("query", "query($id: ID!) { conversation(id: $id) { title } }", "variables", Map.of("id", id))));
+                assertEquals("New Conversation", response.path("data").path("conversation").path("title").asText());
+                assertEquals(0, second.getBean(TitleFake.class).calls.get());
+                assertEquals("IN_PROGRESS", jdbc.queryForObject("select execution_outcome from provider_attempt where title_conversation_id=?", String.class, id));
+            } finally { fake.release.countDown(); }
+        }
     }
     @Test void eligibleUndispatchedWorkResumesInNewInstance() throws Exception {
         ConfigurableApplicationContext first = start();

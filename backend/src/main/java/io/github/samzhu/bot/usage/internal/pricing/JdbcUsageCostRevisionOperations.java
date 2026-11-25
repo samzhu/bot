@@ -159,7 +159,10 @@ public class JdbcUsageCostRevisionOperations implements UsageCostRevisionOperati
         try {
             return lane.submitCritical(c.workspaceId(), () -> transactions.execute(tx -> {
                 io.github.samzhu.bot.usage.internal.admission.UsageWriterLock.registrationForAttempt(jdbc,c.attemptId());
+                // Match title admission's work → budget → attempt → hold order across processes.
+                io.github.samzhu.bot.usage.internal.admission.TitleReservationSettlement.lockBudget(jdbc,c.attemptId());
                 Result saved=publish.get();
+                io.github.samzhu.bot.usage.internal.admission.TitleReservationSettlement.settleCurrent(jdbc,c.attemptId());
                 refreshBudget(c.workspaceId(),c.attemptId());
                 return saved;
             })).toCompletableFuture().join();

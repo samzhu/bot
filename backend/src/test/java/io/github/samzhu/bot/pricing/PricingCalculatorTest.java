@@ -13,6 +13,13 @@ class PricingCalculatorTest {
     private PricingCalculator.Input input(String provider, String endpoint, String json, boolean finalUsage, boolean verified, boolean extraKnownAbsent) {
         return new PricingCalculator.Input(provider, endpoint, "fixture-model", "fixture-channel", json, finalUsage, verified, extraKnownAbsent);
     }
+    @Test void interactionsTitlePricesDisjointTokensAtSyntheticRates() {
+        var estimate=calculator.estimate(input("gemini","interactions", """
+                {"total_input_tokens":100,"total_cached_tokens":20,"total_output_tokens":10,"total_thought_tokens":5,"total_tool_use_tokens":0,"total_tokens":115}
+                """,true,true,true),prices("gemini","interactions",Map.of("input","1","cache_read","0.1","output","2","thoughts","2")));
+        assertEquals(PricingCalculator.Status.COMPLETE,estimate.status());
+        assertEquals(new BigDecimal("0.000112000000"),estimate.completeAmount());
+    }
     @Test void threeProviderFixtures() {
         var open = calculator.estimate(input("openai", "responses-fixture-ttl", """
           {"input_tokens":1000,"input_tokens_details":{"cached_tokens":200,"cache_write_tokens":300,"cache_write":{"30m":100,"12h":200}},"output_tokens":400,"output_tokens_details":{"reasoning_tokens":100}}

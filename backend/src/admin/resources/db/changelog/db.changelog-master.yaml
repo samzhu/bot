@@ -143,3 +143,12 @@ databaseChangeLog:
             encoding: UTF-8
             splitStatements: false
             stripComments: false
+  - changeSet:
+      id: V18__title_denial_reason.sql
+      author: bot
+      changes:
+        - sqlFile:
+            path: db/migration/V18__title_denial_reason.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false

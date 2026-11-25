@@ -14,7 +14,7 @@ import java.time.Duration;
 
 @Controller
 class ConversationTitleSubscriptionController {
-    record ConversationTitleChange(String id, String version, String state) {}
+    record ConversationTitleChange(String id, String version, String state, String reason) {}
     private final JdbcTemplate jdbc;
     private final ConversationOperations conversations;
     private final CurrentUserProvider currentUser;
@@ -25,7 +25,7 @@ class ConversationTitleSubscriptionController {
         this.currentUser = currentUser;
     }
 
-    record WorkState(String state, String version) {}
+    record WorkState(String state, String version, String reason) {}
 
     @SubscriptionMapping
     Flux<ConversationTitleChange> conversationTitleChanged(@Argument String conversationId) {
@@ -42,16 +42,16 @@ class ConversationTitleSubscriptionController {
                              or c.created_at < clock_timestamp() - interval '30 seconds')
                         and not exists (select 1 from chat_run r where r.conversation_id=c.id and r.status in ('PENDING','RUNNING'))
                         and not exists (select 1 from message msg where msg.conversation_id=c.id and msg.role='ASSISTANT' and msg.content ~ '[^[:space:]]')
-                        then 'UNAVAILABLE' else w.state end, w.version from conversation_title_work w
+                        then 'UNAVAILABLE' else w.state end, w.version, w.denial_reason from conversation_title_work w
                     join conversation c on c.id=w.conversation_id
                     join workspace_member m on m.workspace_id=c.workspace_id and m.user_id=? and m.active=true
                     where c.id=? and c.user_id=?
-                    """, (rs, row) -> new WorkState(rs.getString(1), Long.toString(rs.getLong(2))), user, conversationId, user))
+                    """, (rs, row) -> new WorkState(rs.getString(1), Long.toString(rs.getLong(2)), rs.getString(3)), user, conversationId, user))
                         .subscribeOn(Schedulers.boundedElastic()))
-                .map(rows -> rows.isEmpty() ? new WorkState("UNAVAILABLE", "0") : rows.getFirst())
+                .map(rows -> rows.isEmpty() ? new WorkState("UNAVAILABLE", "0", null) : rows.getFirst())
                 .takeUntil(work -> !work.state().equals("WAITING") && !work.state().equals("READY") && !work.state().equals("CLAIMED"))
                 .last()
-                .map(work -> new ConversationTitleChange(conversationId, work.version(), work.state()))
+                .map(work -> new ConversationTitleChange(conversationId, work.version(), work.state(), work.reason()))
                 .flux();
     }
 }

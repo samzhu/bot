@@ -260,5 +260,5 @@ extend type Mutation {
  reconcileCost(input: ReconcileCostInput!): CostRevisionResult!
 }
 
-type ConversationTitleChange { id: ID! version: String! state: String! }
+type ConversationTitleChange { id: ID! version: String! state: String! reason: String }
 type Subscription { conversationTitleChanged(conversationId: ID!): ConversationTitleChange! }

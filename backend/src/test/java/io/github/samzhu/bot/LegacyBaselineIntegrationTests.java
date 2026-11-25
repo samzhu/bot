@@ -159,6 +159,7 @@ class LegacyBaselineIntegrationTests {
                 });
                 var expected = new java.util.ArrayList<>(HISTORY);
                 expected.add("V17__postgres_comments.sql");
+                expected.add("V18__title_denial_reason.sql");
                 assertEquals(expected.stream().sorted().toList(), db.queryForList(
                         "select id from databasechangelog where id <> 'V18__future_test.sql'", String.class).stream().sorted().toList());
                 assertEquals(1, db.queryForObject("select count(*) from databasechangelog where id='V18__future_test.sql'", Integer.class));

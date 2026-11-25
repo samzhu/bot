@@ -17,16 +17,11 @@ final class ReconciliationCalculator {
         var snapshot=input.effectiveSnapshot();
         if (!"VALID".equals(input.projectionState()) || snapshot==null || !"JSONB".equals(snapshot.rawState()) || snapshot.rawJson()==null)
             throw new JdbcUsageCostRevisionOperations.Failure("SOURCE_UNAVAILABLE");
-        var fixture=FakePricingEvidence.dialect(input);
-        boolean google="GOOGLE".equals(input.provider()) && "generateContent".equals(input.endpoint()) && "GEMINI_API".equals(input.channel());
-        boolean title="CONVERSATION_TITLE".equals(input.purpose()) && "GOOGLE".equals(input.provider())
-                && "interactions".equals(input.endpoint()) && "gemini-3.5-flash-lite".equals(input.model()) && "GEMINI_API".equals(input.channel());
-        if (!google && !title && fixture==null) throw new JdbcUsageCostRevisionOperations.Failure("UNSUPPORTED_SOURCE");
-        String provider=fixture==null?"gemini":fixture.provider();
-        String endpoint=fixture==null?(title?"interactions":"generateContent"):fixture.endpoint();
-        var price=priceRevision==null?null:new PriceSnapshot(provider,endpoint,input.model(),input.channel(),priceRevision,rates);
-        var estimate=new PricingCalculator().estimate(new PricingCalculator.Input(provider,endpoint,input.model(),input.channel(),snapshot.rawJson(),
-                "FINAL".equals(snapshot.semantic()),"VERIFIED".equals(input.attemptCoverage()),title || (fixture!=null && fixture.textOnlyEvidence())),price);
+        var strategy=PricingStrategySelection.select(input);
+        if (strategy==null) throw new JdbcUsageCostRevisionOperations.Failure("UNSUPPORTED_SOURCE");
+        var price=priceRevision==null?null:new PriceSnapshot(strategy.provider(),strategy.endpoint(),input.model(),input.channel(),priceRevision,rates);
+        var estimate=new PricingCalculator().estimate(new PricingCalculator.Input(strategy.provider(),strategy.endpoint(),input.model(),input.channel(),snapshot.rawJson(),
+                "FINAL".equals(snapshot.semantic()),"VERIFIED".equals(input.attemptCoverage()),strategy.extraCostsAbsent()),price);
         List<String> reasons=new ArrayList<>();
         estimate.reasons().forEach(r -> reasons.add(r.name()));
         if (!"COMPLETE".equals(snapshot.captureCompleteness())) reasons.add("CAPTURE_INCOMPLETE");

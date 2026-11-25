@@ -492,10 +492,10 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission, io.github.
     }
 
     private java.math.BigDecimal titleMonthHolds(String workspace, Partition partition, YearMonth period) {
-        return jdbc.queryForObject("select coalesce(sum(amount_usd),0) from workspace_title_reservation where workspace_id=? and partition=? and month_start=? and state in ('HELD','UNKNOWN')", java.math.BigDecimal.class, workspace, partition.name(), period.atDay(1));
+        return TitleReservationSettlement.monthRemaining(jdbc,workspace,partition.name(),period.atDay(1));
     }
     private java.math.BigDecimal titleWeekHolds(String workspace, String actor, Partition partition, io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Budget budget) {
-        return jdbc.queryForObject("select coalesce(sum(amount_usd),0) from workspace_title_reservation where workspace_id=? and actor_id=? and partition=? and reserved_at>=? and reserved_at<? and state in ('HELD','UNKNOWN')", java.math.BigDecimal.class, workspace, actor, partition.name(), java.sql.Timestamp.from(budget.start()), java.sql.Timestamp.from(budget.end()));
+        return TitleReservationSettlement.weekRemaining(jdbc,workspace,actor,partition.name(),budget.start(),budget.end());
     }
     private Reason weeklyReason(io.github.samzhu.bot.usage.MemberWeeklyBudgetOperations.Budget budget, java.math.BigDecimal held) {
         if (!budget.enabled()) return null;
@@ -1053,9 +1053,10 @@ public class DefaultWorkspaceAdmission implements WorkspaceAdmission, io.github.
                     select 1 from provider_attempt a where a.execution_outcome='IN_PROGRESS'
                     and not exists (select 1 from chat_run cr join run_ownership o on o.run_id=cr.id
                         where cr.id=a.run_id and cr.status in ('PENDING','RUNNING') and o.lease_until>clock_timestamp())
-                    and not exists (select 1 from conversation_title_work w join workspace_title_reservation h on h.conversation_id=w.conversation_id
-                        where w.conversation_id=a.title_conversation_id and h.attempt_id=a.id and w.state='CLAIMED'
-                        and w.claimed_until>clock_timestamp() and h.state='HELD'))
+                    and not exists (select 1 from conversation_title_work w left join workspace_title_reservation h on h.conversation_id=w.conversation_id
+                        where a.purpose='CONVERSATION_TITLE' and a.run_id is null and w.conversation_id=a.title_conversation_id
+                        and w.state='CLAIMED' and w.claimed_until>clock_timestamp()
+                        and (h.conversation_id is null or (h.attempt_id=a.id and h.state='HELD'))))
                   or exists (select 1 from workspace_admission_finalization f join workspace_admission_registration r on r.token=f.registration_token
                         where f.state='PENDING' and not exists (select 1 from chat_run cr join run_ownership o on o.run_id=cr.id
                             where cr.id=r.run_id and cr.status in ('PENDING','RUNNING') and o.lease_until>clock_timestamp()))

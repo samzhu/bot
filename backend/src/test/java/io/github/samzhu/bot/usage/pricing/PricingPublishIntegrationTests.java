@@ -90,7 +90,7 @@ class PricingPublishIntegrationTests {
         String after=ledger.begin(new UsageLedger.Dispatch(null,workspace,null,"GOOGLE","generateContent","fixture-no-catalog","GEMINI_API","1",false,"VERIFIED"));
         assertTrue(ledger.markDispatched(after,java.time.Clock::instant));
         assertEquals(revision.id(),jdbc.queryForObject("select catalog_revision_id from provider_attempt where id=?",String.class,after));
-        ledger.append(after,new UsageLedger.Snapshot("first",1,"CUMULATIVE","FAKE_RAW","1","1","1","COMPLETE","{\"promptTokenCount\":1000,\"cachedContentTokenCount\":200,\"candidatesTokenCount\":300,\"thoughtsTokenCount\":100,\"toolUsePromptTokenCount\":0}"));
+        ledger.append(after,new UsageLedger.Snapshot("first",1,"CUMULATIVE","SDK_NATIVE","1","1","1","COMPLETE","{\"promptTokenCount\":1000,\"cachedContentTokenCount\":200,\"candidatesTokenCount\":300,\"thoughtsTokenCount\":100,\"toolUsePromptTokenCount\":0}"));
         assertTrue(publisher.recompute(after));
         assertEquals("fixture-1",jdbc.queryForObject("select price_revision from usage_price_snapshot where attempt_id=?",String.class,after));
         var subtotal=jdbc.queryForMap("select e.status,e.known_subtotal,e.complete_amount from usage_cost_current c join usage_cost_estimate e on e.id=c.estimate_id where c.attempt_id=?",after);
@@ -98,7 +98,7 @@ class PricingPublishIntegrationTests {
         assertEquals(new java.math.BigDecimal("0.001620000000"),subtotal.get("known_subtotal"));
         assertNull(subtotal.get("complete_amount"));
         catalog.publish("fixture-rev-2","fixture-only-new",java.util.List.of());
-        ledger.append(after,new UsageLedger.Snapshot("late",2,"FINAL","FAKE_RAW","1","1","1","COMPLETE","{\"promptTokenCount\":1001,\"cachedContentTokenCount\":200,\"candidatesTokenCount\":300,\"thoughtsTokenCount\":100,\"toolUsePromptTokenCount\":0}"));
+        ledger.append(after,new UsageLedger.Snapshot("late",2,"FINAL","SDK_NATIVE","1","1","1","COMPLETE","{\"promptTokenCount\":1001,\"cachedContentTokenCount\":200,\"candidatesTokenCount\":300,\"thoughtsTokenCount\":100,\"toolUsePromptTokenCount\":0}"));
         assertTrue(publisher.recompute(after));
         assertEquals("fixture-1",jdbc.queryForObject("select price_revision from usage_price_snapshot where attempt_id=?",String.class,after));
         assertEquals(2,jdbc.queryForObject("select count(*) from usage_cost_estimate where attempt_id=?",Integer.class,after));

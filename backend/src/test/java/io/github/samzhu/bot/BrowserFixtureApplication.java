@@ -43,8 +43,13 @@ public final class BrowserFixtureApplication {
             catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             throw new IllegalStateException("Fixture startup fault did not terminate");
         }
-        SpringApplication app = new SpringApplication(BotApplication.class, Fixture.class, TestUsageCaptureConfiguration.class, TestProvisioningConfiguration.class);
-        app.setAdditionalProfiles("test", "browser-fixture");
+        boolean titleFixture = "1".equals(environment.get("BOT85_TITLE_FIXTURE"));
+        if (titleFixture && nonce == null) throw new IllegalStateException("Title fixture requires owned nonce");
+        SpringApplication app = titleFixture
+                ? new SpringApplication(BotApplication.class, Fixture.class, TitleFixture.class, TestUsageCaptureConfiguration.class, TestProvisioningConfiguration.class)
+                : new SpringApplication(BotApplication.class, Fixture.class, TestUsageCaptureConfiguration.class, TestProvisioningConfiguration.class);
+        if (titleFixture) app.setAdditionalProfiles("test", "browser-fixture", "browser-title-fixture");
+        else app.setAdditionalProfiles("test", "browser-fixture");
         var context = app.run("--server.address=127.0.0.1", "--server.port=0",
                 "--spring.docker.compose.enabled=false", "--spring.config.location=classpath:/");
         try {
@@ -103,6 +108,39 @@ public final class BrowserFixtureApplication {
             String nonce = System.getenv(NONCE_ENV);
             if (nonce != null) postgres.withLabel(NONCE_LABEL, nonce);
             return postgres;
+        }
+    }
+
+    @TestConfiguration(proxyBeanMethods = false)
+    static class TitleFixture {
+        @Bean ControlledTitle browserFixtureTitle() { return new ControlledTitle(); }
+    }
+
+    static final class ControlledTitle implements io.github.samzhu.bot.conversation.ConversationTitleGenerator {
+        final java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        final java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        @Override public String generate(String input) throws Exception {
+            calls.incrementAndGet();
+            if (!release.await(20, java.util.concurrent.TimeUnit.SECONDS)) throw new IllegalStateException("Synthetic title timed out");
+            return "Synthetic browser title";
+        }
+    }
+
+    @RestController
+    @Profile("browser-title-fixture")
+    static class TitleControl {
+        private final ControlledTitle title;
+        TitleControl(ControlledTitle title) { this.title = title; }
+        @GetMapping("/api/__fixture/title-status")
+        Map<String, Object> status(@org.springframework.web.bind.annotation.RequestHeader("X-Fixture-Nonce") String nonce) {
+            if (!java.util.Objects.equals(System.getenv(NONCE_ENV), nonce)) throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.FORBIDDEN);
+            return Map.of("calls", title.calls.get());
+        }
+        @org.springframework.web.bind.annotation.PostMapping("/api/__fixture/title-release")
+        Map<String, Object> release(@org.springframework.web.bind.annotation.RequestHeader("X-Fixture-Nonce") String nonce) {
+            if (!java.util.Objects.equals(System.getenv(NONCE_ENV), nonce)) throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.FORBIDDEN);
+            title.release.countDown();
+            return Map.of("calls", title.calls.get());
         }
     }
 

@@ -193,7 +193,13 @@ public class JdbcWorkspaceMonthlyBudgetOperations implements WorkspaceMonthlyBud
                 left join usage_cost_revision_audit audit on audit.estimate_id=e.id and audit.attempt_id=a.id
                 where a.workspace_id=? and a.simulation=? and a.started_at>=? and a.started_at<?
                   and a.execution_outcome not in ('IN_PROGRESS','NOT_DISPATCHED')
-                  and (e.id is null or e.source_version<>a.projection_version or audit.kind='MANUAL_ESTIMATE' or e.status<>'COMPLETE')
+                  and (e.id is null or e.source_version<>a.projection_version or audit.kind='MANUAL_ESTIMATE' or e.status<>'COMPLETE' or exists (select 1 from workspace_title_reservation h
+                              where h.attempt_id=a.id and h.workspace_id=a.workspace_id and h.actor_id=a.actor_id
+                                and a.purpose='CONVERSATION_TITLE' and a.title_conversation_id=h.conversation_id
+                                and a.simulation=(h.partition='SIMULATION') and h.reserved_at=a.started_at
+                                and h.state in ('HELD','UNKNOWN') and e.status='COMPLETE'
+                                and e.source_version=a.projection_version and e.complete_amount>h.amount_usd
+                                and audit.kind is distinct from 'MANUAL_ESTIMATE'))
                 """,Long.class,scope.workspaceId(),scope.partition()==WorkspaceAdmission.Partition.SIMULATION,
                 java.sql.Timestamp.from(scope.period().atDay(1).atStartOfDay(zone).toInstant()),
                 java.sql.Timestamp.from(scope.period().plusMonths(1).atDay(1).atStartOfDay(zone).toInstant()));

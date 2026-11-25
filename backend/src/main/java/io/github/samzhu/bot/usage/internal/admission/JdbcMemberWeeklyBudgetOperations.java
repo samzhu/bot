@@ -38,6 +38,10 @@ public class JdbcMemberWeeklyBudgetOperations implements MemberWeeklyBudgetOpera
                 if((c.enabled() && cap==null) || (cap!=null && (cap.scale()>12 || cap.compareTo(new BigDecimal("999999999999999999.999999999999"))>0))) throw new IllegalArgumentException();
             } catch(RuntimeException ex) { throw new Failure("INVALID_WEEKLY_BUDGET_CONFIGURATION"); }
             return tx.execute(s->{
+                // Title admission uses this same workspace/partition row before reading weekly policy.
+                jdbc.update("insert into workspace_monthly_budget(workspace_id,partition) values (?,?) on conflict do nothing",c.workspaceId(),c.partition().name());
+                jdbc.query("select workspace_id from workspace_monthly_budget where workspace_id=? and partition=? for update",
+                        (rs,n)->rs.getString(1),c.workspaceId(),c.partition().name());
                 jdbc.update("insert into member_weekly_budget(workspace_id,member_user_id,partition) values (?,?,?) on conflict do nothing",c.workspaceId(),c.memberUserId(),c.partition().name());
                 var rows=jdbc.query("select expected_config_version,enabled,cap_usd from member_weekly_budget_command where workspace_id=? and member_user_id=? and partition=? and actor_id=? and idempotency_key=?",
                     (rs,n)->new Object[]{rs.getLong(1),rs.getBoolean(2),rs.getBigDecimal(3)},c.workspaceId(),c.memberUserId(),c.partition().name(),c.actorId(),c.idempotencyKey());

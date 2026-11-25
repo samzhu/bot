@@ -44,21 +44,22 @@ public class PricingPublisher {
         PriceChoice choice = priceChoice(input);
         boolean undispatched = "NOT_DISPATCHED".equals(input.executionOutcome()) && input.startedAt() == null;
         var snapshot = input.effectiveSnapshot();
-        var fixture = FakePricingEvidence.dialect(input);
-        boolean realGoogle = "GOOGLE".equals(input.provider()) && "generateContent".equals(input.endpoint()) && "GEMINI_API".equals(input.channel());
-        String calcProvider = fixture != null ? fixture.provider() : "gemini";
-        boolean title = "CONVERSATION_TITLE".equals(input.purpose()) && "GOOGLE".equals(input.provider())
-                && "interactions".equals(input.endpoint()) && "gemini-3.5-flash-lite".equals(input.model())
-                && "GEMINI_API".equals(input.channel());
-        String calcEndpoint = fixture != null ? fixture.endpoint() : title ? "interactions" : "generateContent";
-        boolean extraCostsAbsent = title || (fixture != null && fixture.textOnlyEvidence());
+        var strategy = PricingStrategySelection.select(input);
+        String calcProvider = strategy == null ? null : strategy.provider();
+        String calcEndpoint = strategy == null ? null : strategy.endpoint();
+        // Keep the historical no-snapshot title diagnostic stable; there is no usage to price yet.
+        boolean extraCostsAbsent = strategy != null ? strategy.extraCostsAbsent()
+                : snapshot == null && "CONVERSATION_TITLE".equals(input.purpose()) && "GOOGLE".equals(input.provider())
+                    && "interactions".equals(input.endpoint()) && "gemini-3.5-flash-lite".equals(input.model())
+                    && "GEMINI_API".equals(input.channel());
+        String calculatorVersion = strategy == null ? PricingCalculator.VERSION : strategy.version();
         PricingCalculator.Estimate estimate = null;
         List<String> reasons = new ArrayList<>();
         if (undispatched) reasons.add("NOT_DISPATCHED");
         else if (!"MATCHED".equals(choice.state())) {
             reasons.add(switch (choice.state()) { case "MISSING" -> "MISSING_PRICE"; case "OVERLAPPING" -> "OVERLAPPING_PRICE"; default -> "LEGACY_UNPRICED"; });
             if ("MISSING".equals(choice.state()) && snapshot != null && "VALID".equals(input.projectionState())
-                    && "JSONB".equals(snapshot.rawState()) && (realGoogle || title || fixture != null)) {
+                    && "JSONB".equals(snapshot.rawState()) && strategy != null) {
                 estimate = new PricingCalculator().estimate(new PricingCalculator.Input(calcProvider, calcEndpoint, input.model(), input.channel(), snapshot.rawJson(),
                     "FINAL".equals(snapshot.semantic()), "VERIFIED".equals(input.attemptCoverage()), extraCostsAbsent), null);
                 for (var r:estimate.reasons()) if (!reasons.contains(r.name())) reasons.add(r.name());
@@ -67,7 +68,7 @@ public class PricingPublisher {
             }
         }
         else if (!"VALID".equals(input.projectionState()) || snapshot == null || !"JSONB".equals(snapshot.rawState())) reasons.add(input.projectionReason() == null ? "USAGE_UNKNOWN" : input.projectionReason());
-        else if (!realGoogle && !title && fixture == null) reasons.add("UNSUPPORTED_ENDPOINT");
+        else if (strategy == null) reasons.add("UNSUPPORTED_ENDPOINT");
         else {
             var calcPrice = new PriceSnapshot(calcProvider, calcEndpoint, input.model(), input.channel(), choice.revision(), choice.rates());
             estimate = new PricingCalculator().estimate(new PricingCalculator.Input(calcProvider, calcEndpoint, input.model(), input.channel(), snapshot.rawJson(),
@@ -130,7 +131,7 @@ public class PricingPublisher {
             var payload=new java.util.TreeMap<String,Object>();
             payload.put("attemptId",id); payload.put("sourceVersion",Long.toString(input.projectionVersion()));
             payload.put("sourceSnapshotId",input.effectiveSnapshotId()); payload.put("priceSnapshotId",priceId);
-            payload.put("priceRevision",choice.revision()); payload.put("calculatorVersion",PricingCalculator.VERSION);
+            payload.put("priceRevision",choice.revision()); payload.put("calculatorVersion",calculatorVersion);
             payload.put("status",status); payload.put("currency","USD");
             payload.put("knownSubtotal",subtotal==null ? null : subtotal.toPlainString());
             payload.put("completeAmount",complete==null ? null : complete.toPlainString()); payload.put("details",details);
@@ -139,7 +140,7 @@ public class PricingPublisher {
                 select id,payload_hash from usage_cost_estimate
                  where attempt_id=? and source_version=? and source_snapshot_id is not distinct from ?
                    and price_snapshot_id=? and calculator_version=?
-                """,(rs,n)->new String[]{rs.getString(1),rs.getString(2)},id,input.projectionVersion(),input.effectiveSnapshotId(),priceId,PricingCalculator.VERSION);
+                """,(rs,n)->new String[]{rs.getString(1),rs.getString(2)},id,input.projectionVersion(),input.effectiveSnapshotId(),priceId,calculatorVersion);
             if (!already.isEmpty()) {
                 if (!already.getFirst()[1].equals(hash)) throw new Conflict();
                 String existingId=already.getFirst()[0];
@@ -149,7 +150,7 @@ public class PricingPublisher {
             }
             String estimateId=UUID.randomUUID().toString();
             jdbc.update("insert into usage_cost_estimate(id,attempt_id,source_version,source_snapshot_id,price_snapshot_id,calculator_version,status,known_subtotal,complete_amount,details,payload_hash,publication_kind) values (?,?,?,?,?,?,?,?,?,?::jsonb,?,?)",
-                estimateId,id,input.projectionVersion(),input.effectiveSnapshotId(),priceId,PricingCalculator.VERSION,status,subtotal,complete,details,hash,protectedCurrent?"AUTO_CANDIDATE":"AUTO_CURRENT");
+                estimateId,id,input.projectionVersion(),input.effectiveSnapshotId(),priceId,calculatorVersion,status,subtotal,complete,details,hash,protectedCurrent?"AUTO_CANDIDATE":"AUTO_CURRENT");
             // Preserve an audited current, but durably retain this source-version candidate
             // before marking the source processed so restart cannot lose the calculation.
             if (protectedCurrent) checkpoint(id,input.projectionVersion());
@@ -159,7 +160,10 @@ public class PricingPublisher {
         try {
             Boolean result=lane.submitCritical(input.workspaceId(), () -> transactions.execute(tx -> {
                 io.github.samzhu.bot.usage.internal.admission.UsageWriterLock.registrationForAttempt(jdbc,id);
+                // The shared budget row serializes title admission and cost replacement across processes.
+                io.github.samzhu.bot.usage.internal.admission.TitleReservationSettlement.lockBudget(jdbc, id);
                 Boolean published=publish.get();
+                io.github.samzhu.bot.usage.internal.admission.TitleReservationSettlement.settleCurrent(jdbc, id);
                 if (input.startedAt()!=null) {
                     var zone=java.time.ZoneId.of("Asia/Taipei");
                     var period=java.time.YearMonth.from(input.startedAt().atZone(zone));

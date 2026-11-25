@@ -110,6 +110,23 @@ class UsageCostReconcileIntegrationTests {
         assertTrue(summary.path("completeTotal").isNull()); assertEquals("1",summary.path("unknownCount").asText()); assertEquals("1",summary.path("coverageUnknownCount").asText());
         assertEquals("0.001620000000",budget.path("knownSubtotalUsd").asText()); assertEquals("1",budget.path("terminalUnknownCount").asText());
     }
+    @Test void unsupportedGoogleAdapterCannotCreateAuditedCost() throws Exception {
+        String s=UUID.randomUUID().toString().substring(0,8), w="unsupported-w-"+s, id="unsupported-a-"+s, snap="unsupported-s-"+s, cat="unsupported-c-"+s;
+        when(actor.getCurrentUserId()).thenReturn("unsupported-manager");
+        jdbc.update("insert into workspace(id,name) values (?,'fixture')",w);
+        jdbc.update("insert into workspace_member(workspace_id,user_id,role,active) values (?,'unsupported-manager','MANAGER',true)",w);
+        jdbc.update("insert into provider_attempt(id,workspace_id,actor_id,provider,endpoint,model,channel,adapter_version,simulation,attempt_coverage,prepared_at,started_at,finished_at,execution_outcome,usage_presence,capture_completeness,projection_state,projection_version) values (?,?,'unsupported-manager','GOOGLE','generateContent','fixture-gemini','GEMINI_API','unrecognized',false,'UNKNOWN',now(),now(),now(),'SUCCEEDED','PRESENT','INCOMPLETE','VALID',1)",id,w);
+        jdbc.update("insert into usage_snapshot(id,attempt_id,event_id,payload_hash,ordinal,semantic,source_layer,schema_version,adapter_version,capture_version,capture_completeness,raw_state,raw_usage,captured_at) values (?,?,?,'fixture',1,'CUMULATIVE','SDK_NATIVE','1','unrecognized','1','INCOMPLETE','JSONB','{\"promptTokenCount\":1000,\"cachedContentTokenCount\":200,\"candidatesTokenCount\":300,\"thoughtsTokenCount\":100,\"toolUsePromptTokenCount\":0}'::jsonb,now())",snap,id,"event-"+s);
+        jdbc.update("update provider_attempt set projection_snapshot_id=? where id=?",snap,id);
+        jdbc.update("insert into pricing_catalog_revision(id,source_reference,source_revision,content_hash) values (?,'fixture',?,'hash')",cat,"revision-"+s);
+        jdbc.update("insert into pricing_catalog_entry(id,revision_id,provider,endpoint,model,channel,price_revision,effective_from,effective_until,rates) values (?,?,'GOOGLE','generateContent','fixture-gemini','GEMINI_API','fixture-v1',now()-interval '1 day',now()+interval '1 day','{\"input\":\"1\",\"cache_read\":\"0.1\",\"output\":\"2\",\"thoughts\":\"2\",\"tool_input\":\"1\"}'::jsonb)","entry-"+s,cat);
+        var result=graph("mutation { reconcileCost(input:{workspaceId:\""+w+"\",attemptId:\""+id+"\",expectedRevision:null,expectedSourceProjectionVersion:\"1\",idempotencyKey:\"test\",catalogRevisionId:\""+cat+"\",evidenceReference:\"fixture\",reason:\"verified\"}) { outcome } }");
+        assertEquals("UNSUPPORTED_SOURCE",result.path("errors").path(0).path("extensions").path("code").asText(),result.toString());
+        assertEquals(0,jdbc.queryForObject("select count(*) from usage_cost_estimate where attempt_id=?",Integer.class,id));
+        assertEquals(0,jdbc.queryForObject("select count(*) from usage_price_snapshot where attempt_id=?",Integer.class,id));
+        assertEquals(0,jdbc.queryForObject("select count(*) from usage_cost_revision_audit where attempt_id=?",Integer.class,id));
+        assertEquals(0,jdbc.queryForObject("select count(*) from usage_cost_current where attempt_id=?",Integer.class,id));
+    }
     private com.fasterxml.jackson.databind.JsonNode graph(String query) throws Exception {
         var request=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/graphql")).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(Map.of("query",query)))).build();
         return json.readTree(HttpClient.newHttpClient().send(request,HttpResponse.BodyHandlers.ofString()).body());

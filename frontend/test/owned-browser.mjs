@@ -138,11 +138,13 @@ export async function stopOwnedFixture(child, identity) {
   throw new Error('Owned fixture processes did not exit; temporary home retained');
 }
 
-export async function startOwnedFixture({ postgresAccess = false } = {}) {
+export async function startOwnedFixture({ postgresAccess = false, titleFixture = false } = {}) {
   rejectExternalConfiguration(process.env);
   const temp = await mkdtemp(resolve(tmpdir(), 'bot72-'));
   const env = fixtureEnvironment(process.env, temp);
+  if (titleFixture && !postgresAccess) throw new Error('Title fixture requires owned PostgreSQL verification');
   const nonce = postgresAccess ? randomBytes(16).toString('hex') : undefined;
+  if (titleFixture) env.BOT85_TITLE_FIXTURE = '1';
   if (nonce) env.BOT75_FIXTURE_NONCE = nonce;
   if (process.env.BOT72_GRADLE_CACHE) {
     // Reuse only downloaded artifacts; never inherit Gradle init scripts or properties.
@@ -156,7 +158,11 @@ export async function startOwnedFixture({ postgresAccess = false } = {}) {
   const child = spawn(resolve(frontend, '../backend/gradlew'), ['bootTestRun', '--no-daemon', '--console=plain'], {
     cwd: resolve(frontend, '../backend'), env, detached: true, stdio: ['ignore', 'pipe', 'pipe']
   });
-  child.stderr.resume();
+  let startupDiagnostic = '';
+  if (titleFixture) {
+    const capture = chunk => { startupDiagnostic = (startupDiagnostic + chunk.toString()).slice(-65536); };
+    child.stdout.on('data', capture); child.stderr.on('data', capture);
+  } else child.stderr.resume();
   let server;
   const identity = {};
   const close = async () => {
@@ -192,8 +198,13 @@ export async function startOwnedFixture({ postgresAccess = false } = {}) {
     child.once('exit', () => { server.close(); });
     const browserEnv = { ...env };
     delete browserEnv.BOT75_FIXTURE_NONCE;
-    return { origin, browserEnv, backendOrigin: `http://127.0.0.1:${port}`, child, identity, close };
+    delete browserEnv.BOT85_TITLE_FIXTURE;
+    return { origin, browserEnv, backendOrigin: `http://127.0.0.1:${port}`, child, identity, close, ...(titleFixture ? { titleNonce: nonce } : {}) };
   } catch (error) {
+    if (titleFixture) {
+      const lines = startupDiagnostic.split(/\r?\n/).filter(line => /error|exception|failed|could not|caused by/i.test(line)).slice(-12);
+      for (const line of lines) console.error(line.replaceAll(nonce, '[redacted]').replace(/https?:\/\/\S+/g, '[url]').slice(0, 500));
+    }
     try { await close(); } catch (cleanupError) { console.error('Fixture startup cleanup also failed:', cleanupError); }
     throw error;
   }

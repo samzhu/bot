@@ -63,63 +63,65 @@ class ConversationTitleAdmissionImpl implements ConversationTitleAdmission {
                 if ((boolean) budget.get("enabled")) {
                     var cap = (java.math.BigDecimal) budget.get("cap_usd");
                     var spent = (java.math.BigDecimal) budget.get("known_subtotal_usd");
-                    if (cap.signum() == 0 || (spent != null && spent.compareTo(cap) >= 0) || (boolean) budget.get("terminal_effective_unknown")) return Decision.DENIED;
+                    if (cap.signum() == 0 || (spent != null && spent.compareTo(cap) >= 0)) return Decision.DENIED_MONTH;
+                    if ((boolean) budget.get("terminal_effective_unknown")) return Decision.DENIED_UNKNOWN;
                 }
                 var week = weekly.select(scopes.getFirst(), actor, partition, now);
-                if (week.enabled() && (week.capUsd().signum() == 0 ||
-                    (week.knownSubtotalUsd() != null && week.knownSubtotalUsd().compareTo(week.capUsd()) >= 0) || week.terminalUnknownCount() > 0)) return Decision.DENIED;
+                if (week.enabled()) {
+                    if (week.capUsd().signum() == 0 || (week.knownSubtotalUsd() != null && week.knownSubtotalUsd().compareTo(week.capUsd()) >= 0)) return Decision.DENIED_WEEK;
+                    if (week.terminalUnknownCount() > 0) return Decision.DENIED_UNKNOWN;
+                }
                 // Existing fake-only flows with no enabled budget retain their established behavior.
                 if (!(boolean) budget.get("enabled") && !week.enabled() && partition == WorkspaceAdmission.Partition.SIMULATION)
                     return hasLiveClaim(conversationId) ? Decision.ALLOWED : Decision.DENIED;
-                if (partition == WorkspaceAdmission.Partition.REAL && (!(boolean) budget.get("enabled") || !week.enabled())) return Decision.DENIED;
+                if (partition == WorkspaceAdmission.Partition.REAL && !(boolean) budget.get("enabled") && !week.enabled()) {
+                    var selected = catalog.sample(clock, Clock::instant);
+                    if (!hasLiveClaim(conversationId)) return Decision.DENIED;
+                    createAttempt(scopes.getFirst(), actor, partition, now, selected == null ? null : selected.revisionId(), conversationId);
+                    if (!hasLiveClaim(conversationId)) { status.setRollbackOnly(); return Decision.DENIED; }
+                    return Decision.ALLOWED;
+                }
                 if (partition == WorkspaceAdmission.Partition.REAL && Boolean.TRUE.equals(jdbc.queryForObject("""
                     select exists(select 1 from provider_attempt where workspace_id=? and simulation=false
                     and run_id is not null and started_at is not null and execution_outcome='IN_PROGRESS')
                     """, Boolean.class, scopes.getFirst()))) return Decision.DEFERRED;
                 var selected = catalog.sample(clock, Clock::instant);
-                if (selected == null || selected.revisionId() == null) return Decision.DENIED;
+                if (selected == null || selected.revisionId() == null) return Decision.DENIED_RATE;
                 var rates = jdbc.query("""
                     select rates::text from pricing_catalog_entry where revision_id=? and provider='GOOGLE'
                     and endpoint='interactions' and model='gemini-3.5-flash-lite' and channel='GEMINI_API'
                     and effective_from <= ? and effective_until > ?
                     """, (rs,n) -> rs.getString(1), selected.revisionId(), java.sql.Timestamp.from(now), java.sql.Timestamp.from(now));
-                if (rates.size() != 1) return Decision.DENIED;
+                if (rates.size() != 1) return Decision.DENIED_RATE;
                 java.math.BigDecimal amount;
                 try {
                     var rate = json.readTree(rates.getFirst());
-                    var input = rate(rate, "input").max(rate(rate, "cache_read"));
-                    var output = rate(rate, "output").max(rate(rate, "thoughts"));
-                    amount = input.multiply(java.math.BigDecimal.valueOf(1_048_576))
-                        .add(output.multiply(java.math.BigDecimal.valueOf(64)))
-                        .divide(java.math.BigDecimal.valueOf(1_000_000), 12, java.math.RoundingMode.CEILING);
-                } catch (Exception ex) { return Decision.DENIED; }
-                var held = jdbc.queryForObject("""
-                    select coalesce(sum(amount_usd),0) from workspace_title_reservation
-                    where workspace_id=? and partition=? and month_start=? and state in ('HELD','UNKNOWN')
-                    """, java.math.BigDecimal.class, scopes.getFirst(), partition.name(), month.atDay(1));
+                    var input = rate(rate, "input"); var cached = rate(rate, "cache_read");
+                    var output = rate(rate, "output"); var thoughts = rate(rate, "thoughts");
+                    var exact = input.max(cached).multiply(java.math.BigDecimal.valueOf(1_048_576))
+                        .add(output.max(thoughts).multiply(java.math.BigDecimal.valueOf(64)))
+                        .divide(java.math.BigDecimal.valueOf(1_000_000));
+                    // Four independently rounded lines can each increase by at most half an ulp.
+                    // Rates with <= 6 decimal places yield exact scale-12 lines for integer tokens.
+                    boolean needsRoundingMargin = java.util.stream.Stream.of(input, cached, output, thoughts)
+                        .anyMatch(r -> r.stripTrailingZeros().scale() > 6);
+                    amount = exact.add(needsRoundingMargin ? new java.math.BigDecimal("0.000000000002") : java.math.BigDecimal.ZERO)
+                        .setScale(12, java.math.RoundingMode.CEILING);
+                    if (amount.compareTo(new java.math.BigDecimal("999999999999999999.999999999999")) > 0) return Decision.DENIED_RATE;
+                } catch (Exception ex) { return Decision.DENIED_RATE; }
+                var held = TitleReservationSettlement.monthRemaining(jdbc, scopes.getFirst(), partition.name(), month.atDay(1));
                 if ((boolean) budget.get("enabled")) {
                     var spent = (java.math.BigDecimal) budget.get("known_subtotal_usd");
                     if ((spent == null ? java.math.BigDecimal.ZERO : spent).add(held).add(amount)
-                        .compareTo((java.math.BigDecimal) budget.get("cap_usd")) > 0) return Decision.DENIED;
+                        .compareTo((java.math.BigDecimal) budget.get("cap_usd")) > 0) return Decision.DENIED_MONTH;
                 }
                 if (week.enabled()) {
-                    var weekHeld = jdbc.queryForObject("""
-                        select coalesce(sum(amount_usd),0) from workspace_title_reservation
-                        where workspace_id=? and actor_id=? and partition=? and reserved_at>=? and reserved_at<? and state in ('HELD','UNKNOWN')
-                        """, java.math.BigDecimal.class, scopes.getFirst(), actor, partition.name(), java.sql.Timestamp.from(week.start()), java.sql.Timestamp.from(week.end()));
+                    var weekHeld = TitleReservationSettlement.weekRemaining(jdbc, scopes.getFirst(), actor, partition.name(), week.start(), week.end());
                     var spent = week.knownSubtotalUsd() == null ? java.math.BigDecimal.ZERO : week.knownSubtotalUsd();
-                    if (spent.add(weekHeld).add(amount).compareTo(week.capUsd()) > 0) return Decision.DENIED;
+                    if (spent.add(weekHeld).add(amount).compareTo(week.capUsd()) > 0) return Decision.DENIED_WEEK;
                 }
                 if (!hasLiveClaim(conversationId)) return Decision.DENIED;
-                String attempt = java.util.UUID.randomUUID().toString();
-                jdbc.update("""
-                    insert into provider_attempt(id,run_id,workspace_id,actor_id,provider,endpoint,model,channel,adapter_version,
-                        simulation,attempt_coverage,prepared_at,started_at,execution_outcome,usage_presence,capture_completeness,projection_state,
-                        catalog_marker,catalog_revision_id,purpose,title_conversation_id)
-                    values (?,null,?,?,'GOOGLE','interactions','gemini-3.5-flash-lite','GEMINI_API','title-interactions-v1',
-                        ?,'VERIFIED',?,?,'IN_PROGRESS','PENDING','UNKNOWN','MISSING','CAPTURED',?,'CONVERSATION_TITLE',?)
-                    """, attempt, scopes.getFirst(), actor, partition == WorkspaceAdmission.Partition.SIMULATION,
-                    java.sql.Timestamp.from(now), java.sql.Timestamp.from(now), selected.revisionId(), conversationId);
+                String attempt = createAttempt(scopes.getFirst(), actor, partition, now, selected.revisionId(), conversationId);
                 int inserted = jdbc.update("""
                     insert into workspace_title_reservation(conversation_id,workspace_id,actor_id,partition,reserved_at,month_start,amount_usd,catalog_revision_id,attempt_id,state)
                     values (?,?,?,?,?,?,?,?,?,'HELD') on conflict (conversation_id) do nothing
@@ -133,6 +135,20 @@ class ConversationTitleAdmissionImpl implements ConversationTitleAdmission {
         } catch (RuntimeException ex) { return Decision.DENIED; }
     }
 
+    private String createAttempt(String workspace, String actor, WorkspaceAdmission.Partition partition,
+            java.time.Instant now, String revision, String conversationId) {
+        String attempt = java.util.UUID.randomUUID().toString();
+        jdbc.update("""
+            insert into provider_attempt(id,run_id,workspace_id,actor_id,provider,endpoint,model,channel,adapter_version,
+                simulation,attempt_coverage,prepared_at,started_at,execution_outcome,usage_presence,capture_completeness,projection_state,
+                catalog_marker,catalog_revision_id,purpose,title_conversation_id)
+            values (?,null,?,?,'GOOGLE','interactions','gemini-3.5-flash-lite','GEMINI_API','title-interactions-v1',
+                ?,'VERIFIED',?,?,'IN_PROGRESS','PENDING','UNKNOWN','MISSING',?,?,'CONVERSATION_TITLE',?)
+            """, attempt, workspace, actor, partition == WorkspaceAdmission.Partition.SIMULATION,
+            java.sql.Timestamp.from(now), java.sql.Timestamp.from(now), revision == null ? "NO_CATALOG" : "CAPTURED", revision, conversationId);
+        return attempt;
+    }
+
     private boolean hasLiveClaim(String conversationId) {
         return Boolean.TRUE.equals(jdbc.queryForObject("""
                 select exists(select 1 from conversation_title_work
@@ -141,42 +157,33 @@ class ConversationTitleAdmissionImpl implements ConversationTitleAdmission {
     }
 
     @Override public boolean capture(String conversationId, io.github.samzhu.bot.conversation.ConversationTitleGenerator.Result result) {
-        var ids = jdbc.query("select attempt_id from workspace_title_reservation where conversation_id=?", (rs,n) -> rs.getString(1), conversationId);
+        var ids = jdbc.query("select id from provider_attempt where purpose='CONVERSATION_TITLE' and title_conversation_id=?", (rs,n) -> rs.getString(1), conversationId);
         if (ids.isEmpty()) return true; // Existing unbudgeted simulation Fake has no provider attempt.
         String id = ids.getFirst();
         try {
             var u = result.usage();
-            if (u == null || u.input() == null || u.cached() == null || u.output() == null || u.thought() == null || u.tool() == null || u.total() == null
-                    || u.input() < 0 || u.cached() < 0 || u.output() < 0 || u.thought() < 0 || u.tool() != 0 || u.total() < 0
-                    || u.cached() > u.input() || u.input() > 1_048_576 || (long)u.output()+u.thought() > 64
-                    || (long)u.input()+u.output()+u.thought() != u.total()) {
-                unknown(conversationId); return false;
-            }
+            boolean complete = u != null && u.input() != null && u.cached() != null && u.output() != null && u.thought() != null && u.tool() != null && u.total() != null
+                    && u.input() >= 0 && u.cached() >= 0 && u.output() >= 0 && u.thought() >= 0 && u.tool() == 0 && u.total() >= 0
+                    && u.cached() <= u.input() && u.input() <= 1_048_576 && (long)u.output()+u.thought() <= 64
+                    && (long)u.input()+u.output()+u.thought() == u.total();
             var raw = json.createObjectNode();
-            raw.put("total_input_tokens", u.input()); raw.put("total_cached_tokens", u.cached());
-            raw.put("total_output_tokens", u.output()); raw.put("total_thought_tokens", u.thought());
-            raw.put("total_tool_use_tokens", u.tool()); raw.put("total_tokens", u.total());
-            ledger.append(id, new io.github.samzhu.bot.usage.UsageLedger.Snapshot("title-final", 1, "FINAL", "SDK_NATIVE",
-                "interactions-v1", "title-interactions-v1", "1", "COMPLETE", json.writeValueAsString(raw)));
+            if (u != null) {
+                if (u.input() != null) raw.put("total_input_tokens", u.input());
+                if (u.cached() != null) raw.put("total_cached_tokens", u.cached());
+                if (u.output() != null) raw.put("total_output_tokens", u.output());
+                if (u.thought() != null) raw.put("total_thought_tokens", u.thought());
+                if (u.tool() != null) raw.put("total_tool_use_tokens", u.tool());
+                if (u.total() != null) raw.put("total_tokens", u.total());
+            }
+            ledger.append(id, new io.github.samzhu.bot.usage.UsageLedger.Snapshot("title-final", 1,
+                complete ? "FINAL" : u == null ? "UNKNOWN" : "CUMULATIVE", "SDK_NATIVE",
+                "interactions-v1", "title-interactions-v1", "1", complete ? "COMPLETE" : "INCOMPLETE",
+                u == null ? null : json.writeValueAsString(raw)));
             if (result.responseId() != null && !result.responseId().isBlank()) ledger.recordResponseId(id, result.responseId());
             ledger.finish(id, "SUCCEEDED");
-            pricing.recompute(id);
-            var scopes = jdbc.query("select workspace_id from workspace_title_reservation where conversation_id=?", (rs,n) -> rs.getString(1), conversationId);
-            if (scopes.isEmpty()) return false;
-            return Boolean.TRUE.equals(lanes.submitCritical(scopes.getFirst(), () -> transactions.execute(status -> {
-                var rows = jdbc.query("select partition,month_start from workspace_title_reservation where conversation_id=?", (rs,n) -> new Object[]{rs.getString(1),rs.getDate(2)}, conversationId);
-                if (rows.isEmpty()) return false;
-                // The committed cost projection precedes hold release under the shared budget lock.
-                jdbc.query("select workspace_id from workspace_monthly_budget where workspace_id=? and partition=? for update", (rs,n) -> rs.getString(1), scopes.getFirst(), rows.getFirst()[0]);
-                return jdbc.update("""
-                    update workspace_title_reservation h set state='SETTLED'
-                    where h.conversation_id=? and h.state='HELD' and exists (
-                        select 1 from provider_attempt a join usage_cost_current c on c.attempt_id=a.id
-                        join usage_cost_estimate e on e.id=c.estimate_id
-                        where a.id=h.attempt_id and e.source_version=a.projection_version
-                          and e.status='COMPLETE' and e.complete_amount<=h.amount_usd)
-                    """, conversationId) == 1;
-            })).toCompletableFuture().join());
+            // Pricing is recoverable from the durable attempt and must not discard a valid title.
+            try { pricing.recompute(id); } catch (RuntimeException ignored) { return true; }
+            return true;
         } catch (Exception ex) { unknown(conversationId); return false; }
     }
 
@@ -187,10 +194,11 @@ class ConversationTitleAdmissionImpl implements ConversationTitleAdmission {
     @Override public int recoverExpiredBatch() {
         var ids=recoveryJdbc.query("""
                 select w.conversation_id from conversation_title_work w
-                  join workspace_title_reservation h on h.conversation_id=w.conversation_id
-                  join provider_attempt a on a.id=h.attempt_id and a.title_conversation_id=w.conversation_id
+                  join provider_attempt a on a.title_conversation_id=w.conversation_id and a.purpose='CONVERSATION_TITLE'
+                  left join workspace_title_reservation h on h.conversation_id=w.conversation_id
                  where w.state in ('CLAIMED','FAILED') and w.claimed_until<=clock_timestamp()
-                   and h.state='HELD' and a.purpose='CONVERSATION_TITLE' and a.execution_outcome='IN_PROGRESS'
+                   and (h.conversation_id is null or (h.attempt_id=a.id and h.state='HELD'))
+                   and a.execution_outcome='IN_PROGRESS'
                  order by w.conversation_id limit 100
                 """,(rs,n)->rs.getString(1));
         int recovered=0;
@@ -203,8 +211,10 @@ class ConversationTitleAdmissionImpl implements ConversationTitleAdmission {
     }
 
     private boolean settleUnknown(String conversationId,boolean onlyExpired) {
-        var scopes=jdbc.query("select workspace_id,attempt_id,partition from workspace_title_reservation where conversation_id=?",
-                (rs,n)->new String[]{rs.getString(1),rs.getString(2),rs.getString(3)},conversationId);
+        var scopes=jdbc.query("""
+                select a.workspace_id,a.id,case when a.simulation then 'SIMULATION' else 'REAL' end
+                from provider_attempt a where a.purpose='CONVERSATION_TITLE' and a.title_conversation_id=?
+                """, (rs,n)->new String[]{rs.getString(1),rs.getString(2),rs.getString(3)},conversationId);
         if (scopes.size()!=1 || scopes.getFirst()[1]==null) return false;
         var scope=scopes.getFirst();
         try {
@@ -236,11 +246,16 @@ class ConversationTitleAdmissionImpl implements ConversationTitleAdmission {
                                 period.atDay(1).atStartOfDay(ZONE).toInstant(),period.plusMonths(1).atDay(1).atStartOfDay(ZONE).toInstant());
                     }
                 }
-                int changed=jdbc.update("""
-                        update workspace_title_reservation set state='UNKNOWN'
-                         where conversation_id=? and workspace_id=? and attempt_id=? and partition=? and state='HELD'
-                        """,conversationId,scope[0],scope[1],scope[2]);
-                if (changed!=1) { status.setRollbackOnly(); return false; }
+                var holds=jdbc.query("select attempt_id,state from workspace_title_reservation where conversation_id=? for update",
+                        (rs,n)->new String[]{rs.getString(1),rs.getString(2)},conversationId);
+                if (!holds.isEmpty()) {
+                    if (!scope[1].equals(holds.getFirst()[0]) || !"HELD".equals(holds.getFirst()[1])) { status.setRollbackOnly(); return false; }
+                    int changed=jdbc.update("""
+                            update workspace_title_reservation set state='UNKNOWN'
+                             where conversation_id=? and workspace_id=? and attempt_id=? and partition=? and state='HELD'
+                            """,conversationId,scope[0],scope[1],scope[2]);
+                    if (changed!=1) { status.setRollbackOnly(); return false; }
+                }
                 jdbc.update("update conversation_title_work set state='FAILED' where conversation_id=? and state='CLAIMED'",conversationId);
                 return true;
             })).toCompletableFuture().get(10,java.util.concurrent.TimeUnit.SECONDS));

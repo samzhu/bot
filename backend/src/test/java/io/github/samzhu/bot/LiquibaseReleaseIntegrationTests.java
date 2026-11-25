@@ -160,12 +160,13 @@ class LiquibaseReleaseIntegrationTests {
             assertEquals(before, snapshot(db));
             ReleaseProvisioningApplication.main(args(pg));
             initialize(pg);
-            db.update("delete from databasechangelog where id in ('V16__run_ownership.sql','V17__postgres_comments.sql')");
+            db.update("delete from databasechangelog where id in ('V16__run_ownership.sql','V17__postgres_comments.sql','V18__title_denial_reason.sql')");
             before = snapshot(db);
             ex = assertThrows(Exception.class, () -> service(pg));
             assertTrue(causes(ex).contains("unapplied migration"), causes(ex));
             assertEquals(before, snapshot(db));
             // Restore the missing change's actual state before rerunning its changeSet.
+            db.execute("alter table conversation_title_work drop column denial_reason");
             db.execute("drop table run_ownership");
             db.execute("alter table workspace_admission_registration drop column start_lease_until");
             ReleaseProvisioningApplication.main(args(pg));

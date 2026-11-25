@@ -1384,15 +1384,19 @@ values ('non-uuid-anchor',?,'dev-user','FAKE','test','m','FAKE','1',true,'VERIFI
         var rates=Map.of("input","1","cache_read","0.1","output","2","thoughts","2","tool_input","1");
         var fixture=new io.github.samzhu.bot.pricing.PriceSnapshot("GOOGLE","generateContent","fixture-graphql","GEMINI_API","fixture-price",rates);
         catalogActivation.publish(rev,"fixture-only",List.of(new io.github.samzhu.bot.pricing.PriceCatalog.Entry(fixture,java.time.Instant.parse("2000-01-01T00:00:00Z"),java.time.Instant.parse("2100-01-01T00:00:00Z"))));
-        String id=ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(null,workspace,currentUser.getCurrentUserId(),"GOOGLE","generateContent","fixture-graphql","GEMINI_API","1",true,"VERIFIED"));
+        String id=ledger.begin(new io.github.samzhu.bot.usage.UsageLedger.Dispatch(null,workspace,currentUser.getCurrentUserId(),"GOOGLE","generateContent","fixture-graphql","GEMINI_API","2.1.0",false,"VERIFIED"));
         assertTrue(ledger.markDispatched(id,java.time.Clock::instant));
-        ledger.append(id,new io.github.samzhu.bot.usage.UsageLedger.Snapshot("priced",1,"FINAL","FAKE_RAW","1","1","1","COMPLETE","{\"promptTokenCount\":1000,\"cachedContentTokenCount\":200,\"candidatesTokenCount\":300,\"thoughtsTokenCount\":100,\"toolUsePromptTokenCount\":0}"));
+        // Synthetic SDK-shaped evidence, recorded directly without a provider request.
+        ledger.append(id,new io.github.samzhu.bot.usage.UsageLedger.Snapshot("priced",1,"FINAL","SDK_NATIVE","1","2.1.0","1","COMPLETE","{\"promptTokenCount\":1000,\"cachedContentTokenCount\":200,\"candidatesTokenCount\":300,\"thoughtsTokenCount\":100,\"toolUsePromptTokenCount\":0}"));
         ledger.finish(id,"SUCCEEDED");
         assertTrue(pricingPublisher.recompute(id));
-        String q="{ myUsageAttempt(workspaceId: \""+workspace+"\",id: \""+id+"\") { cost { status knownSubtotal completeAmount priceRevision priceSnapshotId priceSourceReference priceEffectiveFrom priceEffectiveUntil reasons lineItems { category nativeQuantity rate exactAmount storedAmount reasons } } } }";
+        String q="{ myUsageAttempt(workspaceId: \""+workspace+"\",id: \""+id+"\") { cost { status simulation knownSubtotal completeAmount calculatorVersion sourceLayer schemaVersion adapterVersion captureVersion priceRevision priceSnapshotId priceSourceReference priceEffectiveFrom priceEffectiveUntil reasons lineItems { category nativeQuantity rate exactAmount storedAmount reasons } } } }";
         var result=graph(q); assertFalse(result.has("errors"),result.toString());
         var cost=result.path("data").path("myUsageAttempt").path("cost");
         assertEquals("PARTIAL",cost.path("status").asText()); assertEquals("0.001620000000",cost.path("knownSubtotal").asText());
+        assertFalse(cost.path("simulation").asBoolean());
+        assertEquals("1",cost.path("calculatorVersion").asText()); assertEquals("SDK_NATIVE",cost.path("sourceLayer").asText());
+        assertEquals("1",cost.path("schemaVersion").asText()); assertEquals("2.1.0",cost.path("adapterVersion").asText()); assertEquals("1",cost.path("captureVersion").asText());
         assertTrue(cost.path("completeAmount").isNull()); assertEquals("fixture-price",cost.path("priceRevision").asText());
         assertEquals("fixture-only",cost.path("priceSourceReference").asText()); assertFalse(cost.path("priceSnapshotId").asText().isEmpty());
         assertEquals("2000-01-01T00:00:00Z",cost.path("priceEffectiveFrom").asText());

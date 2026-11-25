@@ -48,7 +48,7 @@ class ServiceRuntimeBoundaryTests {
                             catch (ClassNotFoundException expected) { }
                         }
                         for (String name : new String[]{"db/changelog/db.changelog-master.yaml", "db/migration/V1__initial_schema.sql",
-                                "db/initialization/prod.sql", "db/initialization/dev.sql", "release/dev.json"}) {
+                                "db/initialization/prod.sql", "db/initialization/dev.sql", "pricing/catalog.yaml", "release/dev.json"}) {
                             if (loader.getResource(name) != null) throw new AssertionError("unexpected resource: " + name);
                         }
                         if (loader.getResource("release/prod.json") == null) throw new AssertionError("production metadata missing");

@@ -162,7 +162,7 @@ class ConversationTitleService implements ConversationTitleDispatch {
                 return;
             }
             if (decision != io.github.samzhu.bot.usage.ConversationTitleAdmission.Decision.ALLOWED) {
-                jdbc.update("update conversation_title_work set state='FAILED' where conversation_id=? and state='CLAIMED'", conversationId);
+                jdbc.update("update conversation_title_work set state='FAILED', denial_reason=? where conversation_id=? and state='CLAIMED' and claimed_until>clock_timestamp()", decision.reason(), conversationId);
                 return;
             }
             if (expired.get() || Thread.currentThread().isInterrupted()) {

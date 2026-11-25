@@ -110,27 +110,62 @@ class EnvironmentSqlIntegrationTests {
         }
     }
 
+    @Test void initializationEnvironmentMismatchDoesNotPublish() throws Exception {
+        try (var pg = PostgresTestImage.container()) {
+            pg.start();
+            admin(pg, "mismatch-schema.log", "--bot.release.action=schema-only");
+            var resource = output.resolve("mismatch/db/initialization/prod.sql");
+            Files.createDirectories(resource.getParent());
+            try (var input = getClass().getResourceAsStream("/db/initialization/prod.sql")) {
+                assertNotNull(input);
+                Files.writeString(resource, new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)
+                        .replace("\"environment\": \"prod\"", "\"environment\": \"dev\""));
+            }
+            var process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                    "-cp", output.resolve("mismatch") + java.io.File.pathSeparator + System.getProperty("release.test.classpath"),
+                    ReleaseProvisioningApplication.class.getName(), "--spring.datasource.url=" + pg.getJdbcUrl(),
+                    "--spring.datasource.username=" + pg.getUsername(), "--spring.datasource.password=" + pg.getPassword(),
+                    "--bot.release.action=initialize-prod", "--bot.release.expected-jdbc-url=" + pg.getJdbcUrl())
+                    .redirectErrorStream(true).redirectOutput(output.resolve("mismatch.log").toFile()).start();
+            if (!process.waitFor(90, TimeUnit.SECONDS)) { process.destroyForcibly(); fail("admin timed out"); }
+            assertNotEquals(0, process.exitValue());
+            assertTrue(Files.readString(output.resolve("mismatch.log")).contains("Initialization environment mismatch"));
+            var jdbc = new JdbcTemplate(new DriverManagerDataSource(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword()));
+            assertEquals(0, jdbc.queryForObject("select count(*) from bot", Integer.class));
+            assertEquals(0, jdbc.queryForObject("select count(*) from pricing_catalog_revision", Integer.class));
+        }
+    }
+
     @Test void invalidCatalogPayloadsFailBeforePublishing() throws Exception {
         try (var pg = PostgresTestImage.container()) {
             pg.start();
             var jdbc = new JdbcTemplate(new DriverManagerDataSource(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword()));
             admin(pg, "validation-schema.log", "--bot.release.action=schema-only");
-            for (String failure : List.of("negative-rate", "missing-metadata", "overlap", "missing-rate")) {
+            for (String failure : List.of("negative-rate", "missing-metadata", "overlap", "missing-rate",
+                    "numeric-rate", "unknown-metadata", "empty-selection", "duplicate-selection", "unknown-environment")) {
                 var payload = productionPayload();
-                var entries = (com.fasterxml.jackson.databind.node.ArrayNode) payload.path("catalog").path("entries");
-                var first = (com.fasterxml.jackson.databind.node.ObjectNode) entries.get(0);
+                var entries = (com.fasterxml.jackson.databind.node.ObjectNode) payload.path("entries");
+                var first = (com.fasterxml.jackson.databind.node.ObjectNode) entries.path("gemini-2026");
                 switch (failure) {
                     case "negative-rate" -> ((com.fasterxml.jackson.databind.node.ObjectNode) first.path("rates")).put("input", "-1");
                     case "missing-metadata" -> first.remove("metadata");
-                    case "overlap" -> ((com.fasterxml.jackson.databind.node.ObjectNode) entries.get(1)).put("fromInclusive", "2026-12-01T00:00:00Z");
+                    case "overlap" -> ((com.fasterxml.jackson.databind.node.ObjectNode) entries.path("gemini-2027")).put("fromInclusive", "2026-12-01T00:00:00Z");
                     case "missing-rate" -> ((com.fasterxml.jackson.databind.node.ObjectNode) first.path("rates")).remove("output");
+                    case "numeric-rate" -> ((com.fasterxml.jackson.databind.node.ObjectNode) first.path("rates")).put("input", 0.75);
+                    case "unknown-metadata" -> ((com.fasterxml.jackson.databind.node.ObjectNode) first.path("metadata")).put("servicetier", "STANDARD");
+                    case "empty-selection" -> ((com.fasterxml.jackson.databind.node.ObjectNode) payload.path("environments").path("prod")).putArray("entries");
+                    case "duplicate-selection" -> ((com.fasterxml.jackson.databind.node.ArrayNode) payload.path("environments").path("prod").path("entries")).add("gemini-2026");
+                    case "unknown-environment" -> ((com.fasterxml.jackson.databind.node.ObjectNode) payload.path("environments")).putObject("production");
                     default -> throw new AssertionError(failure);
                 }
                 String expected = switch (failure) {
                     case "negative-rate" -> "Invalid catalog rate";
                     case "missing-metadata" -> "Invalid catalog metadata";
                     case "overlap" -> "Overlapping catalog entries";
-                    default -> "Missing required catalog rate";
+                    case "missing-rate" -> "Missing required catalog rate";
+                    case "numeric-rate" -> "Invalid catalog rate";
+                    case "unknown-metadata", "unknown-environment" -> "Invalid catalog fields";
+                    default -> "Invalid catalog selection";
                 };
                 assertTrue(adminWithPayload(pg, failure, payload).contains(expected), failure);
                 assertEquals(0, jdbc.queryForObject("select count(*) from bot", Integer.class));
@@ -150,7 +185,7 @@ class EnvironmentSqlIntegrationTests {
             String before = jdbc.queryForObject("select jsonb_agg(to_jsonb(e) order by e.price_revision)::text from pricing_catalog_entry e", String.class);
             for (String change : List.of("rate", "metadata")) {
                 var payload = productionPayload();
-                var first = payload.path("catalog").path("entries").get(0);
+                var first = payload.path("entries").path("gemini-2026");
                 if (change.equals("rate")) ((com.fasterxml.jackson.databind.node.ObjectNode) first.path("rates")).put("input", "9");
                 else ((com.fasterxml.jackson.databind.node.ObjectNode) first.path("metadata")).put("storageRate", "0.51");
                 assertTrue(adminWithPayload(pg, "changed-" + change, payload).contains("Catalog revision payload conflict"));
@@ -160,21 +195,59 @@ class EnvironmentSqlIntegrationTests {
         }
     }
 
+    @Test void duplicateYamlKeysAreRejectedBeforeWrites() throws Exception {
+        try (var pg = PostgresTestImage.container()) {
+            pg.start();
+            var jdbc = new JdbcTemplate(new DriverManagerDataSource(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword()));
+            admin(pg, "duplicate-schema.log", "--bot.release.action=schema-only");
+            try (var input = getClass().getResourceAsStream("/pricing/catalog.yaml")) {
+                assertNotNull(input);
+                String yaml = new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                assertTrue(adminWithYaml(pg, "duplicate", yaml.replace("  prod:\n", "  prod:\n    revision: duplicate\n")).contains("duplicate key"));
+            }
+            assertEquals(0, jdbc.queryForObject("select count(*) from bot", Integer.class));
+            assertEquals(0, jdbc.queryForObject("select count(*) from pricing_catalog_revision", Integer.class));
+        }
+    }
+
+    @Test void reorderingYamlObjectsKeepsPublishedCatalogUnchanged() throws Exception {
+        try (var pg = PostgresTestImage.container()) {
+            pg.start();
+            admin(pg, "reorder-schema.log", "--bot.release.action=schema-only");
+            admin(pg, "reorder-original.log", "--bot.release.action=initialize-prod", "--bot.release.expected-jdbc-url=" + pg.getJdbcUrl());
+            var jdbc = new JdbcTemplate(new DriverManagerDataSource(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword()));
+            String before = jdbc.queryForObject("select jsonb_agg(to_jsonb(e) order by e.price_revision)::text from pricing_catalog_entry e", String.class);
+            var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            mapper.enable(com.fasterxml.jackson.databind.SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
+            Object reordered = mapper.convertValue(productionPayload(), Object.class);
+            adminWithYaml(pg, "reordered", mapper.writeValueAsString(reordered), true);
+            assertEquals(1, jdbc.queryForObject("select count(*) from pricing_catalog_revision", Integer.class));
+            assertEquals(before, jdbc.queryForObject("select jsonb_agg(to_jsonb(e) order by e.price_revision)::text from pricing_catalog_entry e", String.class));
+        }
+    }
+
     private com.fasterxml.jackson.databind.node.ObjectNode productionPayload() throws Exception {
-        try (var input = getClass().getResourceAsStream("/db/initialization/prod.sql")) {
+        try (var input = getClass().getResourceAsStream("/pricing/catalog.yaml")) {
             assertNotNull(input);
-            String sql = new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-            return (com.fasterxml.jackson.databind.node.ObjectNode) new com.fasterxml.jackson.databind.ObjectMapper()
-                    .readTree(sql.substring(sql.indexOf("$bootstrap$") + "$bootstrap$".length(), sql.lastIndexOf("$bootstrap$")));
+            var options = new org.yaml.snakeyaml.LoaderOptions();
+            Object data = new org.yaml.snakeyaml.Yaml(new org.yaml.snakeyaml.constructor.SafeConstructor(options)).load(input);
+            return new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(data);
         }
     }
 
     private String adminWithPayload(PostgreSQLContainer pg, String name, com.fasterxml.jackson.databind.node.ObjectNode payload) throws Exception {
+        return adminWithYaml(pg, name, new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(payload));
+    }
+
+    private String adminWithYaml(PostgreSQLContainer pg, String name, String yaml) throws Exception {
+        return adminWithYaml(pg, name, yaml, false);
+    }
+
+    private String adminWithYaml(PostgreSQLContainer pg, String name, String yaml, boolean succeeds) throws Exception {
         var directory = output.resolve(name);
-        var resource = directory.resolve("db/initialization/prod.sql");
+        var resource = directory.resolve("pricing/catalog.yaml");
         Files.createDirectories(resource.getParent());
-        Files.writeString(resource, "INSERT INTO pg_temp.release_initialization (payload) VALUES ($bootstrap$\n"
-                + new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(payload) + "\n$bootstrap$::jsonb);\n");
+        Files.writeString(resource, yaml);
         var command = new ArrayList<String>();
         command.add(Path.of(System.getProperty("java.home"), "bin", "java").toString());
         command.add("-cp"); command.add(directory + java.io.File.pathSeparator + System.getProperty("release.test.classpath"));
@@ -188,7 +261,8 @@ class EnvironmentSqlIntegrationTests {
         var process = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(log.toFile()).start();
         if (!process.waitFor(90, TimeUnit.SECONDS)) { process.destroyForcibly(); fail("admin timed out: " + name); }
         String text = Files.readString(log);
-        assertNotEquals(0, process.exitValue(), text);
+        if (succeeds) assertEquals(0, process.exitValue(), text);
+        else assertNotEquals(0, process.exitValue(), text);
         return text;
     }
 

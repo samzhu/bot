@@ -21,6 +21,7 @@ class PostgresCommentsIntegrationTests {
     static void assertReleaseReceipts(JdbcTemplate db) {
         var expected = new java.util.ArrayList<>(HISTORICAL_IDS);
         expected.add("V17__postgres_comments.sql");
+        expected.add("V18__title_denial_reason.sql");
         var identities = expected.stream().map(id -> id + "|bot|db/changelog/db.changelog-master.yaml|EXECUTED")
                 .sorted().toList();
         assertEquals(identities, db.queryForList("""

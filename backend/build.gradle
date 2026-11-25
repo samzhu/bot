@@ -161,6 +161,7 @@ sourceSets.test.runtimeClasspath += sourceSets.admin.output + sourceSets.dev.out
     mainClass = 'io.github.samzhu.bot.bootstrap.GenerateReleaseMetadata'
     args prodMetadata.get().asFile.absolutePath, devMetadata.get().asFile.absolutePath
     inputs.files(fileTree('src/admin/resources/db'))
+    inputs.files(fileTree('src/admin/resources/pricing'))
     outputs.dirs(prodMetadata, devMetadata)
  }
 sourceSets.main.output.dir([builtBy: generateReleaseMetadata], prodMetadata)
