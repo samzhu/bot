@@ -33,21 +33,24 @@ Gemini needs a key. If `backend/config/application-secrets.properties` already e
 
 Privately set `bot-google-api-key` and keep permissions at `0600`; do not print the key or put it in command history. From `backend`, Spring Boot loads `config/application-dev.yaml`, whose guarded optional import reads that file. Missing or blank keys fail at startup for Gemini. OS environment variables, Java system properties and command-line properties take precedence over config data. Do not commit secrets.
 
-### Backend Development
+### Start the local development environment
 
-With Java 25 and Docker running, start the backend from the repository root (or invoke the script by path from another directory):
+With Java 25, Node.js 26, and Docker available, install the frontend dependencies once, then run the launcher from the repository root:
 
 ```bash
+(cd frontend && TPLANE_TELEMETRY_DISABLED=1 npm ci --ignore-scripts)
 ./dev.sh
 ```
 
-The backend-only launcher selects the `dev` profile and defaults `SPRING_AI_MODEL_CHAT` to `google-genai` when the variable is unset. It uses the existing Gemini key file described above. To use local Ollama instead:
+The launcher waits for the backend on `127.0.0.1:8080` to report readiness before starting Angular. Open `http://127.0.0.1:4200/`. Press Ctrl+C to stop both application processes. If either exits, the launcher stops the other.
+
+The backend selects the `dev` profile and defaults `SPRING_AI_MODEL_CHAT` to `google-genai` when the variable is unset. It uses the existing Gemini key file described above. To use local Ollama instead:
 
 ```bash
 SPRING_AI_MODEL_CHAT=ollama ./dev.sh
 ```
 
-The launcher accepts no arguments; use `SPRING_AI_MODEL_CHAT` to select a model. An explicitly set selector is passed through to Spring, including invalid or empty values. The launcher runs in the backend directory, keeps output in the terminal, and forwards process control through `exec`. For other Spring configuration, run Gradle directly from `backend`; for example:
+The launcher accepts no arguments. An explicitly set model selector is passed through to Spring, including invalid or empty values. To run the backend on its own with other Spring configuration, invoke Gradle from `backend`:
 
 ```bash
 cd backend

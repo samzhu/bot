@@ -6,6 +6,5 @@ if [ "$#" -ne 0 ]; then
     exit 2
 fi
 
-CDPATH= cd "$(dirname "$0")/backend"
-export SPRING_AI_MODEL_CHAT="${SPRING_AI_MODEL_CHAT-google-genai}"
-exec ./gradlew bootRun '--args=--spring.profiles.active=dev'
+CDPATH= cd "$(dirname "$0")"
+exec node ./scripts/dev.mjs

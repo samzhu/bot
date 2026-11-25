@@ -149,7 +149,8 @@ configurations {
 sourceSets.admin.compileClasspath += sourceSets.main.output.classesDirs
 sourceSets.admin.runtimeClasspath += sourceSets.main.output
 sourceSets.dev.compileClasspath += sourceSets.main.output.classesDirs + sourceSets.admin.output.classesDirs
-sourceSets.dev.runtimeClasspath += sourceSets.main.output + sourceSets.admin.output
+// Boot's default classpath:graphql/**/ lookup needs app resources before the GraphQL Java JAR.
+sourceSets.dev.runtimeClasspath = sourceSets.main.output + sourceSets.dev.runtimeClasspath + sourceSets.admin.output
 sourceSets.test.compileClasspath += sourceSets.admin.output + sourceSets.dev.output
 sourceSets.test.runtimeClasspath += sourceSets.admin.output + sourceSets.dev.output
 
