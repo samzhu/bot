@@ -102,7 +102,7 @@
 4. **AI Provider 與配置封裝**
    - 介面與配置邊界：具替換彈性之 AI Model/Provider 透過共用介面與組合配置封裝，適合時選用底層 module 取代全包 starter，實作細節收斂於配置邊界。
    - 避免冗餘封裝：無第二種實作需求時，不預先建立無實質效益的空介面；非必要不強迫移除所有 starter。
-   - 排除配置查證：若需使用 `autoconfigure.exclude`，須先查閱官方與實際自動配置機制，並於程式碼中明確註解排除理由。
+   - 後端自動配置：先查對應版本的官方文件，優先使用功能提供的設定。確需排除自動配置時，在適用環境的 Spring 配置使用 `spring.autoconfigure.exclude`，並在配置旁註明原因。Java 自動配置註解禁止硬編碼 `exclude` 或 `excludeName`。
 
 5. **前端**：規劃、修改或驗收 `frontend/` 時，先讀[前端開發守則](frontend/DEVELOPMENT.md)，依其中的模組邊界、版面約定與建置及瀏覽器驗收執行。
 
