@@ -21,9 +21,20 @@ public class ReleaseProvisioner {
 
     @Transactional(rollbackFor = Exception.class)
     public void run() throws Exception {
-        jdbc.execute("select pg_advisory_xact_lock(7620261124)");
+        lockRelease();
         migration.run();
         bot.run(null);
         catalog.publishConfigured();
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public void migrateSchema() throws Exception {
+        lockRelease();
+        migration.run();
+    }
+
+    private void lockRelease() {
+        // The same transaction-scoped lock protects preflight and Liquibase in both admin modes.
+        jdbc.execute("select pg_advisory_xact_lock(7620261124)");
     }
 }

@@ -105,6 +105,15 @@ cd backend
 
 Run the admin image once against the release PostgreSQL with the same `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD`, and catalog configuration as the service. Supply credentials through the deployment environment. A successful exit applies pending versioned migrations, ensures the default Bot exists, and publishes the configured catalog using its existing validation and conflict checks. Re-running preserves existing records; a conflicting catalog revision fails the release. Start service instances only after the command succeeds. An unprepared schema, missing default Bot, or missing published catalog prevents service readiness. Investigate the reported failure and rerun the admin process before starting the service.
 
+To run only schema migration against the configured PostgreSQL, use the same release admin entry point with an explicit action:
+
+```bash
+cd backend
+./gradlew bootRun -PreleaseAdmin --args='--bot.release.action=schema-only'
+```
+
+A successful exit means the schema is migrated; this action does not create the default Bot or publish the pricing catalog. Run the existing admin command without the action to provision those reference records before starting the service. Invalid, empty or repeated action options fail before database writes. Supply connection settings and credentials through the deployment environment as for the existing admin command.
+
 For a database fully provisioned by release #76, the admin command checks the exact legacy filename receipts and representative schema, then uses Liquibase to register only the verified historical changes before applying newer changes. The legacy `schema_version` remains as an audit record. A partial, unknown or mismatched baseline is refused; investigate the diagnostic and preserve the database rather than editing receipts or clearing checksums. The old filename receipts do not prove historical SQL checksums.
 
 For the initial cutover from #76:

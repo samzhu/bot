@@ -9,10 +9,26 @@ public final class ReleaseProvisioningApplication {
     private ReleaseProvisioningApplication() {}
 
     public static void main(String[] args) throws Exception {
+        boolean schemaOnly = schemaOnly(args);
         var app = new SpringApplication(ReleaseConfiguration.class);
         app.setWebApplicationType(WebApplicationType.NONE);
         try (var context = app.run(args)) {
-            context.getBean(ReleaseProvisioner.class).run();
+            var provisioner = context.getBean(ReleaseProvisioner.class);
+            if (schemaOnly) provisioner.migrateSchema();
+            else provisioner.run();
         }
+    }
+
+    private static boolean schemaOnly(String[] args) {
+        String prefix = "--bot.release.action";
+        String action = null;
+        for (String arg : args) {
+            if (!arg.equals(prefix) && !arg.startsWith(prefix + "=")) continue;
+            if (action != null || !arg.equals(prefix + "=schema-only")) {
+                throw new IllegalArgumentException("Invalid or repeated bot.release.action; expected schema-only");
+            }
+            action = "schema-only";
+        }
+        return action != null;
     }
 }
