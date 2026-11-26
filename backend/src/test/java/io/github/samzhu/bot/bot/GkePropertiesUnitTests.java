@@ -9,12 +9,8 @@ import static org.junit.jupiter.api.Assertions.*;
 class GkePropertiesUnitTests {
 
     @Test
-    @DisplayName("GkeProperties correctly binds SIMULATED and OFF enum values")
-    void testValidBindings() {
-        GkeProperties simProps = new GkeProperties(GkeProperties.ExecutionMode.SIMULATED);
-        assertTrue(simProps.isSimulated());
-        assertEquals(GkeProperties.ExecutionMode.SIMULATED, simProps.getExecutionMode());
-
+    @DisplayName("GkeProperties preserves an explicit OFF mode")
+    void testExplicitOffMode() {
         GkeProperties offProps = new GkeProperties(GkeProperties.ExecutionMode.OFF);
         assertFalse(offProps.isSimulated());
         assertEquals(GkeProperties.ExecutionMode.OFF, offProps.getExecutionMode());

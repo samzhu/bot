@@ -29,6 +29,8 @@ cd backend
 
 新增或遷入一般後端功能整合測試時，在測試類別標註 `@BackendIntegrationTest`。啟動冒煙、對話與 Run、一般用量與成本案例已採用共用環境。既有專項仍有其他啟動設定，全套收斂與效能驗收在 #95 追蹤。 [共用測試註解](src/test/java/io/github/samzhu/bot/BackendIntegrationTest.java) · [#92](https://github.com/samzhu/bot/issues/92) · [#93](https://github.com/samzhu/bot/issues/93) · [#94](https://github.com/samzhu/bot/issues/94) · [#95](https://github.com/samzhu/bot/issues/95)
 
+本機開發與預設回歸直接驗證一般 Bot 合約及 GKE 未連線行為，無須啟用 GKE 模擬器。各部署位置沿用同一應用套件、部署設定介面與應用程式路徑，服務連線等設定由執行環境注入。2026-11-26 查核。 [Twelve-Factor Config](https://12factor.net/config) · [Dev/prod parity](https://12factor.net/dev-prod-parity)
+
 ### 測哪一層
 
 - 純計算及輸入輸出規則直接用 JUnit 驗證。需要驗證公開 API、交易、SQL 或持久狀態時，從真 HTTP 呼叫 GraphQL 或 AG-UI/SSE，並視需要查核真 PostgreSQL 的結果。

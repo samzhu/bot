@@ -10,7 +10,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.context.TestPropertySource;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.net.URI;
@@ -37,6 +36,12 @@ public class GkeBotEditAndSearchIntegrationTests {
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
+    @Autowired
+    private TransactionTemplate transactions;
+
+    @Autowired
+    private BotOperations botOperations;
+
     private final BotCaseRows bots = new BotCaseRows();
 
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -54,19 +59,173 @@ public class GkeBotEditAndSearchIntegrationTests {
     }
 
     private JsonNode executeGraphQL(String payload) throws Exception {
-        return executeGraphQL(httpClient, objectMapper, port, payload);
-    }
-
-    static JsonNode executeGraphQL(HttpClient client, ObjectMapper mapper, int port, String payload) throws Exception {
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create("http://127.0.0.1:" + port + "/graphql"))
                 .timeout(Duration.ofSeconds(5))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(payload))
                 .build();
-        HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
         assertEquals(200, resp.statusCode());
-        return mapper.readTree(resp.body());
+        return objectMapper.readTree(resp.body());
+    }
+
+    @Test
+    void testDefaultLocalBotQuery() throws Exception {
+        var result = executeGraphQL(objectMapper.writeValueAsString(Map.of("query", """
+                { defaultLocalBot { id target canChat connectionStatus executionMode } }
+                """)));
+        assertFalse(result.has("errors"), result.toString());
+        var bot = result.path("data").path("defaultLocalBot");
+        assertEquals("bot-general", bot.path("id").asText());
+        assertEquals("LOCAL", bot.path("target").asText());
+        assertTrue(bot.path("canChat").asBoolean());
+        assertEquals("NOT_APPLICABLE", bot.path("connectionStatus").asText());
+        assertEquals("LOCAL", bot.path("executionMode").asText());
+    }
+
+    @Test
+    void testDefaultLocalBotReturnsNullWhenGeneralAbsent() {
+        String otherLocal = bots.id("secondary-local");
+        // Keep the reference row visible to HTTP clients while exercising the absence contract.
+        transactions.executeWithoutResult(status -> {
+            status.setRollbackOnly();
+            jdbcTemplate.update("INSERT INTO bot (id, name, target) VALUES (?, 'Secondary local', 'LOCAL')",
+                    otherLocal);
+            assertEquals(1, jdbcTemplate.update("DELETE FROM bot WHERE id = 'bot-general'"));
+            assertTrue(botOperations.findById(otherLocal, "dev-user").isPresent());
+            assertTrue(botOperations.findDefaultLocalBot("dev-user").isEmpty());
+        });
+    }
+
+    @Test
+    void testCreateBot_ValidationRejections() throws Exception {
+        String marker = bots.id("create");
+        String name = "x".repeat(100);
+        String description = "  " + marker + "  ";
+        String instructions = "  Preserve raw instructions spaces  ";
+        try {
+            var accepted = createBot("   " + name + "   ", description, instructions);
+            assertFalse(accepted.has("errors"), accepted.toString());
+            var created = accepted.path("data").path("createBot");
+            String id = created.path("id").asText();
+            assertFalse(id.isBlank(), accepted.toString());
+            assertEquals(name, created.path("name").asText());
+            assertEquals(description, created.path("description").asText());
+            assertEquals(instructions, created.path("instructions").asText());
+            assertEquals("GKE_REMOTE", created.path("target").asText());
+            assertEquals("NOT_CONNECTED", created.path("connectionStatus").asText());
+            assertEquals("UNAVAILABLE", created.path("executionMode").asText());
+            assertTrue(created.path("canChat").isBoolean(), accepted.toString());
+            assertFalse(created.path("canChat").asBoolean());
+            assertEquals("dev-user", jdbcTemplate.queryForObject("SELECT owner_id FROM bot WHERE id = ?",
+                    String.class, id));
+
+            assertCreateBotRejected("   " + "y".repeat(101) + "   ", description, instructions);
+            assertCreateBotRejected("   ", description, instructions);
+            assertCreateBotRejected("Valid Name", marker + "b".repeat(2001 - marker.length()), instructions);
+            assertCreateBotRejected("Valid Name", description, "c".repeat(10001));
+
+            assertEquals(List.of(id), jdbcTemplate.queryForList("""
+                    SELECT id FROM bot WHERE strpos(description, ?) > 0
+                    """, String.class, marker));
+        } finally {
+            // The mutation assigns the ID, so the case marker also finds rows from a rejected or failed response.
+            jdbcTemplate.update("DELETE FROM bot WHERE strpos(description, ?) > 0", marker);
+        }
+    }
+
+    private void assertCreateBotRejected(String name, String description, String instructions) throws Exception {
+        var result = createBot(name, description, instructions);
+        var errors = result.path("errors");
+        assertTrue(errors.isArray() && !errors.isEmpty(), result.toString());
+    }
+
+    private JsonNode createBot(String name, String description, String instructions) throws Exception {
+        return executeGraphQL(objectMapper.writeValueAsString(Map.of(
+                "query", """
+                        mutation CreateBot($input: CreateBotInput!) {
+                            createBot(input: $input) { id name description instructions target connectionStatus executionMode canChat }
+                        }
+                        """,
+                "variables", Map.of("input", Map.of(
+                        "name", name, "description", description, "instructions", instructions)))));
+    }
+
+    @Test
+    void testBotVisibilityIsolation() throws Exception {
+        String foreign = bots.ownedId("foreign-visible");
+        String owned = bots.ownedId("caller-visible");
+        String search = bots.id("visibility");
+        jdbcTemplate.update("""
+                INSERT INTO bot (id, name, target, owner_id)
+                VALUES (?, ?, 'GKE_REMOTE', ?), (?, ?, 'GKE_REMOTE', 'dev-user')
+                """, foreign, search + " foreign", UUID.randomUUID().toString(), owned, search + " owned");
+        var result = executeGraphQL(objectMapper.writeValueAsString(Map.of(
+                "query", """
+                        query Visibility($foreign: ID!, $owned: ID!, $search: String!) {
+                            foreign: bot(id: $foreign) { id }
+                            owned: bot(id: $owned) { id }
+                            local: bot(id: "bot-general") { id target }
+                            bots { id }
+                            matches: bots(search: $search, limit: 2) { id }
+                        }
+                        """,
+                "variables", Map.of("foreign", foreign, "owned", owned, "search", search))));
+        assertFalse(result.has("errors"), result.toString());
+        var data = result.path("data");
+        assertTrue(data.path("foreign").isNull(), result.toString());
+        assertEquals(owned, data.path("owned").path("id").asText());
+        assertEquals("bot-general", data.path("local").path("id").asText());
+        assertEquals("LOCAL", data.path("local").path("target").asText());
+        assertTrue(data.path("bots").isArray(), result.toString());
+        assertFalse(data.path("bots").findValuesAsText("id").contains(foreign));
+        assertTrue(data.path("matches").isArray(), result.toString());
+        assertEquals(List.of(owned), data.path("matches").findValuesAsText("id"));
+    }
+
+    @Test
+    void testHistoryBinding_ConversationBotIdPreserved() throws Exception {
+        var fixture = new UsageCaseData(jdbcTemplate, transactions);
+        String workspace = "gke-history-" + UUID.randomUUID();
+        String bot = bots.ownedId("history");
+        String conversation = UUID.randomUUID().toString();
+        try {
+            fixture.createWorkspace(workspace, "dev-user");
+            jdbcTemplate.update("""
+                    INSERT INTO bot (id, name, target, owner_id)
+                    VALUES (?, 'Historical Bot', 'GKE_REMOTE', 'dev-user')
+                    """, bot);
+            // Existing history stays readable while the disconnected Bot cannot start new conversations.
+            jdbcTemplate.update("""
+                    INSERT INTO conversation (id, bot_id, title, user_id, workspace_id)
+                    VALUES (?, ?, 'Historical conversation', 'dev-user', ?)
+                    """, conversation, bot, workspace);
+
+            var result = executeGraphQL(objectMapper.writeValueAsString(Map.of(
+                    "query", """
+                            mutation UpdateBot($input: UpdateBotInput!) {
+                                updateBot(input: $input) { id name }
+                            }
+                            """,
+                    "variables", Map.of("input", Map.of("id", bot, "name", "Renamed Historical Bot")))));
+            assertFalse(result.has("errors"), result.toString());
+            var updated = result.path("data").path("updateBot");
+            assertEquals(bot, updated.path("id").asText());
+            assertEquals("Renamed Historical Bot", updated.path("name").asText());
+
+            var history = executeGraphQL(objectMapper.writeValueAsString(Map.of(
+                    "query", "query History($id: ID!) { conversation(id: $id) { id botId } }",
+                    "variables", Map.of("id", conversation))));
+            assertFalse(history.has("errors"), history.toString());
+            var stored = history.path("data").path("conversation");
+            assertEquals(conversation, stored.path("id").asText());
+            assertEquals(bot, stored.path("botId").asText());
+            assertEquals(bot, jdbcTemplate.queryForObject("SELECT bot_id FROM conversation WHERE id = ?",
+                    String.class, conversation));
+        } finally {
+            fixture.cleanUp();
+        }
     }
 
     @Test
@@ -627,87 +786,5 @@ public class GkeBotEditAndSearchIntegrationTests {
         assertEquals(4, localRows);
         assertEquals("LOCAL", jdbcTemplate.queryForObject(
                 "SELECT target FROM bot WHERE id = 'bot-general'", String.class));
-    }
-}
-
-/** Successful creation of a conversation with a disconnected GKE Bot requires SIMULATED execution mode. */
-@BackendIntegrationTest
-@TestPropertySource(properties = "bot.gke.execution-mode=SIMULATED")
-class GkeBotHistoryBindingIntegrationTests {
-    @LocalServerPort private int port;
-    @Autowired private JdbcTemplate jdbcTemplate;
-    @Autowired private TransactionTemplate transactions;
-
-    private final ObjectMapper objectMapper = new ObjectMapper();
-    private final HttpClient httpClient = HttpClient.newHttpClient();
-    private final BotCaseRows bots = new BotCaseRows();
-    private UsageCaseData data;
-
-    @AfterEach
-    void cleanUp() throws InterruptedException {
-        try {
-            if (data != null) {
-                data.cleanUp();
-            }
-            bots.deleteFrom(jdbcTemplate);
-        } finally {
-            httpClient.close();
-        }
-    }
-
-    private JsonNode executeGraphQL(String payload) throws Exception {
-        return GkeBotEditAndSearchIntegrationTests.executeGraphQL(httpClient, objectMapper, port, payload);
-    }
-
-    @Test
-    @DisplayName("5. History Binding: conversation.bot_id remains permanently associated after bot update")
-    void testHistoryBinding_ConversationBotIdPreserved() throws Exception {
-        data = new UsageCaseData(jdbcTemplate, transactions);
-        String workspaceId = "gke-history-" + UUID.randomUUID();
-        data.createWorkspace(workspaceId, "dev-user");
-        String botId = bots.ownedId("history");
-        jdbcTemplate.update("""
-            INSERT INTO bot (id, name, target, description, instructions, owner_id, created_at, updated_at)
-            VALUES (?, 'Target Bot', 'GKE_REMOTE', 'Desc', 'Instr', 'dev-user', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        """, botId);
-
-        // Create a conversation bound to this bot
-        String createConvMutation = """
-            mutation CreateConversation($botId: ID!, $title: String, $workspaceId: ID!) {
-              createConversation(botId: $botId, title: $title, workspaceId: $workspaceId) {
-                id
-                botId
-                title
-              }
-            }
-        """;
-        JsonNode convRes = executeGraphQL(objectMapper.writeValueAsString(Map.of(
-                "query", createConvMutation,
-                "variables", Map.of("botId", botId, "title", "Test Conversation", "workspaceId", workspaceId)
-        )));
-        assertFalse(convRes.has("errors"), "Conversation creation must succeed: " + convRes);
-        String convId = convRes.path("data").path("createConversation").path("id").asText();
-        assertEquals(botId, convRes.path("data").path("createConversation").path("botId").asText());
-
-        // Update the bot
-        String updateMutation = """
-            mutation UpdateBot($input: UpdateBotInput!) {
-              updateBot(input: $input) {
-                id
-                name
-              }
-            }
-        """;
-        JsonNode update = executeGraphQL(objectMapper.writeValueAsString(Map.of(
-                "query", updateMutation,
-                "variables", Map.of("input", Map.of("id", botId, "name", "Renamed Target Bot"))
-        )));
-
-        assertFalse(update.has("errors"), update.toString());
-        assertEquals("Renamed Target Bot", update.path("data").path("updateBot").path("name").asText());
-
-        // Verify conversation still points to the same botId
-        Map<String, Object> convInDb = jdbcTemplate.queryForMap("SELECT * FROM conversation WHERE id = ?", convId);
-        assertEquals(botId, convInDb.get("bot_id"), "conversation.bot_id must remain strictly unchanged");
     }
 }
