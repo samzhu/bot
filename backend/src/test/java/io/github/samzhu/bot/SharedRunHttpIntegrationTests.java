@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.genai.types.GenerateContentResponseUsageMetadata;
+import com.zaxxer.hikari.HikariDataSource;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -21,12 +22,14 @@ import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -56,6 +59,7 @@ class SharedRunHttpIntegrationTests {
 
     @LocalServerPort int port;
     @Autowired JdbcTemplate jdbc;
+    @Autowired DataSource dataSource;
     @Autowired TransactionTemplate transactions;
     @Autowired BackendTestChatModel model;
     @Autowired SessionService sessions;
@@ -217,7 +221,7 @@ class SharedRunHttpIntegrationTests {
                 .doFinally(signal -> disposed.complete(null)));
         try {
             var open = openStream(path, legacyInput("Cancel prompt"), "message.delta");
-            String run = open.delta().get(10, TimeUnit.SECONDS).data().path("runId").asText();
+            String run = open.event().get(10, TimeUnit.SECONDS).data().path("runId").asText();
             assertThat(run).isNotBlank();
             var conflict = post(path, legacyInput("Parallel prompt"));
             assertThat(conflict.statusCode()).isEqualTo(409);
@@ -258,7 +262,7 @@ class SharedRunHttpIntegrationTests {
         model.streamWith(Flux.concat(Flux.just(chunk("Run 1 ")), pending.asMono()));
         try {
             var original = openStream(path, legacyInput("Active Run 1"), "message.delta");
-            String run = original.delta().get(10, TimeUnit.SECONDS).data().path("runId").asText();
+            String run = original.event().get(10, TimeUnit.SECONDS).data().path("runId").asText();
 
             var conflict = post(path, legacyInput("Contender"));
             assertThat(conflict.statusCode()).isEqualTo(409);
@@ -294,7 +298,7 @@ class SharedRunHttpIntegrationTests {
                 .doFinally(signal -> disposed.complete(null)));
         try {
             var open = openStream(path, legacyInput("Race prompt"), "message.delta");
-            String run = open.delta().get(10, TimeUnit.SECONDS).data().path("runId").asText();
+            String run = open.event().get(10, TimeUnit.SECONDS).data().path("runId").asText();
             assertThat(run).isNotBlank();
             String cancelPath = "/api/runs/" + run + "/cancel";
             var contenders = race(pending::tryEmitEmpty, () -> post(cancelPath, Map.of()));
@@ -421,6 +425,160 @@ class SharedRunHttpIntegrationTests {
     }
 
     @Test
+    void legacyGraphQlListsDefaultLocalBotAndReadsNewConversationHistory() throws Exception {
+        String conversation = conversation();
+        var response = post("/graphql", Map.of("query", """
+                query($id: ID!) {
+                    bots(limit: 10, offset: 0) { id name target }
+                    defaultLocalBot { id name target }
+                    conversation(id: $id) {
+                        id title
+                        messages(limit: 5, offset: 0) { id }
+                        runs(limit: 5, offset: 0) { id }
+                    }
+                }
+                """, "variables", Map.of("id", conversation)));
+        assertThat(response.statusCode()).isEqualTo(200);
+        var result = json.readTree(response.body());
+        assertThat(result.has("errors")).isFalse();
+        var data = result.path("data");
+        assertThat(data.path("bots").isArray()).isTrue();
+        assertThat(data.path("bots").findValuesAsText("id")).contains("bot-general");
+        assertThat(data.path("defaultLocalBot").path("id").asText()).isEqualTo("bot-general");
+        assertThat(data.path("defaultLocalBot").path("target").asText()).isEqualTo("LOCAL");
+        var created = data.path("conversation");
+        assertThat(created.path("id").asText()).isEqualTo(conversation);
+        assertThat(created.path("messages").isArray()).isTrue();
+        assertThat(created.path("messages").size()).isZero();
+        assertThat(created.path("runs").isArray()).isTrue();
+        assertThat(created.path("runs").size()).isZero();
+    }
+
+    @Test
+    void cancellationWinsBeforeLateModelCompletion() throws Exception {
+        String conversation = conversation();
+        var held = holdModelAfter("Partial delta cancel first");
+        try {
+            var open = openStream(legacyPath(conversation), legacyInput("Cancel first prompt"), "message.delta");
+            String run = open.event().get(10, TimeUnit.SECONDS).data().path("runId").asText();
+            assertCancel(run, "CANCELLED", true);
+            held.pending().tryEmitEmpty();
+
+            assertThat(onlyLegacyTerminal(open.finished().get(10, TimeUnit.SECONDS)).name()).isEqualTo("run.cancelled");
+            assertThat(runStatus(run)).isEqualTo("CANCELLED");
+            assertThat(sessions.getActiveMessages(conversation)).isEmpty();
+            assertCancel(run, "CANCELLED", true);
+            held.disposed().get(10, TimeUnit.SECONDS);
+        } finally {
+            held.pending().tryEmitEmpty();
+        }
+    }
+
+    @Test
+    void completionWinsBeforeLateCancellation() throws Exception {
+        String conversation = conversation();
+        var held = holdModelAfter("Full response part 1");
+        try {
+            var open = openStream(legacyPath(conversation), legacyInput("Complete first prompt"), "message.delta");
+            String run = open.event().get(10, TimeUnit.SECONDS).data().path("runId").asText();
+            assertThat(held.pending().tryEmitEmpty()).isEqualTo(Sinks.EmitResult.OK);
+            assertThat(onlyLegacyTerminal(open.finished().get(10, TimeUnit.SECONDS)).name()).isEqualTo("run.completed");
+            assertThat(runStatus(run)).isEqualTo("COMPLETED");
+
+            assertCancel(run, "COMPLETED", false);
+            assertThat(sessions.getActiveMessages(conversation)).extracting(message -> message.getText())
+                    .containsExactly("Complete first prompt", "Full response part 1");
+            assertCancel(run, "COMPLETED", false);
+            assertThat(runStatus(run)).isEqualTo("COMPLETED");
+            held.disposed().get(10, TimeUnit.SECONDS);
+        } finally {
+            held.pending().tryEmitEmpty();
+        }
+    }
+
+    @Test
+    void stalledStreamReleasesPostgresConnectionsForConcurrentQueries() throws Exception {
+        String conversation = conversation();
+        var held = holdModelAfter("Partial reply");
+        try {
+            var open = openStream(legacyPath(conversation), legacyInput("Hold while querying"), "message.delta");
+            open.event().get(10, TimeUnit.SECONDS);
+            var pool = dataSource.unwrap(HikariDataSource.class).getHikariPoolMXBean();
+            assertThat(pool).isNotNull();
+            assertThat(pool.getActiveConnections()).isZero();
+            assertThat(idleTransactions()).isZero();
+
+            Callable<String> readConversationBot = () -> jdbc.queryForObject("""
+                    select b.id from conversation c join bot b on b.id = c.bot_id
+                    where c.workspace_id = ? and c.id = ?
+                    """, String.class, workspace, conversation);
+            try (var workers = Executors.newFixedThreadPool(10)) {
+                var queries = workers.invokeAll(java.util.Collections.nCopies(50, readConversationBot), 10, TimeUnit.SECONDS);
+                for (var query : queries) {
+                    assertThat(query.get()).isEqualTo("bot-general");
+                }
+            }
+            assertThat(pool.getActiveConnections()).isZero();
+            assertThat(idleTransactions()).isZero();
+            assertThat(open.finished()).isNotDone();
+
+            assertThat(held.pending().tryEmitValue(usageChunk(" finished"))).isEqualTo(Sinks.EmitResult.OK);
+            assertThat(onlyLegacyTerminal(open.finished().get(10, TimeUnit.SECONDS)).name()).isEqualTo("run.completed");
+            held.disposed().get(10, TimeUnit.SECONDS);
+        } finally {
+            held.pending().tryEmitEmpty();
+        }
+    }
+
+    @Test
+    void blockingModelSubscriptionStillAllowsSseStartAndCancellation() throws Exception {
+        String conversation = conversation();
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var disposed = new CountDownLatch(1);
+        var exited = new CountDownLatch(1);
+        // A synchronous generator blocks the subscribing thread like an SDK iterator waiting for bytes.
+        model.streamWith(Flux.<ChatResponse>generate(sink -> {
+            entered.countDown();
+            try {
+                if (!release.await(30, TimeUnit.SECONDS)) {
+                    sink.error(new IllegalStateException("Blocked test model was not released"));
+                    return;
+                }
+                sink.complete();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                sink.complete();
+            } finally {
+                exited.countDown();
+            }
+        }).doOnCancel(disposed::countDown));
+
+        try {
+            var open = openStream(legacyPath(conversation), legacyInput("Blocking model"), "run.started");
+            assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
+            var started = open.event().get(10, TimeUnit.SECONDS);
+            assertThat(started.data().path("seq").asInt()).isEqualTo(1);
+            String run = started.data().path("runId").asText();
+            assertThat(run).isNotBlank();
+            assertThat(exited.getCount()).isEqualTo(1);
+
+            assertCancel(run, "CANCELLED", true);
+            assertThat(disposed.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(onlyLegacyTerminal(open.finished().get(10, TimeUnit.SECONDS)).name()).isEqualTo("run.cancelled");
+            assertThat(runStatus(run)).isEqualTo("CANCELLED");
+            assertThat(jdbc.queryForList("select interrupted from message where run_id = ? and role = 'ASSISTANT'",
+                    Boolean.class, run)).allMatch(Boolean.TRUE::equals);
+            assertThat(model.invocations()).isEqualTo(1);
+        } finally {
+            release.countDown();
+            if (entered.getCount() == 0) {
+                assertThat(exited.await(10, TimeUnit.SECONDS)).isTrue();
+            }
+        }
+    }
+
+    @Test
     void legacyRunValidatesPayloadAndHidesForeignConversation() throws Exception {
         String conversation = conversation();
         String path = legacyPath(conversation);
@@ -434,7 +592,7 @@ class SharedRunHttpIntegrationTests {
         model.streamWith(Flux.concat(Flux.just(usageChunk("Owned reply")), pending.asMono()));
         try {
             var open = openStream(path, legacyInput("Authorized"), "message.delta");
-            String run = open.delta().get(10, TimeUnit.SECONDS).data().path("runId").asText();
+            String run = open.event().get(10, TimeUnit.SECONDS).data().path("runId").asText();
             jdbc.update("update conversation set user_id = 'another-owner' where id = ? and workspace_id = ?", conversation, workspace);
             var denied = post(path, legacyInput("Unauthorized"));
             var unknown = post(legacyPath(UUID.randomUUID().toString()), legacyInput("Unknown conversation"));
@@ -568,7 +726,7 @@ class SharedRunHttpIntegrationTests {
                 .doFinally(signal -> disposed.complete(null)));
         try {
             var open = openStream("/api/ag-ui", agUiInput(conversation, run, "cancel me"), "TEXT_MESSAGE_CONTENT");
-            assertThat(open.delta().get(10, TimeUnit.SECONDS).data().path("delta").asText()).isEqualTo("partial");
+            assertThat(open.event().get(10, TimeUnit.SECONDS).data().path("delta").asText()).isEqualTo("partial");
             var conflict = post("/api/ag-ui", agUiInput(conversation, UUID.randomUUID().toString(), "parallel"));
             assertThat(conflict.statusCode()).isEqualTo(409);
             assertCancel(run, "CANCELLED", true);
@@ -666,23 +824,23 @@ class SharedRunHttpIntegrationTests {
         return response.headers().firstValue("Content-Type").orElse("").startsWith(type);
     }
 
-    private OpenStream openStream(String path, Map<String, ?> input, String deltaName) throws Exception {
-        var delta = new CompletableFuture<Event>();
+    private OpenStream openStream(String path, Map<String, ?> input, String eventName) throws Exception {
+        var selectedEvent = new CompletableFuture<Event>();
         var finished = http.sendAsync(request(path, input), HttpResponse.BodyHandlers.ofLines()).thenApplyAsync(response -> {
             try (var lines = response.body()) {
                 assertEventStream(response);
                 return readEvents(lines, event -> {
-                    if (event.name().equals(deltaName)) {
-                        delta.complete(event);
+                    if (event.name().equals(eventName)) {
+                        selectedEvent.complete(event);
                     }
                 });
             } catch (JsonProcessingException failure) {
                 throw new CompletionException(failure);
             }
         });
-        finished.whenComplete((ignored, failure) -> delta.completeExceptionally(failure == null
-                ? new AssertionError("event stream ended before " + deltaName) : failure));
-        return new OpenStream(delta, finished);
+        finished.whenComplete((ignored, failure) -> selectedEvent.completeExceptionally(failure == null
+                ? new AssertionError("event stream ended before " + eventName) : failure));
+        return new OpenStream(selectedEvent, finished);
     }
 
     private List<Event> readEvents(Stream<String> lines, Consumer<Event> onEvent) throws JsonProcessingException {
@@ -710,6 +868,21 @@ class SharedRunHttpIntegrationTests {
         assertThat(terminals).hasSize(1);
         assertThat(events.getLast()).isEqualTo(terminals.getFirst());
         return terminals.getFirst();
+    }
+
+    private HeldModel holdModelAfter(String text) {
+        var pending = Sinks.<ChatResponse>one();
+        var disposed = new CompletableFuture<Void>();
+        model.streamWith(Flux.concat(Flux.just(usageChunk(text)), pending.asMono())
+                .doFinally(signal -> disposed.complete(null)));
+        return new HeldModel(pending, disposed);
+    }
+
+    private int idleTransactions() {
+        return jdbc.queryForObject("""
+                select count(*) from pg_stat_activity
+                where datname = current_database() and state in ('idle in transaction', 'idle in transaction (aborted)')
+                """, Integer.class);
     }
 
     private String assertSingleCompletedRun(String conversation, String requestId, String prompt,
@@ -770,6 +943,7 @@ class SharedRunHttpIntegrationTests {
         var response = post("/api/runs/" + run + "/cancel", Map.of());
         assertThat(response.statusCode()).isEqualTo(200);
         var data = json.readTree(response.body());
+        assertThat(data.path("runId").asText()).isEqualTo(run);
         assertThat(data.path("status").asText()).isEqualTo(status);
         assertThat(data.path("cancelled").asBoolean()).isEqualTo(cancelled);
     }
@@ -786,6 +960,7 @@ class SharedRunHttpIntegrationTests {
     }
 
     private record Event(String name, JsonNode data) {}
-    private record OpenStream(CompletableFuture<Event> delta, CompletableFuture<List<Event>> finished) {}
+    private record OpenStream(CompletableFuture<Event> event, CompletableFuture<List<Event>> finished) {}
+    private record HeldModel(Sinks.One<ChatResponse> pending, CompletableFuture<Void> disposed) {}
     private record RaceResult<A, B>(A first, B second) {}
 }

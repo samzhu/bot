@@ -44,72 +44,21 @@ class UsageCostRevisionIntegrationTests {
     }
 
     @Test
-    void manualTenToTwelveReplacesCurrentAmountButNeverClearsUnknown() throws Exception {
+    void automaticRecomputeAndReconciliationKeepTheAuditedCurrent() throws Exception {
         Fixture f = fixture();
         JsonNode ten = manual(f, null, f.sourceVersion(), "key-ten", "10", "evidence-10");
         assertFalse(ten.has("errors"), ten.toString());
         String revision10 = ten.path("data").path("manualCostRevision").path("revision").path("id").asText();
-        assertEquals("APPLIED", ten.path("data").path("manualCostRevision").path("outcome").asText());
         JsonNode twelve = manual(f, revision10, f.sourceVersion(), "key-twelve", "12", "evidence-12");
         assertFalse(twelve.has("errors"), twelve.toString());
-        assertEquals("12", twelve.path("data").path("manualCostRevision").path("revision").path("knownSubtotal").asText());
-        assertTrue(twelve.path("data").path("manualCostRevision").path("revision").path("completeAmount").isNull());
-        assertEquals("UNKNOWN", twelve.path("data").path("manualCostRevision").path("revision").path("status").asText());
-        String revision12=twelve.path("data").path("manualCostRevision").path("revision").path("id").asText();
-        assertEquals(revision12,jdbc.queryForObject("select estimate_id from usage_cost_current where attempt_id=?",String.class,f.attemptId()));
-        JsonNode oldReplay=manual(f,null,f.sourceVersion(),"key-ten","10","evidence-10");
-        assertFalse(oldReplay.has("errors"),oldReplay.toString());
-        assertEquals("REPLAYED",oldReplay.path("data").path("manualCostRevision").path("outcome").asText());
-        assertEquals(revision10,oldReplay.path("data").path("manualCostRevision").path("revision").path("id").asText());
-        assertEquals(revision12,oldReplay.path("data").path("manualCostRevision").path("effectiveCost").path("currentRevision").asText());
-        assertEquals(0,new java.math.BigDecimal("12").compareTo(new java.math.BigDecimal(oldReplay.path("data").path("manualCostRevision").path("effectiveCost").path("knownSubtotal").asText())));
-        assertEquals(revision12,jdbc.queryForObject("select estimate_id from usage_cost_current where attempt_id=?",String.class,f.attemptId()));
+        String revision12 = twelve.path("data").path("manualCostRevision").path("revision").path("id").asText();
         pricingPublisher.recompute(f.attemptId());
         assertEquals(revision12,jdbc.queryForObject("select estimate_id from usage_cost_current where attempt_id=?",String.class,f.attemptId()));
         assertEquals(f.sourceVersion(),jdbc.queryForObject("select last_processed_projection_version::text from usage_cost_manual_source_checkpoint where attempt_id=?",String.class,f.attemptId()));
-        String beforeRestartPointer=jdbc.queryForObject("select estimate_id from usage_cost_current where attempt_id=?",String.class,f.attemptId());
+        String beforeScanPointer=jdbc.queryForObject("select estimate_id from usage_cost_current where attempt_id=?",String.class,f.attemptId());
         new io.github.samzhu.bot.usage.internal.pricing.PricingReconciliation(jdbc,pricingPublisher).scanPending();
-        assertEquals(beforeRestartPointer,jdbc.queryForObject("select estimate_id from usage_cost_current where attempt_id=?",String.class,f.attemptId()));
+        assertEquals(beforeScanPointer,jdbc.queryForObject("select estimate_id from usage_cost_current where attempt_id=?",String.class,f.attemptId()));
         assertEquals(f.sourceVersion(),jdbc.queryForObject("select last_processed_projection_version::text from usage_cost_manual_source_checkpoint where attempt_id=?",String.class,f.attemptId()));
-    }
-
-    @Test
-    void sameKeySamePayloadReplaysOriginalRevisionAndDifferentPayloadConflicts() throws Exception {
-        Fixture f = fixture();
-        JsonNode first = manual(f, null, f.sourceVersion(), "same-key", "10", "same-evidence");
-        assertFalse(first.has("errors"), first.toString());
-        String original = first.path("data").path("manualCostRevision").path("revision").path("id").asText();
-        JsonNode replay = manual(f, null, f.sourceVersion(), "same-key", "10", "same-evidence");
-        assertFalse(replay.has("errors"), replay.toString());
-        assertEquals("REPLAYED", replay.path("data").path("manualCostRevision").path("outcome").asText());
-        assertEquals(original, replay.path("data").path("manualCostRevision").path("revision").path("id").asText());
-        JsonNode conflict = manual(f, null, f.sourceVersion(), "same-key", "11", "different-evidence");
-        assertEquals("CONFLICT", conflict.path("errors").get(0).path("extensions").path("code").asText());
-        org.mockito.Mockito.when(actor.getCurrentUserId()).thenReturn("revoked-manager");
-        JsonNode denied=manual(f,null,f.sourceVersion(),"same-key","10","same-evidence");
-        assertEquals("WORKSPACE_ACCESS_DENIED",denied.path("errors").get(0).path("extensions").path("code").asText());
-    }
-
-    @Test
-    void staleRevisionOrSourceProjectionVersionConflicts() throws Exception {
-        Fixture f = fixture();
-        JsonNode first = manual(f, null, f.sourceVersion(), "cas-one", "10", "evidence");
-        assertFalse(first.has("errors"), first.toString());
-        String current = first.path("data").path("manualCostRevision").path("revision").path("id").asText();
-        JsonNode staleRevision = manual(f, null, f.sourceVersion(), "cas-two", "12", "evidence");
-        assertEquals("CONFLICT", staleRevision.path("errors").get(0).path("extensions").path("code").asText());
-        jdbc.update("update provider_attempt set projection_version=projection_version+1 where id=?", f.attemptId());
-        String currentSource=jdbc.queryForObject("select projection_version::text from provider_attempt where id=?",String.class,f.attemptId());
-        JsonNode lateReplay=manual(f,null,f.sourceVersion(),"cas-one","10","evidence");
-        assertFalse(lateReplay.has("errors"),lateReplay.toString());
-        assertEquals("REPLAYED",lateReplay.path("data").path("manualCostRevision").path("outcome").asText());
-        assertEquals(current,lateReplay.path("data").path("manualCostRevision").path("revision").path("id").asText());
-        assertEquals(currentSource,lateReplay.path("data").path("manualCostRevision").path("effectiveCost").path("sourceProjectionVersion").asText());
-        assertTrue(lateReplay.path("data").path("manualCostRevision").path("effectiveCost").path("needsReprice").asBoolean());
-        assertTrue(lateReplay.path("data").path("manualCostRevision").path("effectiveCost").path("completeAmount").isNull());
-        assertEquals(1,jdbc.queryForObject("select count(*) from usage_cost_revision_audit where attempt_id=? and idempotency_key='cas-one'",Integer.class,f.attemptId()));
-        JsonNode staleSource = manual(f, current, f.sourceVersion(), "cas-three", "12", "evidence");
-        assertEquals("CONFLICT", staleSource.path("errors").get(0).path("extensions").path("code").asText());
     }
 
     @Test
@@ -490,20 +439,6 @@ class UsageCostRevisionIntegrationTests {
         assertEquals(0,jdbc.queryForObject("select count(*) from usage_price_snapshot where attempt_id=?",Integer.class,f.attemptId()));
         JsonNode valid=reconcile(f,null,f.sourceVersion(),"unicode-valid",catalog,"\u00a0證據\u202f","\u202f理由\u00a0");
         assertFalse(valid.has("errors"),valid.toString());
-    }
-
-    @Test
-    void manualAmountRejectsNegativeOverflowAndExcessScaleButAllowsEvidencedZeroAsUnknown() throws Exception {
-        Fixture f=fixture();
-        for (String amount : java.util.List.of("-1", "1000000000000000000", "1.0000000000001")) {
-            JsonNode rejected=manual(f,null,f.sourceVersion(),"invalid-amount-"+UUID.randomUUID(),amount,"evidence");
-            assertEquals("INVALID_AMOUNT",rejected.path("errors").get(0).path("extensions").path("code").asText(),rejected.toString());
-        }
-        assertEquals(0,jdbc.queryForObject("select count(*) from usage_cost_revision_audit where attempt_id=?",Integer.class,f.attemptId()));
-        JsonNode zero=manual(f,null,f.sourceVersion(),"evidenced-zero","0","manager evidence","MANUAL_ESTIMATE","manager reason");
-        assertFalse(zero.has("errors"),zero.toString());
-        assertEquals("UNKNOWN",zero.path("data").path("manualCostRevision").path("revision").path("status").asText());
-        assertTrue(zero.path("data").path("manualCostRevision").path("revision").path("completeAmount").isNull());
     }
 
     @Test

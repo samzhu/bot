@@ -2,7 +2,7 @@ package io.github.samzhu.bot;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.samzhu.bot.identity.CurrentUserProvider;
+import io.github.samzhu.bot.execution.ExecutionOperations;
 import io.github.samzhu.bot.usage.pricing.UsageCaseData;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -14,22 +14,19 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
-import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.context.ActiveProfiles;
-import org.springframework.test.context.bean.override.convention.TestBean;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.transaction.support.TransactionTemplate;
+import reactor.core.publisher.Sinks;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.when;
 
 @BackendIntegrationTest
 class WorkspaceAuthorizationIntegrationTests {
@@ -39,6 +36,7 @@ class WorkspaceAuthorizationIntegrationTests {
     @Autowired JdbcTemplate jdbc;
     @Autowired TransactionTemplate transactions;
     @Autowired BackendTestChatModel model;
+    @Autowired ExecutionOperations executions;
 
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newHttpClient();
@@ -204,6 +202,73 @@ class WorkspaceAuthorizationIntegrationTests {
                 Integer.class, remoteConversation));
     }
 
+    @Test
+    void activeCancellationRechecksMembership() throws Exception {
+        prepareWorkspace();
+        String foreignActor = UUID.randomUUID().toString();
+        jdbc.update("insert into workspace_member(workspace_id,user_id,role) values (?,?,'MEMBER')",
+                scope, foreignActor);
+        String conversation = createConversation("workspaceId: \"%s\"".formatted(scope), "Cancellation fixture")
+                .path("id").asText();
+        String run = UUID.randomUUID().toString();
+        String missingRun = UUID.randomUUID().toString();
+        String cancelPath = "/api/runs/" + run + "/cancel";
+        String message = "hello";
+        var input = runInput(conversation, run, message);
+        var pending = Sinks.<ChatResponse>one();
+        var subscribed = new CountDownLatch(1);
+        model.streamWith(pending.asMono().doOnSubscribe(subscription -> subscribed.countDown()).flux());
+
+        try {
+            var stream = http.send(request("/api/ag-ui", input, "text/event-stream"),
+                    HttpResponse.BodyHandlers.ofInputStream());
+            try (var streamBody = stream.body()) {
+                assertEquals(200, stream.statusCode());
+                assertTrue(contentType(stream).startsWith("text/event-stream"));
+                assertTrue(subscribed.await(5, TimeUnit.SECONDS), "The original Run never subscribed to the model");
+                assertRunStatus(run, "RUNNING");
+
+                // HTTP has one configured identity. The public Execution facade accepts a second actor explicitly.
+                assertTrue(executions.findRunById(run, foreignActor).isEmpty());
+                var foreign = executions.cancelRun(run, foreignActor);
+                assertEquals(new ExecutionOperations.CancelRunOutcome(null, null, false, true), foreign);
+                assertEquals(executions.cancelRun(missingRun, foreignActor), foreign);
+                var duplicate = executions.startAgUiRun(conversation, run, message, foreignActor);
+                assertEquals(new ExecutionOperations.StartRunOutcome(
+                        ExecutionOperations.StartRunOutcome.Type.ACCESS_DENIED, null, null, null), duplicate);
+                assertRunStatus(run, "RUNNING");
+                assertEquals(1, model.invocations());
+
+                revokeCaller();
+                assertTrue(graphData(graph("{ run(id: \"%s\") { id } }".formatted(run))).path("run").isNull());
+                var denied = post(cancelPath, Map.of());
+                assertJsonError(denied, 404, "RUN_ACCESS_DENIED");
+                assertEquals(post("/api/runs/" + missingRun + "/cancel", Map.of()).body(), denied.body());
+                assertFalse(denied.body().contains(run));
+                assertJsonError(postSse(input), 404, "CONVERSATION_ACCESS_DENIED");
+                assertRunStatus(run, "RUNNING");
+                assertEquals(1, model.invocations());
+
+                assertEquals(1, jdbc.update(
+                        "update workspace_member set active=true where workspace_id=? and user_id=?", scope, CALLER));
+                var cancelled = post(cancelPath, Map.of());
+                assertEquals(200, cancelled.statusCode(), cancelled.body());
+                var result = json.readTree(cancelled.body());
+                assertEquals(run, result.path("runId").asText());
+                assertEquals("CANCELLED", result.path("status").asText());
+                assertTrue(result.path("cancelled").asBoolean());
+                assertRunStatus(run, "CANCELLED");
+                assertEquals(1, model.invocations());
+            }
+        } finally {
+            pending.tryEmitEmpty();
+        }
+    }
+
+    private void assertRunStatus(String run, String expected) {
+        assertEquals(expected, jdbc.queryForObject("select status from chat_run where id=?", String.class, run));
+    }
+
     private void prepareWorkspace() {
         caseData.createWorkspace(scope, CALLER);
         insertBot(localBot, "LOCAL");
@@ -287,50 +352,15 @@ class WorkspaceAuthorizationIntegrationTests {
     }
 
     private HttpResponse<String> post(String path, Object body, String accept) throws Exception {
-        var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
+        return http.send(request(path, body, accept), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private HttpRequest request(String path, Object body, String accept) throws Exception {
+        return HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
                 .timeout(Duration.ofSeconds(10))
                 .header("Content-Type", "application/json")
                 .header("Accept", accept)
                 .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body)))
                 .build();
-        return http.send(request, HttpResponse.BodyHandlers.ofString());
     }
-}
-
-// The same live Run must be called as both its owner and a second authenticated user.
-@io.github.samzhu.bot.UseTestFakes
-@SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT)
-@Import(TestcontainersConfiguration.class)
-@ActiveProfiles("test")
-class WorkspaceAuthorizationActorSwitchIntegrationTests {
- @LocalServerPort int port;
- @Autowired JdbcTemplate jdbc;
- @MockitoBean CurrentUserProvider actor;
- @TestBean(name="mockChatModel",methodName="model",enforceOverride=true) ChatModel chat;
- static ControlledChatModel model(){return ControlledChatModel.getInstance();}
- final ObjectMapper json=new ObjectMapper(); final HttpClient http=HttpClient.newHttpClient();
- @BeforeEach void setup(){when(actor.getCurrentUserId()).thenReturn("workspace-test-user");model().reset();jdbc.update("insert into bot(id,name,target) values ('workspace-test-bot','test','LOCAL') on conflict do nothing");}
- HttpResponse<String> post(String path,Object body)throws Exception{return http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+path)).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body))).build(),HttpResponse.BodyHandlers.ofString());}
- JsonNode graph(String query)throws Exception{return json.readTree(post("/graphql",Map.of("query",query)).body());}
- @Test void activeCancellationRechecksMembership() throws Exception {
-  String owner="cancel-owner"; when(actor.getCurrentUserId()).thenReturn(owner);
-  var created=graph("mutation { createConversation(botId: \"workspace-test-bot\") { id workspaceId } }");
-  String id=created.path("data").path("createConversation").path("id").asText(); String workspace=created.path("data").path("createConversation").path("workspaceId").asText();
-  String run=UUID.randomUUID().toString(); model().setHoldMode(true);
-  var body=Map.of("threadId",id,"runId",run,"messages",List.of(Map.of("id","u","role","user","content","hello")));
-  var request=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/api/ag-ui")).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body))).build();
-  var stream=http.send(request,HttpResponse.BodyHandlers.ofInputStream()); assertEquals(200,stream.statusCode()); assertTrue(model().awaitSubscribed(5,java.util.concurrent.TimeUnit.SECONDS));
-  when(actor.getCurrentUserId()).thenReturn("another-user");
-  assertTrue(graph("{ run(id: \""+run+"\") { id } }").path("data").path("run").isNull());
-  var foreign=post("/api/runs/"+run+"/cancel",Map.of()); var missing=post("/api/runs/not-a-run/cancel",Map.of());
-  assertEquals(404,foreign.statusCode()); assertEquals(missing.body(),foreign.body());
-  var duplicate=post("/api/ag-ui",body); assertEquals(404,duplicate.statusCode()); assertEquals("CONVERSATION_ACCESS_DENIED",json.readTree(duplicate.body()).path("code").asText());
-  assertEquals(1,model().getRecordedPrompts().size());
-  when(actor.getCurrentUserId()).thenReturn(owner);
-  jdbc.update("update workspace_member set active=false where workspace_id=? and user_id=?",workspace,owner);
-  assertTrue(graph("{ run(id: \""+run+"\") { id } }").path("data").path("run").isNull());
-  var denied=post("/api/runs/"+run+"/cancel",Map.of()); assertEquals(404,denied.statusCode()); assertEquals("RUN_ACCESS_DENIED",json.readTree(denied.body()).path("code").asText()); assertFalse(denied.body().contains(run)); assertEquals("RUNNING",jdbc.queryForObject("select status from chat_run where id=?",String.class,run));
-  jdbc.update("update workspace_member set active=true where workspace_id=? and user_id=?",workspace,owner);
-  assertEquals(200,post("/api/runs/"+run+"/cancel",Map.of()).statusCode()); stream.body().close();
- }
 }
