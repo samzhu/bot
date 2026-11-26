@@ -43,9 +43,16 @@ cd backend
 2. **Testcontainers 與 Liquibase**負責資料庫。沿用 Spring 管理的 PostgreSQL 容器 Bean 與 `@ServiceConnection`。第一個案例啟動 context 時，Boot 先啟動容器，由 Liquibase 初始化共用庫。後續案例重用該 context 和資料庫，正常退出時由 Spring 關閉相依 Bean 再停止容器。 [Spring Boot 容器生命週期](https://docs.spring.io/spring-boot/4.2/reference/testing/testcontainers.html#testing.testcontainers.lifecycle) · [Liquibase 啟動初始化](https://docs.spring.io/spring-boot/4.2/how-to/data-initialization.html#howto.data-initialization.migration-tool.liquibase)
 3. **案例 fixture**負責資料隔離。以案例專屬的 Workspace、Conversation、Run 或測試使用者限定寫入、讀取與清理範圍。分頁與排序在伺服器完成，因此案例隔離必須在查詢範圍生效。真 HTTP 的伺服器交易會獨立提交，測試端 rollback 只涵蓋參與同一交易的操作。HTTP 案例使用已提交的 fixture 與限定範圍的清理。 [Spring Boot HTTP 測試交易](https://docs.spring.io/spring-boot/4.2/reference/testing/spring-boot-applications.html)
 
+### 遷移與審查測試
+
+- 修改舊案例前，逐方法記下觸發條件、操作順序及可觀察結果，並指明新案例的對應斷言。Run 測試需保留案例原本驗證的前後狀態，例如競爭請求遭拒後原 Run 仍能完成，且下一個 Run 能成功。有既定勝者的取消順序與允許任一方勝出的並行競爭需各自驗證。確認產品斷言已覆蓋後，再移除環境專項與已無引用的 fixture，並在 Issue 留下原案例的 Git 來源。
+- 用真實實作的合約設定期望值。用量案例查核合成模型回應經 capture 後的持久結果。定價案例若驗證跨版本，應核對交易與稽核各自使用的 revision，並在結束時恢復案例改動的參照狀態。若案例宣稱支援某項資料庫能力，應執行代表性的 SQL 並核對回傳值。
+- 變更共用測試啟動方式時，從預設入口驗證 readiness，並用已知會出現在開發環境的 provider 選擇值定向重驗。共用環境須維持 test profile 和 in-process 模型，正式啟動 guard 仍按正式入口的合約執行。
+
 ### 如何執行與判讀結果
 
 - 從 `backend/` 用 `./gradlew test --tests 'TestClass.testMethod' --fail-fast` 定向重現。完整驗收使用 `./gradlew test`。記錄測試範圍與結果，涉及共用資料時再換序執行，確認案例可獨立通過。 [Gradle 測試篩選與 fail-fast](https://docs.gradle.org/current/userguide/java_testing.html)
+- 判讀失敗時，先核對該輪實際執行的來源、觀察器版本與 JUnit 報告，確認是產品斷言、fixture 還是觀察器失敗。資料檢查應區分案例中刻意保留的資料、共用參照資料及清理後的案例殘留。完整套件選集有增刪時，另列同選集比較。事件記錄若有缺段，將取樣峰值報為下限。
 - 驗收共用環境時，以 Spring cache 日誌、容器建立事件及資料庫識別確認整輪功能整合測試只啟動一個 context 和 PostgreSQL 容器。用相同功能選集、JDK、heap、cache、worker 數、PostgreSQL 映像與暖機條件比較耗時。先開始持續記錄 Docker 事件，再啟動測試。核對 PG 啟動、同時峰值與移除，並以 Spring cache miss 計算累計啟動。若測試中斷後容器仍在執行，使用 Docker 的 `org.testcontainers.sessionId` 標籤確認歸屬，再檢查該輪測試程序。 [Gradle 設定](build.gradle) · [Spring 快取觀測](https://docs.spring.io/spring-framework/reference/testing/testcontext-framework/ctx-management/caching.html)
 
 ### #95 驗收紀錄
