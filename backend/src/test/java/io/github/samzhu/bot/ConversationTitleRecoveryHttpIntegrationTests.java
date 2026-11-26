@@ -78,9 +78,9 @@ class ConversationTitleRecoveryHttpIntegrationTests {
     ConfigurableApplicationContext start(boolean titleEnabled, String executionTimeout) { return start(titleEnabled, executionTimeout, false); }
     ConfigurableApplicationContext start(boolean titleEnabled, String executionTimeout, boolean realTitle) {
         SpringApplication app = realTitle
-                ? new SpringApplication(BotApplication.class, TestUsageCaptureConfiguration.class, TestProvisioningConfiguration.class,
+                ? new SpringApplication(BotApplication.class, TestUsageCaptureConfiguration.class,
                     titleEnabled ? Fakes.class : ChatOnly.class, RealTitlePartition.class)
-                : new SpringApplication(BotApplication.class, TestUsageCaptureConfiguration.class, TestProvisioningConfiguration.class,
+                : new SpringApplication(BotApplication.class, TestUsageCaptureConfiguration.class,
                     titleEnabled ? Fakes.class : ChatOnly.class);
         app.setAdditionalProfiles("test");
         app.addInitializers(context -> {

@@ -46,8 +46,8 @@ public final class BrowserFixtureApplication {
         boolean titleFixture = "1".equals(environment.get("BOT85_TITLE_FIXTURE"));
         if (titleFixture && nonce == null) throw new IllegalStateException("Title fixture requires owned nonce");
         SpringApplication app = titleFixture
-                ? new SpringApplication(BotApplication.class, Fixture.class, TitleFixture.class, TestUsageCaptureConfiguration.class, TestProvisioningConfiguration.class)
-                : new SpringApplication(BotApplication.class, Fixture.class, TestUsageCaptureConfiguration.class, TestProvisioningConfiguration.class);
+                ? new SpringApplication(BotApplication.class, Fixture.class, TitleFixture.class, TestUsageCaptureConfiguration.class)
+                : new SpringApplication(BotApplication.class, Fixture.class, TestUsageCaptureConfiguration.class);
         if (titleFixture) app.setAdditionalProfiles("test", "browser-fixture", "browser-title-fixture");
         else app.setAdditionalProfiles("test", "browser-fixture");
         var context = app.run("--server.address=127.0.0.1", "--server.port=0",

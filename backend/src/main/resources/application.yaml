@@ -1,4 +1,7 @@
 bot:
+  pricing:
+    release-revision: gemini-standard-2026-11-16
+    release-content-hash: 0a0e4a13103ea27bffdee2a02623f42764a442f90953b45be40cceffd04db9ec
   budget:
     monthly:
       default-cap-usd: "10"
@@ -11,9 +14,8 @@ bot:
     execution-mode: 'OFF'
 
 spring:
-  autoconfigure:
-    # Admin and dev invoke Liquibase only after the serialized preflight.
-    exclude: org.springframework.boot.liquibase.autoconfigure.LiquibaseAutoConfiguration
+  liquibase:
+    contexts: prod
   profiles:
     group:
       dev: local
@@ -37,3 +39,15 @@ spring:
       genai:
         chat:
           model: gemini-3.8-flash
+
+---
+spring:
+  config:
+    activate:
+      on-profile: "dev & !prod & !test"
+  liquibase:
+    contexts: dev
+bot:
+  pricing:
+    release-revision: dev-gemini-openai-2026-11-25
+    release-content-hash: 1135ff8e3c4dcdfc95249eb785eefc8fc0fabc0f7e4bc91e01cb56dd164cad03

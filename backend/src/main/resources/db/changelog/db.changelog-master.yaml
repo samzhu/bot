@@ -152,3 +152,32 @@ databaseChangeLog:
             encoding: UTF-8
             splitStatements: false
             stripComments: false
+  - changeSet:
+      id: V19__default_bot.sql
+      author: bot
+      changes:
+        - sqlFile:
+            path: db/migration/V19__default_bot.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false
+  - changeSet:
+      id: V20__production_pricing_catalog.sql
+      author: bot
+      context: "@prod"
+      changes:
+        - sqlFile:
+            path: db/migration/V20__production_pricing_catalog.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false
+  - changeSet:
+      id: V20__development_pricing_catalog.sql
+      author: bot
+      context: "@dev"
+      changes:
+        - sqlFile:
+            path: db/migration/V20__development_pricing_catalog.sql
+            encoding: UTF-8
+            splitStatements: false
+            stripComments: false

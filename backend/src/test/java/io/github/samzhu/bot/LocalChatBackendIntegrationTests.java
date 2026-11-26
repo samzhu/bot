@@ -2,7 +2,6 @@ package io.github.samzhu.bot;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.samzhu.bot.bootstrap.ReleaseProvisioner;
 import io.github.samzhu.bot.bot.internal.BotRepository;
 import io.github.samzhu.bot.conversation.ConversationOperations;
 import io.github.samzhu.bot.conversation.ConversationView;
@@ -70,10 +69,10 @@ class LocalChatBackendIntegrationTests {
     private BotRepository botRepository;
 
     @Autowired
-    private ReleaseProvisioner releaseProvisioner;
+    private org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
 
     @Autowired
-    private org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
+    private liquibase.integration.spring.SpringLiquibase springLiquibase;
 
     @Autowired
     private org.springframework.transaction.support.TransactionTemplate transactionTemplate;
@@ -938,7 +937,7 @@ class LocalChatBackendIntegrationTests {
     }
 
     @Test
-    void test9_ServerRestartOrphanRecovery() throws Exception {
+    void test9_LiquibaseRerunPreservesExistingRun() throws Exception {
         String convId = createTestConversation("Orphan Conv");
         String orphanRunId = UUID.randomUUID().toString();
 
@@ -948,15 +947,13 @@ class LocalChatBackendIntegrationTests {
         );
         jdbcAggregateTemplate.insert(orphan);
 
-        // Repeat release provisioning without rewriting Run state
-        releaseProvisioner.initializeProd(jdbcTemplate.execute((org.springframework.jdbc.core.ConnectionCallback<String>) c -> c.getMetaData().getURL()));
+        springLiquibase.afterPropertiesSet();
 
         ChatRun recovered = chatRunRepository.findById(orphanRunId).orElseThrow();
         assertEquals(RunStatus.RUNNING.name(), recovered.status());
         assertNull(recovered.errorMessage());
 
-        // Repeat release provisioning
-        assertDoesNotThrow(() -> releaseProvisioner.initializeProd(jdbcTemplate.execute((org.springframework.jdbc.core.ConnectionCallback<String>) c -> c.getMetaData().getURL())));
+
         jdbcTemplate.update("delete from chat_run where id = ?", orphanRunId);
     }
 

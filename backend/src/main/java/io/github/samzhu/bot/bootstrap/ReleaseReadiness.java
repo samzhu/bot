@@ -3,6 +3,7 @@ package io.github.samzhu.bot.bootstrap;
 import io.github.samzhu.bot.usage.PricingCatalogRelease;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.annotation.Order;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
@@ -13,27 +14,27 @@ import org.springframework.stereotype.Component;
 public class ReleaseReadiness implements ApplicationRunner {
     private final JdbcTemplate jdbc;
     private final PricingCatalogRelease catalog;
-    private final org.springframework.core.env.Environment environment;
+    private final String catalogRevision;
+    private final String catalogContentHash;
 
-    public ReleaseReadiness(JdbcTemplate jdbc, PricingCatalogRelease catalog, org.springframework.core.env.Environment environment) {
+    public ReleaseReadiness(JdbcTemplate jdbc, PricingCatalogRelease catalog,
+            @Value("${bot.pricing.release-revision}") String catalogRevision,
+            @Value("${bot.pricing.release-content-hash}") String catalogContentHash) {
         this.jdbc = jdbc;
         this.catalog = catalog;
-        this.environment = environment;
+        this.catalogRevision = catalogRevision;
+        this.catalogContentHash = catalogContentHash;
     }
 
     @Override
     public void run(ApplicationArguments args) throws Exception {
         try {
-            int missing = ReleaseSchema.verifiedPrefix(jdbc);
-            if (missing != 0) {
-                throw new IllegalStateException("Release provisioning required: " + missing + " unapplied migration(s)");
-            }
-            String selected = environment.acceptsProfiles(org.springframework.core.env.Profiles.of("dev & !test & !prod")) ? "dev" : "prod";
-            var expected = ReleaseMetadata.load(selected);
-            if (!Boolean.TRUE.equals(jdbc.queryForObject("select exists(select 1 from bot where id=? and target=?)", Boolean.class, expected.path("botId").asText(), expected.path("botTarget").asText()))) {
+            if (!Boolean.TRUE.equals(jdbc.queryForObject("""
+                    select exists(select 1 from bot where id = 'bot-general' and target = 'LOCAL')
+                    """, Boolean.class))) {
                 throw new IllegalStateException("Release provisioning required: LOCAL default Bot is missing");
             }
-            catalog.restoreExpected(expected.path("revision").asText(), expected.path("contentHash").asText());
+            catalog.restoreRevision(catalogRevision, catalogContentHash);
         } catch (org.springframework.dao.DataAccessException ex) {
             throw new IllegalStateException("Release provisioning required: database schema or catalog is not ready", ex);
         }

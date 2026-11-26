@@ -1,6 +1,5 @@
 package io.github.samzhu.bot;
 
-import io.github.samzhu.bot.bootstrap.ReleaseProvisioningApplication;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -22,6 +21,8 @@ class PostgresCommentsIntegrationTests {
         var expected = new java.util.ArrayList<>(HISTORICAL_IDS);
         expected.add("V17__postgres_comments.sql");
         expected.add("V18__title_denial_reason.sql");
+        expected.add("V19__default_bot.sql");
+        expected.add("V20__production_pricing_catalog.sql");
         var identities = expected.stream().map(id -> id + "|bot|db/changelog/db.changelog-master.yaml|EXECUTED")
                 .sorted().toList();
         assertEquals(identities, db.queryForList("""
@@ -34,11 +35,7 @@ class PostgresCommentsIntegrationTests {
     void runCommentDescribesTheWholeLifecycleRatherThanOneProviderCall() throws Exception {
         try (var pg = PostgresTestImage.container()) {
             pg.start();
-            ReleaseProvisioningApplication.main(new String[]{
-                    "--spring.datasource.url=" + pg.getJdbcUrl(),
-                    "--spring.datasource.username=" + pg.getUsername(),
-                    "--spring.datasource.password=" + pg.getPassword(),
-                    "--management.otlp.metrics.export.enabled=false", "--bot.release.action=schema-only"});
+            migrate(pg);
             var db = new JdbcTemplate(new DriverManagerDataSource(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword()));
             assertEquals("一次使用者請求從發起至完成、失敗或取消的完整 Run 生命週期；可包含多筆 ProviderAttempt。",
                     db.queryForObject("select obj_description('chat_run'::regclass, 'pg_class')", String.class));
@@ -49,11 +46,7 @@ class PostgresCommentsIntegrationTests {
     void catalogCommentsCoverApplicationTablesAndSurviveRepeatedProvisioning() throws Exception {
         try (var pg = PostgresTestImage.container()) {
             pg.start();
-            String[] args = {"--spring.datasource.url=" + pg.getJdbcUrl(),
-                    "--spring.datasource.username=" + pg.getUsername(),
-                    "--spring.datasource.password=" + pg.getPassword(),
-                    "--management.otlp.metrics.export.enabled=false", "--bot.release.action=schema-only"};
-            ReleaseProvisioningApplication.main(args);
+            migrate(pg);
             var db = new JdbcTemplate(new DriverManagerDataSource(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword()));
             String applicationTables = """
                     from pg_class c join pg_namespace n on n.oid=c.relnamespace
@@ -74,9 +67,18 @@ class PostgresCommentsIntegrationTests {
             assertEquals("Session 識別碼（主鍵，1:1 對齊 conversation_id）。", columnComment(db, "ai_session", "id"));
             assertReleaseReceipts(db);
             var before = comments(db);
-            ReleaseProvisioningApplication.main(args);
+            migrate(pg);
             assertEquals(before, comments(db));
             assertReleaseReceipts(db);
+        }
+    }
+
+    private static void migrate(org.testcontainers.postgresql.PostgreSQLContainer pg) {
+        try (var ignored = ReleaseReadinessIntegrationTests.start(
+                "--spring.datasource.url=" + pg.getJdbcUrl(),
+                "--spring.datasource.username=" + pg.getUsername(),
+                "--spring.datasource.password=" + pg.getPassword())) {
+            // Boot runs migration before returning the application context.
         }
     }
 

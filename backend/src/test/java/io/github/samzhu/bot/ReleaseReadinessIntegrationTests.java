@@ -1,6 +1,5 @@
 package io.github.samzhu.bot;
 
-import io.github.samzhu.bot.bootstrap.ReleaseProvisioningApplication;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.builder.SpringApplicationBuilder;
@@ -17,13 +16,9 @@ class ReleaseReadinessIntegrationTests {
             String[] database = {"--spring.datasource.url=" + postgres.getJdbcUrl(),
                     "--spring.datasource.username=" + postgres.getUsername(),
                     "--spring.datasource.password=" + postgres.getPassword()};
-            var schema = new java.util.ArrayList<>(java.util.List.of(database));
-            schema.add("--bot.release.action=schema-only");
-            ReleaseProvisioningApplication.main(schema.toArray(String[]::new));
-            var initialize = new java.util.ArrayList<>(java.util.List.of(database));
-            initialize.add("--bot.release.action=initialize-prod");
-            initialize.add("--bot.release.expected-jdbc-url=" + postgres.getJdbcUrl());
-            ReleaseProvisioningApplication.main(initialize.toArray(String[]::new));
+            try (var ignored = start(database)) {
+                // Boot provisions the initially empty database.
+            }
             var jdbc = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
             jdbc.update("delete from pricing_catalog_entry");
             jdbc.update("delete from pricing_catalog_revision");
@@ -41,13 +36,9 @@ class ReleaseReadinessIntegrationTests {
             postgres.start();
             String[] database = {"--spring.datasource.url=" + postgres.getJdbcUrl(),
                     "--spring.datasource.username=" + postgres.getUsername(), "--spring.datasource.password=" + postgres.getPassword()};
-            var schema = new java.util.ArrayList<>(java.util.List.of(database));
-            schema.add("--bot.release.action=schema-only");
-            ReleaseProvisioningApplication.main(schema.toArray(String[]::new));
-            var initialize = new java.util.ArrayList<>(java.util.List.of(database));
-            initialize.add("--bot.release.action=initialize-prod");
-            initialize.add("--bot.release.expected-jdbc-url=" + postgres.getJdbcUrl());
-            ReleaseProvisioningApplication.main(initialize.toArray(String[]::new));
+            try (var ignored = start(database)) {
+                // Boot provisions the initially empty database.
+            }
             var jdbc = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
             var expected = jdbc.queryForObject("select id from pricing_catalog_revision where source_revision='gemini-standard-2026-11-16'", String.class);
             jdbc.update("insert into pricing_catalog_revision(id,source_reference,source_revision,content_hash) values ('newer','fixture','other-environment','unused')");
@@ -60,29 +51,26 @@ class ReleaseReadinessIntegrationTests {
     }
 
     @Test
-    void schemaAloneRejectsReadinessUntilProductionInitialization() throws Exception {
+    void springBootMigratesEmptyDatabaseAndRestartPreservesReferenceData() {
         try (var postgres = PostgresTestImage.container()) {
             postgres.start();
             String[] database = {"--spring.datasource.url=" + postgres.getJdbcUrl(),
-                    "--spring.datasource.username=" + postgres.getUsername(), "--spring.datasource.password=" + postgres.getPassword()};
-            var schema = new java.util.ArrayList<>(java.util.List.of(database));
-            schema.add("--bot.release.action=schema-only");
-            ReleaseProvisioningApplication.main(schema.toArray(String[]::new));
+                    "--spring.datasource.username=" + postgres.getUsername(),
+                    "--spring.datasource.password=" + postgres.getPassword()};
             var jdbc = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
-            var failure = assertThrows(Exception.class, () -> new SpringApplicationBuilder(BotApplication.class,
-                    TestChatModelConfiguration.class, TestUsageCaptureConfiguration.class)
-                    .profiles("test").web(WebApplicationType.NONE).run(database));
-            assertTrue(causes(failure).contains("default Bot is missing"), causes(failure));
-            assertEquals(0, jdbc.queryForObject("select count(*) from bot", Integer.class));
-            assertEquals(0, jdbc.queryForObject("select count(*) from pricing_catalog_revision", Integer.class));
-            var initialize = new java.util.ArrayList<>(java.util.List.of(database));
-            initialize.add("--bot.release.action=initialize-prod");
-            initialize.add("--bot.release.expected-jdbc-url=" + postgres.getJdbcUrl());
-            ReleaseProvisioningApplication.main(initialize.toArray(String[]::new));
-            try (var context = new SpringApplicationBuilder(BotApplication.class, TestChatModelConfiguration.class,
-                    TestUsageCaptureConfiguration.class).profiles("test").web(WebApplicationType.NONE).run(database)) {
+            assertNull(jdbc.queryForObject("select to_regclass('databasechangelog')::text", String.class));
+            try (var context = start(database)) {
                 assertEquals(org.springframework.boot.availability.ReadinessState.ACCEPTING_TRAFFIC,
                         context.getBean(org.springframework.boot.availability.ApplicationAvailability.class).getReadinessState());
+                assertEquals(1, jdbc.queryForObject("select count(*) from bot where id = 'bot-general' and target = 'LOCAL'", Integer.class));
+                assertEquals(1, jdbc.queryForObject("select count(*) from pricing_catalog_revision where source_revision = 'gemini-standard-2026-11-16'", Integer.class));
+                assertEquals(0, jdbc.queryForObject("select count(*) from pricing_catalog_entry where provider = 'OPENAI'", Integer.class));
+            }
+            jdbc.update("update bot set name = 'Customized' where id = 'bot-general'");
+            var history = jdbc.queryForList("select id, md5sum, dateexecuted from databasechangelog order by orderexecuted");
+            try (var ignored = start(database)) {
+                assertEquals(history, jdbc.queryForList("select id, md5sum, dateexecuted from databasechangelog order by orderexecuted"));
+                assertEquals("Customized", jdbc.queryForObject("select name from bot where id = 'bot-general'", String.class));
             }
         }
     }
@@ -98,9 +86,12 @@ class ReleaseReadinessIntegrationTests {
                     TestChatModelConfiguration.class, TestUsageCaptureConfiguration.class)
                     .profiles("test").web(WebApplicationType.NONE).run(database));
             assertTrue(causes(failure).contains("bot.pricing.catalog configuration is retired"), causes(failure));
-            var jdbc = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
-            assertNull(jdbc.queryForObject("select to_regclass('databasechangelog')::text", String.class));
         }
+    }
+
+    static org.springframework.context.ConfigurableApplicationContext start(String... args) {
+        return new SpringApplicationBuilder(BotApplication.class, TestChatModelConfiguration.class,
+                TestUsageCaptureConfiguration.class).profiles("test").web(WebApplicationType.NONE).run(args);
     }
 
     private static String causes(Throwable failure) {

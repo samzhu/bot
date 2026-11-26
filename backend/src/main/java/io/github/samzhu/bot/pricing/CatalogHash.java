@@ -3,7 +3,7 @@ package io.github.samzhu.bot.pricing;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 
-/** Canonical hash shared by publication and release metadata generation. */
+/** Canonical hash for published catalog revisions. */
 public final class CatalogHash {
     private static final ObjectMapper json = new ObjectMapper();
     private CatalogHash() {}

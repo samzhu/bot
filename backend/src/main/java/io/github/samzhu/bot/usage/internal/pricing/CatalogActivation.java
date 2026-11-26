@@ -40,16 +40,6 @@ public class CatalogActivation {
         return created;
     }
 
-    /** Join the release transaction without changing the live catalog. */
-    public void publishRelease(String sourceRevision, String sourceReference, List<PriceCatalog.Entry> entries) {
-        if (!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())
-            throw new IllegalStateException("Release catalog requires an active transaction");
-        if (sourceRevision == null || sourceRevision.isBlank() || sourceReference == null || sourceReference.isBlank())
-            throw new IllegalArgumentException("source and revision required");
-        validateEntries(entries);
-        persist(sourceRevision, sourceReference, entries);
-    }
-
     private Revision persist(String sourceRevision, String sourceReference, List<PriceCatalog.Entry> entries) {
         String id=UUID.randomUUID().toString();
         String hash=io.github.samzhu.bot.pricing.CatalogHash.contentHash(sourceReference,entries);
@@ -95,19 +85,13 @@ public class CatalogActivation {
             }
         }
     }
-    public void verifyPublished(String revision, String source, List<PriceCatalog.Entry> entries) {
-        validateEntries(entries);
-        var hashes = jdbc.queryForList("select content_hash from pricing_catalog_revision where source_revision=?", String.class, revision);
-        if (hashes.isEmpty()) throw new IllegalStateException("Release provisioning required: configured pricing catalog is missing");
-        if (!io.github.samzhu.bot.pricing.CatalogHash.contentHash(source, entries).equals(hashes.getFirst()))
-            throw new IllegalStateException("Catalog revision payload conflict");
-    }
-    public void verifyExpectedHash(String revision, String expectedHash) {
+    private void verifyExpectedHash(String revision, String expectedHash) {
         var hashes = jdbc.queryForList("select content_hash from pricing_catalog_revision where source_revision=?", String.class, revision);
         if (hashes.isEmpty()) throw new IllegalStateException("Release provisioning required: configured pricing catalog is missing");
         if (!expectedHash.equals(hashes.getFirst())) throw new IllegalStateException("Catalog revision payload conflict");
     }
-    public void restoreRevision(String revision) {
+    public void restoreRevision(String revision, String contentHash) {
+        verifyExpectedHash(revision, contentHash);
         var rows = jdbc.query("select id,generation from pricing_catalog_revision where source_revision=?",
                 (rs,n) -> new Revision(rs.getString(1),rs.getLong(2)), revision);
         if (rows.size() != 1) throw new IllegalStateException("Release provisioning required: configured pricing catalog is missing");

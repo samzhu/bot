@@ -16,7 +16,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @io.github.samzhu.bot.UseTestFakes
 @SpringBootTest
 @ActiveProfiles("test")
-@Import({Postgres16CompatibilityIntegrationTests.Pg16Config.class, TestProvisioningConfiguration.class})
+@Import({Postgres16CompatibilityIntegrationTests.Pg16Config.class})
 class Postgres16CompatibilityIntegrationTests {
 
     @TestConfiguration(proxyBeanMethods = false)

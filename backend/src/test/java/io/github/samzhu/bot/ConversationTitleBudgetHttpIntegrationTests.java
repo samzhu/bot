@@ -570,7 +570,7 @@ class ConversationTitleBudgetHttpIntegrationTests {
         }
     }
 
-    @Test void auditedTitleReconciliationReplacesHeldReservation(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws Exception {
+    @Test void auditedTitleReconciliationReplacesHeldReservation() throws Exception {
         TEST_NOW.set(java.time.Instant.parse("2026-05-31T15:59:50Z"));
         chatModel().reset(); chatModel().setHoldMode(true);
         loopback.requests.set(0); loopback.success=true; loopback.hold=true; loopback.parityUsage=true;
@@ -580,7 +580,13 @@ class ConversationTitleBudgetHttpIntegrationTests {
         jdbc.update("insert into workspace_member(workspace_id,user_id,role,active) values (?,'dev-user','MANAGER',true)",scope);
         jdbc.update("insert into bot(id,name,system_prompt,created_at) values ('bot-general','General','test',current_timestamp) on conflict(id) do nothing");
         var price=new io.github.samzhu.bot.pricing.PriceSnapshot("GOOGLE","interactions","gemini-3.5-flash-lite","GEMINI_API","synthetic",Map.of("input","1","cache_read","0.1","output","2","thoughts","2"));
-        catalog.publish("initial-"+UUID.randomUUID(),"synthetic",List.of(new io.github.samzhu.bot.pricing.PriceCatalog.Entry(price,java.time.Instant.parse("2026-01-01T00:00:00Z"),java.time.Instant.parse("2027-01-01T00:00:00Z"))));
+        String initialSourceRevision = "initial-" + UUID.randomUUID();
+        String initialSourceReference = "synthetic";
+        var initialEntries = List.of(new io.github.samzhu.bot.pricing.PriceCatalog.Entry(price,
+                java.time.Instant.parse("2026-01-01T00:00:00Z"),
+                java.time.Instant.parse("2027-01-01T00:00:00Z")));
+        String initialContentHash = io.github.samzhu.bot.pricing.CatalogHash.contentHash(initialSourceReference, initialEntries);
+        var initial = catalog.publish(initialSourceRevision, initialSourceReference, initialEntries);
         var created=http.send(request("/graphql",Map.of("query","mutation($w:ID!){createConversation(botId:\"bot-general\",workspaceId:$w){id}}","variables",Map.of("w",scope))),HttpResponse.BodyHandlers.ofString());
         String id=json.readTree(created.body()).path("data").path("createConversation").path("id").asText();
         assertFalse(id.isBlank(),created.body());
@@ -603,42 +609,15 @@ class ConversationTitleBudgetHttpIntegrationTests {
             String attempt=jdbc.queryForObject("select id from provider_attempt where title_conversation_id=?",String.class,id);
             String version=jdbc.queryForObject("select projection_version::text from provider_attempt where id=?",String.class,attempt);
             assertEquals("HELD",jdbc.queryForObject("select state from workspace_title_reservation where conversation_id=?",String.class,id));
-            var yaml=dir.resolve("pricing/catalog.yaml"); java.nio.file.Files.createDirectories(yaml.getParent());
-            String fixture="""
-                environments:
-                  prod:
-                    revision: synthetic-title-reconcile
-                    sourceReference: https://example.org/synthetic
-                    entries: [title]
-                  dev:
-                    revision: synthetic-title-reconcile-dev
-                    sourceReference: https://example.org/synthetic
-                    entries: [title]
-                entries:
-                  title:
-                    provider: GOOGLE
-                    endpoint: interactions
-                    model: gemini-3.5-flash-lite
-                    channel: GEMINI_API
-                    priceRevision: synthetic-title
-                    fromInclusive: '2026-05-31T15:59:50Z'
-                    untilExclusive: '2026-06-01T00:00:00Z'
-                    metadata:
-                      serviceTier: STANDARD
-                      tokenUnit: USD_PER_1000000_TOKENS
-                      sources: [https://example.org/synthetic]
-                      verifiedDate: '2026-01-01'
-                    rates:
-                      input: '1'
-                      cache_read: '0.1'
-                      output: '2'
-                      thoughts: '2'
-                """;
-            java.nio.file.Files.writeString(yaml,fixture);
-            var log=dir.resolve("admin.log");
-            var process=new ProcessBuilder(java.nio.file.Path.of(System.getProperty("java.home"),"bin","java").toString(),"-cp",dir+java.io.File.pathSeparator+System.getProperty("release.test.classpath"),"io.github.samzhu.bot.bootstrap.ReleaseProvisioningApplication","--spring.datasource.url="+postgres.getJdbcUrl(),"--spring.datasource.username="+postgres.getUsername(),"--spring.datasource.password="+postgres.getPassword(),"--bot.release.action=initialize-prod","--management.otlp.metrics.export.enabled=false","--bot.release.expected-jdbc-url="+postgres.getJdbcUrl()).redirectErrorStream(true).redirectOutput(log.toFile()).start();
-            assertTrue(process.waitFor(90,TimeUnit.SECONDS)); assertEquals(0,process.exitValue(),()->"admin: "+readLog(log));
-            String revision=jdbc.queryForObject("select id from pricing_catalog_revision where source_revision='synthetic-title-reconcile'",String.class);
+            var auditPrice = new io.github.samzhu.bot.pricing.PriceSnapshot("GOOGLE", "interactions",
+                    "gemini-3.5-flash-lite", "GEMINI_API", "synthetic-title", price.rates());
+            String revision = catalog.publish("synthetic-title-reconcile", "https://example.org/synthetic",
+                    List.of(new io.github.samzhu.bot.pricing.PriceCatalog.Entry(auditPrice,
+                            java.time.Instant.parse("2026-05-31T15:59:50Z"),
+                            java.time.Instant.parse("2026-06-01T00:00:00Z")))).id();
+            assertNotEquals(initial.id(), revision);
+            // Keep the audit revision available for explicit reconciliation while dispatch uses the original catalog.
+            catalog.restoreRevision(initialSourceRevision, initialContentHash);
             TEST_NOW.set(java.time.Instant.parse("2026-05-31T16:00:10Z"));
             String query="mutation($input:ReconcileCostInput!){reconcileCost(input:$input){outcome revision{id status completeAmount} }}";
             var input=new java.util.HashMap<String,Object>(); input.put("workspaceId",scope); input.put("attemptId",attempt); input.put("expectedRevision",null); input.put("expectedSourceProjectionVersion",version); input.put("idempotencyKey","title-reconcile"); input.put("catalogRevisionId",revision); input.put("evidenceReference","synthetic"); input.put("reason","verified");
@@ -684,6 +663,9 @@ class ConversationTitleBudgetHttpIntegrationTests {
             String attempt2=jdbc.queryForObject("select id from provider_attempt where title_conversation_id=?",String.class,id2);
             String original=jdbc.queryForObject("select estimate_id from usage_cost_current where attempt_id=?",String.class,attempt2);
             String originalPrice=jdbc.queryForObject("select price_snapshot_id from usage_cost_estimate where id=?",String.class,original);
+            assertEquals(initial.id(), jdbc.queryForObject("""
+                    select catalog_revision_id from usage_price_snapshot where id=? and origin='AUTO_DISPATCH'
+                    """, String.class, originalPrice));
             String version2=jdbc.queryForObject("select projection_version::text from provider_attempt where id=?",String.class,attempt2);
             var before2=json.readTree(http.send(request("/graphql",Map.of("query","query($w:ID!,$a:ID!){workspaceUsageAttempt(workspaceId:$w,id:$a){cost{completeAmount currentRevision}}}","variables",Map.of("w",scope2,"a",attempt2))),HttpResponse.BodyHandlers.ofString()).body());
             assertEquals("0.000112000000",before2.path("data").path("workspaceUsageAttempt").path("cost").path("completeAmount").asText(),before2.toString());
@@ -691,10 +673,16 @@ class ConversationTitleBudgetHttpIntegrationTests {
             var audited=json.readTree(http.send(request("/graphql",Map.of("query",query,"variables",Map.of("input",input2))),HttpResponse.BodyHandlers.ofString()).body());
             assertFalse(audited.has("errors"),audited.toString());
             assertEquals("0.000112000000",audited.path("data").path("reconcileCost").path("revision").path("completeAmount").asText());
+            String auditedEstimate = audited.path("data").path("reconcileCost").path("revision").path("id").asText();
+            assertEquals(revision, jdbc.queryForObject("""
+                    select p.catalog_revision_id from usage_cost_estimate e
+                    join usage_price_snapshot p on p.id=e.price_snapshot_id
+                    where e.id=? and p.origin='AUDITED_RECONCILIATION'
+                    """, String.class, auditedEstimate));
             assertEquals(originalPrice,jdbc.queryForObject("select price_snapshot_id from usage_cost_estimate where id=?",String.class,original));
             assertEquals(2,jdbc.queryForObject("select count(*) from usage_cost_estimate where attempt_id=?",Integer.class,attempt2));
             var expired=catalog.publish("exclusive-end-"+UUID.randomUUID(),"synthetic",List.of(new io.github.samzhu.bot.pricing.PriceCatalog.Entry(price,java.time.Instant.parse("2026-01-01T00:00:00Z"),java.time.Instant.parse("2026-05-31T15:59:50Z"))));
-            input2.put("idempotencyKey","exclusive-end"); input2.put("catalogRevisionId",expired.id()); input2.put("expectedRevision",audited.path("data").path("reconcileCost").path("revision").path("id").asText());
+            input2.put("idempotencyKey","exclusive-end"); input2.put("catalogRevisionId",expired.id()); input2.put("expectedRevision",auditedEstimate);
             var outside=json.readTree(http.send(request("/graphql",Map.of("query",query,"variables",Map.of("input",input2))),HttpResponse.BodyHandlers.ofString()).body());
             assertFalse(outside.has("errors"),outside.toString());
             assertNotEquals("COMPLETE",outside.path("data").path("reconcileCost").path("revision").path("status").asText());
@@ -706,7 +694,6 @@ class ConversationTitleBudgetHttpIntegrationTests {
             jdbc.execute("drop function if exists test_fail_reconcile_hold()");
         }
     }
-    private static String readLog(java.nio.file.Path path) { try { return java.nio.file.Files.readString(path); } catch (java.io.IOException ex) { return ex.toString(); } }
 
     @Test void durableUsageAndTitleSurvivePricingWriteFailure() throws Exception {
         assertTrue(environment.matchesProfiles("test") && environment.getProperty("bot-ai-provider") == null);
@@ -1052,7 +1039,7 @@ class ConversationTitleBudgetHttpIntegrationTests {
     }
 
     @Test void peerAdmissionWaitsForAtomicTitleSettlement() throws Exception {
-        var app=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class,TestChatModelConfiguration.class,TestUsageCaptureConfiguration.class,TestProvisioningConfiguration.class).profiles("test");
+        var app=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class,TestChatModelConfiguration.class,TestUsageCaptureConfiguration.class).profiles("test");
         app.initializers(context -> context.getEnvironment().getPropertySources().addFirst(new org.springframework.core.env.MapPropertySource("isolated-peer",Map.of(
                 "server.port","0","spring.datasource.url",postgres.getJdbcUrl(),"spring.datasource.username",postgres.getUsername(),"spring.datasource.password",postgres.getPassword(),"spring.docker.compose.enabled","false"))));
         try (var peer=app.run(); var barrier=dataSource.getConnection()) {
@@ -1108,7 +1095,7 @@ class ConversationTitleBudgetHttpIntegrationTests {
     }
 
     @Test void peerWeeklyConfigurationWaitsForTitleAdmission() throws Exception {
-        var app=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class,TestChatModelConfiguration.class,TestUsageCaptureConfiguration.class,TestProvisioningConfiguration.class).profiles("test");
+        var app=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class,TestChatModelConfiguration.class,TestUsageCaptureConfiguration.class).profiles("test");
         app.initializers(context -> context.getEnvironment().getPropertySources().addFirst(new org.springframework.core.env.MapPropertySource("isolated-peer",Map.of(
                 "server.port","0","spring.datasource.url",postgres.getJdbcUrl(),"spring.datasource.username",postgres.getUsername(),"spring.datasource.password",postgres.getPassword(),"spring.docker.compose.enabled","false"))));
         try (var peer=app.run(); var barrier=dataSource.getConnection()) {

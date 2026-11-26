@@ -57,7 +57,7 @@ cd backend
 ./gradlew bootRun --args="--spring.profiles.active=dev --spring.ai.model.chat=google-genai"
 ```
 
-Spring Boot starts or connects the Compose database and Grafana. With `dev` and Compose enabled, the release provisioner applies pending Liquibase migrations and initializes the development reference data before readiness. An explicitly configured datasource URL is rejected while Compose provisioning is enabled; see [Release database preparation](#release-database-preparation) for the initialization boundaries.
+Spring Boot starts or connects the Compose database and Grafana, then runs Liquibase against PostgreSQL. See [Database startup](#database-startup).
 
 Boot reconciles selected Compose services and leaves them running when the app exits. A provider switch leaves an already running Ollama service running. From `backend`, `docker compose --profile ollama stop ollama` stops only Ollama. To stop the database and Grafana as well, use `docker compose --profile ollama stop`. Both preserve volumes.
 
@@ -94,53 +94,11 @@ The frontend has its own installation, development, build, and verification work
 - [GitHub Sub-issue #7 (T1): 乾淨重建後可正常聊天](https://github.com/samzhu/bot/issues/7)
 - [GitHub Sub-issue #8 (T2): local啟動即可查看完整示範](https://github.com/samzhu/bot/issues/8) (Blocked by #7)
 
-### Test fixtures and artifacts
+### Database startup
 
-Tests explicitly provide Fake model boundaries and synthetic data where needed. The released service expects a provisioned database. The development launcher provisions the schema and required reference data for Compose. Demonstration conversations and usage remain separate fixtures. Test fixtures and private configuration are excluded from production artifacts.
+Spring Boot runs Liquibase during application startup against the configured PostgreSQL. Start the first deployment on an empty database. Databases from before Liquibase adoption require a separate transition before running this version. The database role needs the permissions required by the migrations. The same startup path creates the default Bot and publishes the reference pricing catalog. Liquibase records applied changesets in `databasechangelog` and coordinates concurrent migrations with `databasechangeloglock`. Update the schema or reference data by adding changesets.
 
-### Release database preparation
-
-Build the service image and the standalone Java 25 admin archive from the same source revision and version:
-
-```bash
-cd backend
-./gradlew bootBuildImage --imageName=bot:0.0.1-SNAPSHOT
-./gradlew adminBootJar
-```
-
-Run the admin entry point twice against the intended PostgreSQL, using deployment-injected `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, and `SPRING_DATASOURCE_PASSWORD`:
-
-```bash
-cd backend
-java -jar build/libs/bot-0.0.1-SNAPSHOT-admin.jar --bot.release.action=schema-only
-java -jar build/libs/bot-0.0.1-SNAPSHOT-admin.jar --bot.release.action=initialize-prod --bot.release.expected-jdbc-url=YOUR_EXPECTED_JDBC_URL
-```
-
-The first command runs versioned migrations. The second checks the actual transaction-bound JDBC connection against the independently configured expected JDBC URL, verifies the completed schema, and atomically initializes the production Bot and pricing catalog from version-controlled production SQL. The URL comparison is exact, including host, port, database and any URL parameters. Configure the expected URL independently from the datasource; supply credentials separately, not in either URL. This endpoint check does not authenticate the server or TLS connection. SRE must provide appropriate credentials and network protections to isolate environments. Start the service only after both commands succeed. Running either again preserves existing records; a conflicting catalog revision fails initialization. Omitting an action, or providing an empty, unknown, or repeated action, fails before database writes.
-
-For a database fully provisioned by release #76, the admin command checks the exact legacy filename receipts and representative schema, then uses Liquibase to register only the verified historical changes before applying newer changes. The legacy `schema_version` remains as an audit record. A partial, unknown or mismatched baseline is refused; investigate the diagnostic and preserve the database rather than editing receipts or clearing checksums. The old filename receipts do not prove historical SQL checksums.
-
-For the initial cutover from #76:
-
-1. Stop new traffic and quiesce all old application instances, including their in-flight work. Confirm they have stopped before running the new release's admin command; do not overlap old runtime instances with the new release.
-2. Run the new release's admin command against the intended database. On failure, stop the cutover and investigate; do not start the new service until preparation succeeds.
-3. Start the application from the same release and check its readiness and existing Run status diagnostics before restoring traffic. Investigate legacy Runs whose outcome is unknown using their Run IDs and persisted evidence; do not rewrite their states solely because ownership is unknown.
-4. Verify the actual service image and standalone admin archive for the release, including the service image's exclusion of admin, migration, initialization and test resources, before accepting the delivery.
-
-The former `bot.pricing.catalog.*` configuration is retired and is rejected; update deployment configuration to use the version-controlled environment SQL.
-
-Service readiness reads metadata generated from the selected environment's version-controlled SQL, verifies the corresponding published revision, and restores that exact revision. It does not publish prices. Existing Bot customizations and historical usage and prices are retained.
-
-For local development, `./dev.sh` uses the dev profile and the Compose-managed PostgreSQL connection. It migrates the schema and initializes the development SQL before scheduled work begins. The development catalog includes the published OpenAI `gpt-5.4-mini` price as a reference; this does not enable that provider or make a model call. The production SQL does not include it. Dev provisioning rejects an explicitly configured datasource URL. For a separate datasource, use the service-style `local` profile with Compose disabled after running both production initialization commands above. Set the datasource URL and credentials through the environment and select a local provider as described above:
-
-```bash
-cd backend
-./gradlew bootRun --args='--spring.profiles.active=local --spring.docker.compose.enabled=false'
-```
-
-This service-style path expects the production catalog revision. The `dev` profile instead expects the development revision, and its automatic initialization is limited to the verified Compose connection.
-
-Liquibase records each migration in `databasechangelog`; `schema_version` is retained as legacy audit structure and is empty on a fresh installation. If provisioning fails, inspect the diagnostic and database history, resolve the cause, and retry the same development launch or admin action. Do not clear checksums or remove tracking rows to bypass a mismatch.
+From `backend/`, `./gradlew bootRun` with the `dev` profile and a selected chat provider lets Spring Boot start Compose and discover PostgreSQL. `./dev.sh` also starts the frontend after the backend becomes ready. The `dev` Liquibase context selects the development catalog, including the OpenAI price reference. Other profiles use the production catalog by default. Test runs use isolated PostgreSQL with Fake model boundaries. Demo conversations and usage are separate fixtures.
 
 ### Backend Test Suites
 ```bash
