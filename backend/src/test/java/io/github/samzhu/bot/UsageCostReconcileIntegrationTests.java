@@ -1,5 +1,6 @@
 package io.github.samzhu.bot;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.samzhu.bot.usage.pricing.UsageCaseData;
 import org.junit.jupiter.api.AfterEach;
@@ -14,6 +15,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
 
@@ -149,8 +151,83 @@ class UsageCostReconcileIntegrationTests {
         assertEquals(0,jdbc.queryForObject("select count(*) from usage_cost_revision_audit where attempt_id=?",Integer.class,id));
         assertEquals(0,jdbc.queryForObject("select count(*) from usage_cost_current where attempt_id=?",Integer.class,id));
     }
+    @Test
+    void reconcilePrecisionUnsupportedRetainsExactAmountAndRawWithoutPublishingZeroComplete() throws Exception {
+        String suffix=UUID.randomUUID().toString().substring(0,8);
+        String workspace="precision-w-"+suffix, attempt="precision-a-"+suffix;
+        String snapshot="precision-s-"+suffix, catalog="precision-c-"+suffix, entry="precision-e-"+suffix;
+        String raw="{\"promptTokenCount\":1,\"cachedContentTokenCount\":0,\"candidatesTokenCount\":0,\"thoughtsTokenCount\":0,\"toolUsePromptTokenCount\":0,\"totalTokenCount\":1}";
+        data.createWorkspace(workspace, "dev-user");
+        jdbc.update("insert into provider_attempt(id,workspace_id,actor_id,provider,endpoint,model,channel,adapter_version,simulation,attempt_coverage,prepared_at,started_at,finished_at,execution_outcome,usage_presence,capture_completeness,projection_state,projection_version) values (?,?,?,'FAKE_GEMINI','generateContent','fixture-gemini','FAKE','1',true,'VERIFIED',now(),now(),now(),'SUCCEEDED','PRESENT','COMPLETE','VALID',1)",attempt,workspace,"dev-user");
+        jdbc.update("insert into usage_snapshot(id,attempt_id,event_id,payload_hash,ordinal,semantic,source_layer,schema_version,adapter_version,capture_version,capture_completeness,raw_state,raw_usage,captured_at) values (?,?,?,'precision-hash',1,'FINAL','FAKE_RAW','pricing-fixture-v1','1','1','COMPLETE','JSONB',?::jsonb,now())",snapshot,attempt,"event-"+snapshot,raw);
+        jdbc.update("update provider_attempt set projection_snapshot_id=? where id=?",snapshot,attempt);
+        data.createCatalogRevision(catalog, catalog);
+        jdbc.update("insert into pricing_catalog_entry(id,revision_id,provider,endpoint,model,channel,price_revision,effective_from,effective_until,rates) values (?,?,'FAKE_GEMINI','generateContent','fixture-gemini','FAKE','tiny-rate',now()-interval '1 day',now()+interval '1 day','{\"input\":\"0.0000000000000000001\",\"cache_read\":\"1\",\"output\":\"1\",\"thoughts\":\"1\",\"tool_input\":\"1\"}'::jsonb)",entry,catalog);
+
+        JsonNode response=reconcile(workspace, attempt, "precision-reconcile-"+suffix, catalog);
+        assertFalse(response.has("errors"),response.toString());
+        JsonNode operation=response.path("data").path("reconcileCost");
+        JsonNode revision=operation.path("revision");
+        assertEquals("PARTIAL",revision.path("status").asText());
+        assertTrue(revision.path("reasons").toString().contains("PRECISION_UNSUPPORTED"));
+        assertTrue(revision.path("completeAmount").isNull());
+        assertTrue(operation.path("effectiveCost").path("completeAmount").isNull());
+        assertTrue(operation.path("effectiveCost").path("amount").isNull());
+
+        String estimate=revision.path("id").asText();
+        String details=jdbc.queryForObject("select details::text from usage_cost_estimate where id=?",String.class,estimate);
+        JsonNode detailTree=json.readTree(details);
+        JsonNode inputLine=null;
+        for(JsonNode line:detailTree.path("lines")) if("input".equals(line.path("category").asText())) inputLine=line;
+        assertNotNull(inputLine,details);
+        assertEquals("0.0000000000000000000000001",inputLine.path("exactAmount").asText());
+        assertEquals("PRECISION_UNSUPPORTED",inputLine.path("reason").asText());
+        assertTrue(inputLine.path("storedAmount").isNull());
+        assertNotEquals("COMPLETE",jdbc.queryForObject("select status from usage_cost_estimate where id=?",String.class,estimate));
+        assertNull(jdbc.queryForObject("select complete_amount from usage_cost_estimate where id=?",java.math.BigDecimal.class,estimate));
+        assertTrue(jdbc.queryForObject("select raw_usage=?::jsonb from usage_snapshot where id=?",Boolean.class,raw,snapshot));
+        assertEquals(snapshot,jdbc.queryForObject("select projection_snapshot_id from provider_attempt where id=?",String.class,attempt));
+    }
+
+    @Test
+    void overlappingCatalogEntriesCannotProduceCompleteReconciliation() throws Exception {
+        String suffix=UUID.randomUUID().toString().substring(0,8), workspace="overlap-w-"+suffix, id="overlap-a-"+suffix, snap="overlap-s-"+suffix, catalog="overlap-c-"+suffix;
+        data.createWorkspace(workspace, "dev-user");
+        jdbc.update("insert into provider_attempt(id,workspace_id,actor_id,provider,endpoint,model,channel,adapter_version,simulation,attempt_coverage,prepared_at,started_at,finished_at,execution_outcome,usage_presence,capture_completeness,projection_state,projection_version) values (?,?,?,'FAKE_GEMINI','generateContent','fixture-gemini','FAKE','1',true,'VERIFIED',now(),now(),now(),'SUCCEEDED','PRESENT','COMPLETE','VALID',1)",id,workspace,"dev-user");
+        String raw="{\"promptTokenCount\":1000,\"cachedContentTokenCount\":200,\"candidatesTokenCount\":300,\"thoughtsTokenCount\":100,\"toolUsePromptTokenCount\":0,\"totalTokenCount\":1400}";
+        jdbc.update("insert into usage_snapshot(id,attempt_id,event_id,payload_hash,ordinal,semantic,source_layer,schema_version,adapter_version,capture_version,capture_completeness,raw_state,raw_usage,captured_at) values (?,?,?,'hash',1,'FINAL','FAKE_RAW','pricing-fixture-v1','1','1','COMPLETE','JSONB',?::jsonb,now())",snap,id,"event-"+suffix,raw);
+        jdbc.update("update provider_attempt set projection_snapshot_id=? where id=?",snap,id);
+        data.createCatalogRevision(catalog, catalog);
+        for(int i=0;i<2;i++) jdbc.update("insert into pricing_catalog_entry(id,revision_id,provider,endpoint,model,channel,price_revision,effective_from,effective_until,rates) values (?,?, 'FAKE_GEMINI','generateContent','fixture-gemini','FAKE',?,now()-interval '1 day',now()+interval '1 day','{\"input\":\"1\",\"cache_read\":\"0.1\",\"output\":\"2\",\"thoughts\":\"2\",\"tool_input\":\"1\"}'::jsonb)","overlap-entry-"+i+"-"+suffix,catalog,"price-"+i);
+        JsonNode result=reconcile(workspace, id, "overlap-key-"+suffix, catalog);
+        assertFalse(result.has("errors"),result.toString());
+        JsonNode revision=result.path("data").path("reconcileCost").path("revision");
+        assertNotEquals("COMPLETE",revision.path("status").asText());
+        assertTrue(revision.path("completeAmount").isNull());
+        assertTrue(revision.path("reasons").toString().contains("OVERLAPPING_PRICE"));
+    }
+    private JsonNode reconcile(String workspace, String attempt, String key, String catalog) throws Exception {
+        return graph("""
+                mutation {
+                  reconcileCost(input: {
+                    workspaceId: "%s", attemptId: "%s", expectedSourceProjectionVersion: "1",
+                    idempotencyKey: "%s", catalogRevisionId: "%s",
+                    evidenceReference: "\u00a0證據\u202f", reason: "\u202f理由\u00a0"
+                  }) { outcome revision { id status reasons completeAmount } effectiveCost { completeAmount amount } }
+                }
+                """.formatted(workspace, attempt, key, catalog));
+    }
+
     private com.fasterxml.jackson.databind.JsonNode graph(String query) throws Exception {
-        var request=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/graphql")).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(Map.of("query",query)))).build();
-        return json.readTree(HttpClient.newHttpClient().send(request,HttpResponse.BodyHandlers.ofString()).body());
+        var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/graphql"))
+                .timeout(Duration.ofSeconds(10))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(Map.of("query", query))))
+                .build();
+        try (var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build()) {
+            var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, response.statusCode(), response.body());
+            return json.readTree(response.body());
+        }
     }
 }

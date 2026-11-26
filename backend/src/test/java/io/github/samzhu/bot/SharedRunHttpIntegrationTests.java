@@ -5,6 +5,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.genai.types.GenerateContentResponseUsageMetadata;
 import com.zaxxer.hikari.HikariDataSource;
+import io.github.samzhu.bot.usage.ConversationTitleAdmission;
+import io.github.samzhu.bot.usage.RunRecoverySweep;
+import io.github.samzhu.bot.usage.UsageLedger;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -63,6 +66,9 @@ class SharedRunHttpIntegrationTests {
     @Autowired TransactionTemplate transactions;
     @Autowired BackendTestChatModel model;
     @Autowired SessionService sessions;
+    @Autowired RunRecoverySweep recovery;
+    @Autowired ConversationTitleAdmission titleAdmission;
+    @Autowired UsageLedger ledger;
 
     @BeforeEach
     void createWorkspace() {
@@ -497,6 +503,147 @@ class SharedRunHttpIntegrationTests {
     }
 
     @Test
+    void legacySseDisconnectCancelsStalledModelAndAllowsNextRun() throws Exception {
+        String conversation = conversation();
+        String path = legacyPath(conversation);
+        var pending = Sinks.<ChatResponse>one();
+        var subscribed = new CountDownLatch(1);
+        var cancelled = new CountDownLatch(1);
+        model.streamWith(pending.asMono().flux()
+                .doOnSubscribe(subscription -> subscribed.countDown())
+                .doOnCancel(cancelled::countDown));
+
+        try {
+            var response = http.send(request(path, legacyInput("Disconnect while the model is stalled")),
+                    HttpResponse.BodyHandlers.ofLines());
+            String run;
+            try (var lines = response.body()) {
+                assertEventStream(response);
+                var initial = readEvents(lines.dropWhile(line -> !line.startsWith("event:")).limit(2), event -> {});
+                assertThat(initial).hasSize(1);
+                var started = initial.getFirst();
+                assertThat(started.name()).isEqualTo("run.started");
+                assertThat(started.data().path("seq").asInt()).isEqualTo(1);
+                run = started.data().path("runId").asText();
+                assertThat(run).isNotBlank();
+                assertThat(subscribed.await(5, TimeUnit.SECONDS)).isTrue();
+                assertThat(runStatus(run)).isEqualTo("RUNNING");
+            }
+
+            // The live stream is idle. Allow the default 15 s heartbeat to detect the closed HTTP body.
+            assertThat(cancelled.await(35, TimeUnit.SECONDS)).isTrue();
+            awaitTerminalWork();
+            assertThat(runStatus(run)).isEqualTo("CANCELLED");
+            assertThat(sessions.getActiveMessages(conversation)).isEmpty();
+
+            model.streamWith(Flux.just(usageChunk("Next reply")));
+            var finished = onlyLegacyTerminal(events(post(path, legacyInput("Next turn after disconnect"))));
+            assertThat(finished.name()).isEqualTo("run.completed");
+            assertThat(runStatus(finished.data().path("runId").asText())).isEqualTo("COMPLETED");
+            assertThat(sessions.getActiveMessages(conversation)).extracting(message -> message.getText())
+                    .containsExactly("Next turn after disconnect", "Next reply");
+            assertThat(model.invocations()).isEqualTo(2);
+        } finally {
+            pending.tryEmitEmpty();
+        }
+    }
+
+    @Test
+    void expiredRunWithNoRegistrationRecoversWithoutModelDispatch() throws Exception {
+        String conversation = conversation();
+        String run = UUID.randomUUID().toString();
+        transactions.executeWithoutResult(status -> {
+            jdbc.update("""
+                    insert into chat_run(id,conversation_id,client_request_id,input_text,status)
+                    values (?,?,?,'Fixture Run','RUNNING')
+                    """, run, conversation, run);
+            jdbc.update("""
+                    insert into run_ownership(run_id,owner_token,generation,lease_until)
+                    values (?,?,1,clock_timestamp()-interval '1 second')
+                    """, run, UUID.randomUUID().toString());
+        });
+
+        recovery.recoverExpiredBatch();
+        var response = post("/graphql", Map.of("query", "query($id: ID!) { run(id: $id) { id status } }",
+                "variables", Map.of("id", run)));
+        assertThat(response.statusCode()).isEqualTo(200);
+        var result = json.readTree(response.body());
+        assertThat(result.has("errors")).isFalse();
+        assertThat(result.path("data").path("run").path("status").asText()).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("select generation from run_ownership where run_id = ?", Long.class, run))
+                .isEqualTo(2L);
+        assertThat(jdbc.queryForObject("select count(*) from provider_attempt where run_id = ?", Integer.class, run))
+                .isZero();
+        assertThat(model.invocations()).isZero();
+    }
+
+    @Test
+    void expiredTitleClaimCannotAdmitNewWorkOrAppendLateUsage() throws Exception {
+        String expired = conversation(false);
+        String live = conversation(false);
+        String settled = conversation(false);
+        String expiredAttempt = UUID.randomUUID().toString();
+        String liveAttempt = UUID.randomUUID().toString();
+        String settledAttempt = UUID.randomUUID().toString();
+
+        jdbc.update("""
+                update conversation_title_work set state='CLAIMED',
+                    claimed_until=clock_timestamp()-interval '1 second' where conversation_id=?
+                """, expired);
+        assertThat(titleAdmission.allow(expired)).isEqualTo(ConversationTitleAdmission.Decision.DENIED);
+        assertThat(jdbc.queryForObject("select count(*) from provider_attempt where title_conversation_id=?",
+                Integer.class, expired)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from workspace_title_reservation where conversation_id=?",
+                Integer.class, expired)).isZero();
+
+        transactions.executeWithoutResult(status -> {
+            seedTitleAttempt(expired, expiredAttempt, -1, "IN_PROGRESS", 0);
+            seedTitleAttempt(live, liveAttempt, 600, "IN_PROGRESS", 0);
+            seedTitleAttempt(settled, settledAttempt, -1, "SUCCEEDED", 7);
+        });
+        recovery.recoverExpiredBatch();
+
+        assertTitleAttempt(expired, expiredAttempt, "UNKNOWN", "UNKNOWN");
+        assertTitleAttempt(live, liveAttempt, "IN_PROGRESS", "HELD");
+        assertTitleAttempt(settled, settledAttempt, "SUCCEEDED", "HELD");
+        assertThat(jdbc.queryForObject("select projection_version from provider_attempt where id=?",
+                Long.class, settledAttempt)).isEqualTo(7L);
+        var late = new UsageLedger.Snapshot("late", 1, "FINAL", "FAKE", "1", "1", "1", "COMPLETE", "{}");
+        assertThatThrownBy(() -> ledger.append(expiredAttempt, late)).isInstanceOf(RuntimeException.class);
+        assertThat(jdbc.queryForObject("select count(*) from usage_snapshot where attempt_id=?",
+                Integer.class, expiredAttempt)).isZero();
+        assertThat(model.titleInputs()).isEmpty();
+        assertThat(model.invocations()).isZero();
+    }
+
+    private void seedTitleAttempt(String conversation, String attempt, int leaseSeconds, String outcome, long version) {
+        jdbc.update("""
+                update conversation_title_work set state='CLAIMED',
+                    claimed_until=clock_timestamp()+(? * interval '1 second') where conversation_id=?
+                """, leaseSeconds, conversation);
+        jdbc.update("""
+                insert into provider_attempt(id,workspace_id,actor_id,provider,endpoint,model,channel,adapter_version,
+                    simulation,attempt_coverage,prepared_at,started_at,execution_outcome,usage_presence,
+                    capture_completeness,projection_state,purpose,title_conversation_id,projection_version)
+                values (?,?,'dev-user','FAKE','test','fake','FAKE','1',false,'VERIFIED',now(),now(),?,'PENDING',
+                    'UNKNOWN','UNKNOWN','CONVERSATION_TITLE',?,?)
+                """, attempt, workspace, outcome, conversation, version);
+        jdbc.update("""
+                insert into workspace_title_reservation(conversation_id,workspace_id,actor_id,partition,reserved_at,
+                    month_start,amount_usd,catalog_revision_id,attempt_id,state)
+                select ?,?,'dev-user','REAL',now(),date_trunc('month',clock_timestamp() at time zone 'Asia/Taipei')::date,
+                    1,id,?,'HELD' from pricing_catalog_revision where source_revision='gemini-standard-2026-11-16'
+                """, conversation, workspace, attempt);
+    }
+
+    private void assertTitleAttempt(String conversation, String attempt, String outcome, String hold) {
+        assertThat(jdbc.queryForObject("select execution_outcome from provider_attempt where id=?", String.class, attempt))
+                .isEqualTo(outcome);
+        assertThat(jdbc.queryForObject("select state from workspace_title_reservation where conversation_id=?",
+                String.class, conversation)).isEqualTo(hold);
+    }
+
+    @Test
     void stalledStreamReleasesPostgresConnectionsForConcurrentQueries() throws Exception {
         String conversation = conversation();
         var held = holdModelAfter("Partial reply");
@@ -748,8 +895,13 @@ class SharedRunHttpIntegrationTests {
     }
 
     private String conversation() throws Exception {
+        return conversation(true);
+    }
+
+    private String conversation(boolean named) throws Exception {
+        String title = named ? ", title: \"Run fixture\"" : "";
         var response = post("/graphql", Map.of(
-                "query", "mutation($workspace: ID!) { createConversation(botId: \"bot-general\", title: \"Run fixture\", workspaceId: $workspace) { id } }",
+                "query", "mutation($workspace: ID!) { createConversation(botId: \"bot-general\"%s, workspaceId: $workspace) { id } }".formatted(title),
                 "variables", Map.of("workspace", workspace)));
         assertThat(response.statusCode()).isEqualTo(200);
         var data = json.readTree(response.body());

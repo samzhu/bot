@@ -2,6 +2,7 @@ package io.github.samzhu.bot;
 
 import io.github.samzhu.bot.conversation.ConversationTitleGenerator;
 import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.model.ChatModel;
@@ -31,7 +32,11 @@ public final class BackendTestChatModel implements ChatModel, ConversationTitleG
     }
 
     void titleFor(String firstUserMessage, String title) {
-        titleReply = new TitleReply(firstUserMessage, title);
+        titleFor(firstUserMessage, () -> title);
+    }
+
+    void titleFor(String firstUserMessage, Callable<String> response) {
+        titleReply = new TitleReply(firstUserMessage, response);
     }
 
     List<String> titleInputs() {
@@ -39,13 +44,13 @@ public final class BackendTestChatModel implements ChatModel, ConversationTitleG
     }
 
     @Override
-    public String generate(String firstUserMessage) {
+    public String generate(String firstUserMessage) throws Exception {
         titleInputs.add(firstUserMessage);
         var reply = titleReply;
         if (reply == null || !reply.firstUserMessage().equals(firstUserMessage)) {
             throw new IllegalStateException("Unexpected conversation title invocation");
         }
-        return reply.title();
+        return reply.response().call();
     }
 
     public void reset() {
@@ -77,7 +82,7 @@ public final class BackendTestChatModel implements ChatModel, ConversationTitleG
         });
     }
 
-    private record TitleReply(String firstUserMessage, String title) {}
+    private record TitleReply(String firstUserMessage, Callable<String> response) {}
 
     private record Responses(ChatResponse reply, Flux<ChatResponse> stream) {
     }

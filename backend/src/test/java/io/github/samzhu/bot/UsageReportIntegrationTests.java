@@ -382,6 +382,144 @@ class UsageReportIntegrationTests {
         insertAttempt(id, workspace, actor, startedAt, false);
     }
 
+    @Test
+    void staleCurrentIsExcludedFromReportTotalsAndNestedCost() throws Exception {
+        String workspace = createWorkspace();
+        String attempt = UUID.randomUUID().toString();
+        String price = UUID.randomUUID().toString();
+        String estimate = UUID.randomUUID().toString();
+        var started = java.sql.Timestamp.from(Instant.now().minusSeconds(60));
+        transactions.executeWithoutResult(status -> {
+            jdbc.update("""
+                    insert into provider_attempt(id,workspace_id,actor_id,provider,endpoint,model,channel,adapter_version,
+                        simulation,attempt_coverage,prepared_at,started_at,execution_outcome,usage_presence,
+                        capture_completeness,projection_state,projection_version)
+                    values (?,?,'dev-user','STALE','test','fixture','test','1',false,'VERIFIED',?,?,
+                        'SUCCEEDED','UNKNOWN','UNKNOWN','MISSING',2)
+                    """, attempt, workspace, started, started);
+            jdbc.update("""
+                    insert into usage_price_snapshot(id,attempt_id,selection_state,provider,endpoint,model,channel)
+                    values (?,?,'MISSING','STALE','test','fixture','test')
+                    """, price, attempt);
+            jdbc.update("""
+                    insert into usage_cost_estimate(id,attempt_id,source_version,price_snapshot_id,calculator_version,
+                        status,known_subtotal,complete_amount,details,payload_hash)
+                    values (?,?,1,?,'fixture','COMPLETE',12,12,'{"reasons":[],"lines":[]}'::jsonb,'fixture')
+                    """, estimate, attempt, price);
+            jdbc.update("insert into usage_cost_current(attempt_id,estimate_id) values (?,?)", attempt, estimate);
+            jdbc.update("""
+                    insert into usage_cost_revision_audit(id,attempt_id,estimate_id,kind,idempotency_key,
+                        command_payload,actor_id,recorded_at,source_type,reason)
+                    values (?,?,?,'RECONCILIATION','fixture','{}'::jsonb,'dev-user',now(),'SERVER_RAW_CATALOG','fixture')
+                    """, UUID.randomUUID().toString(), attempt, estimate);
+            // This stale audited pointer already has a checkpoint for the newer source.
+            jdbc.update("""
+                    insert into usage_cost_manual_source_checkpoint(attempt_id,last_processed_projection_version)
+                    values (?,2)
+                    """, attempt);
+        });
+        var response = graph("""
+                { myUsageReport(workspaceId:"%s") {
+                    summary { knownSubtotal completeTotal unknownCount }
+                    attempts { nodes { cost { status knownSubtotal completeAmount needsReprice
+                        sourceProjectionVersion estimateSourceVersion currentRevision reasons } } }
+                } }
+                """.formatted(workspace));
+        assertFalse(response.has("errors"), response.toString());
+        var report = response.path("data").path("myUsageReport");
+        var summary = report.path("summary");
+        var cost = report.path("attempts").path("nodes").path(0).path("cost");
+        assertTrue(summary.path("knownSubtotal").isNull());
+        assertTrue(summary.path("completeTotal").isNull());
+        assertEquals("1", summary.path("unknownCount").asText());
+        assertEquals("UNKNOWN", cost.path("status").asText());
+        assertTrue(cost.path("needsReprice").asBoolean());
+        assertTrue(cost.path("knownSubtotal").isNull());
+        assertTrue(cost.path("completeAmount").isNull());
+        assertTrue(cost.path("currentRevision").isNull());
+        assertEquals("2", cost.path("sourceProjectionVersion").asText());
+        assertEquals("1", cost.path("estimateSourceVersion").asText());
+        assertEquals("SOURCE_CHANGED", cost.path("reasons").path(0).asText());
+    }
+
+    @Test
+    void managerUsageReadDoesNotGrantAccessToAnotherActorsChat() throws Exception {
+        String workspace = createWorkspace();
+        String other = "usage-other-" + UUID.randomUUID();
+        jdbc.update("insert into workspace_member(workspace_id,user_id,role) values (?,?,'MEMBER')", workspace, other);
+        String conversation = UUID.randomUUID().toString();
+        jdbc.update("""
+                insert into conversation(id,bot_id,title,user_id,workspace_id)
+                values (?,'bot-general','another actor',?,?)
+                """, conversation, other, workspace);
+        String attempt = UUID.randomUUID().toString();
+        jdbc.update("""
+                insert into provider_attempt(id,workspace_id,actor_id,provider,endpoint,model,channel,adapter_version,
+                    simulation,attempt_coverage,prepared_at,started_at,execution_outcome,usage_presence,
+                    capture_completeness,projection_state)
+                values (?,?,?,'FAKE','test','fixture','test','1',false,'VERIFIED',now(),now(),
+                    'SUCCEEDED','UNKNOWN','UNKNOWN','MISSING')
+                """, attempt, workspace, other);
+        var response = graph("""
+                { workspaceUsageAttempt(workspaceId:"%s",id:"%s") { id }
+                  conversation(id:"%s") { id } }
+                """.formatted(workspace, attempt, conversation));
+        assertEquals(attempt, response.path("data").path("workspaceUsageAttempt").path("id").asText(),
+                response.toString());
+        assertTrue(response.path("data").path("conversation").isNull(), response.toString());
+    }
+
+    @Test
+    void metadataOnlyFrameCreatesAttemptAndRawSnapshotVisibleThroughGraphql() throws Exception {
+        String workspace = createWorkspace();
+        var created = graph("""
+                mutation { createConversation(botId:"bot-general",workspaceId:"%s",title:"Usage metadata") { id } }
+                """.formatted(workspace));
+        assertFalse(created.has("errors"), created.toString());
+        String conversation = created.path("data").path("createConversation").path("id").asText();
+        assertFalse(conversation.isBlank());
+        String run = UUID.randomUUID().toString();
+        var usage = GenerateContentResponseUsageMetadata.builder().promptTokenCount(0).build();
+        var metadata = ChatResponseMetadata.builder().id("metadata-only-response")
+                .usage(new DefaultUsage(0, 0, 0, usage)).build();
+        var frame = new ChatResponse(List.of(), metadata);
+        model.respondWith(frame, List.of(frame));
+        var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/api/ag-ui"))
+                .timeout(Duration.ofSeconds(15)).header("Content-Type","application/json")
+                .header("Accept","text/event-stream")
+                .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(Map.of(
+                        "threadId",conversation,"runId",run,"state",Map.of(),"tools",List.of(),"context",List.of(),
+                        "forwardedProps",Map.of(),"messages",List.of(Map.of("id","metadata", "role","user","content","usage"))))))
+                .build();
+        try (var client = HttpClient.newHttpClient()) {
+            var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, response.statusCode(), response.body());
+        }
+        assertEquals(1, model.invocations());
+        var result = graph("""
+                { myUsageAttempts(workspaceId:"%s") {
+                  nodes { runId providerResponseId input { value presence } output { value presence }
+                    snapshots { nodes { captureCompleteness rawUsage } } }
+                } }
+                """.formatted(workspace));
+        assertFalse(result.has("errors"), result.toString());
+        var attempt = result.path("data").path("myUsageAttempts").path("nodes").path(0);
+        assertEquals(run, attempt.path("runId").asText());
+        assertEquals("metadata-only-response", attempt.path("providerResponseId").asText());
+        assertEquals("0", attempt.path("input").path("value").asText());
+        assertEquals("PRESENT", attempt.path("input").path("presence").asText());
+        assertEquals("UNKNOWN", attempt.path("output").path("presence").asText());
+        assertTrue(attempt.path("output").path("value").isNull());
+        var snapshots = attempt.path("snapshots").path("nodes");
+        assertEquals(1, snapshots.size());
+        var snapshot = snapshots.path(0);
+        assertEquals("INCOMPLETE", snapshot.path("captureCompleteness").asText());
+        var raw = json.readTree(snapshot.path("rawUsage").asText());
+        assertTrue(raw.path("promptTokenCount").isIntegralNumber());
+        assertEquals(0, raw.path("promptTokenCount").asInt(-1));
+        assertFalse(raw.has("candidatesTokenCount"));
+    }
+
     private JsonNode graph(String query) throws Exception {
         var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/graphql"))
                 .header("Content-Type", "application/json")

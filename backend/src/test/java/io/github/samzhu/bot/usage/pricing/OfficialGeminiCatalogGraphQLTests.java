@@ -3,7 +3,8 @@ package io.github.samzhu.bot;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.samzhu.bot.usage.UsageLedger;
-import io.github.samzhu.bot.workspace.WorkspaceOperations;
+import io.github.samzhu.bot.usage.internal.pricing.PricingPublisher;
+import io.github.samzhu.bot.usage.pricing.UsageCaseData;
 import java.math.BigDecimal;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -12,34 +13,45 @@ import java.net.http.HttpResponse;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
-import org.springframework.context.annotation.Import;
-import org.springframework.test.context.ActiveProfiles;
+import org.springframework.transaction.support.TransactionTemplate;
 import static org.junit.jupiter.api.Assertions.*;
 
-@io.github.samzhu.bot.UseTestFakes
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = {"bot.pricing.reconcile.initial-delay-ms=100", "bot.pricing.reconcile.delay-ms=200"})
-@Import({TestcontainersConfiguration.class, OfficialGeminiCatalogGraphQLTests.Scheduling.class})
-@ActiveProfiles("test")
+@BackendIntegrationTest
 class OfficialGeminiCatalogGraphQLTests {
-    @org.springframework.boot.test.context.TestConfiguration(proxyBeanMethods = false)
-    @org.springframework.scheduling.annotation.EnableScheduling
-    static class Scheduling {}
-
     @LocalServerPort int port;
     @Autowired UsageLedger ledger;
-    @Autowired WorkspaceOperations workspaces;
-    @Autowired javax.sql.DataSource dataSource;
+    @Autowired PricingPublisher publisher;
+    @Autowired io.github.samzhu.bot.usage.UsageCostOperations costs;
+    @Autowired TransactionTemplate transactions;
     @Autowired org.springframework.jdbc.core.JdbcTemplate jdbc;
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newHttpClient();
 
+    private final String workspace = "official-catalog-" + UUID.randomUUID();
+    private UsageCaseData data;
+
+    @BeforeEach
+    void createWorkspace() {
+        data = new UsageCaseData(jdbc, transactions);
+        data.createWorkspace(workspace, "dev-user");
+    }
+
+    @AfterEach
+    void cleanUp() throws InterruptedException {
+        try {
+            data.cleanUp();
+        } finally {
+            http.close();
+        }
+    }
+
     @Test void configuredStandardRatesExposeKnownComponentsForIncompleteUsage() throws Exception {
-        String actor = "dev-user", workspace = workspaces.personal(actor).id();
+        String actor = "dev-user";
         // Independent synthetic SDK-shaped data: not a recorded provider response or a model call.
         String attempt = ledger.begin(new UsageLedger.Dispatch(null,workspace,actor,"GOOGLE","generateContent",
                 "gemini-3.8-flash","GEMINI_API","2.1.0-RC2",false,"UNKNOWN"));
@@ -48,16 +60,7 @@ class OfficialGeminiCatalogGraphQLTests {
                 "1","2.1.0-RC2","1","INCOMPLETE",
                 "{\"promptTokenCount\":1000000,\"cachedContentTokenCount\":200000,\"candidatesTokenCount\":100000,\"thoughtsTokenCount\":50000,\"toolUsePromptTokenCount\":0}"));
         ledger.finish(attempt,"SUCCEEDED");
-        String query="{ workspaceUsageAttempt(workspaceId:\""+workspace+"\",id:\""+attempt+"\") { cost { status knownSubtotal completeAmount needsReprice reasons lineItems { category storedAmount } } } }";
-        JsonNode cost = null;
-        long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
-        do {
-            var result=graph(query);
-            assertFalse(result.has("errors"),result.toString());
-            cost=result.path("data").path("workspaceUsageAttempt").path("cost");
-            if (!cost.path("needsReprice").asBoolean(true)) break;
-            Thread.sleep(50);
-        } while (System.nanoTime()<deadline);
+        JsonNode cost = publishedCost(workspace, attempt);
         assertFalse(cost.path("needsReprice").asBoolean(true),cost.toString());
         assertEquals("PARTIAL",cost.path("status").asText(),cost.toString());
         assertEquals(0,new BigDecimal("1.1775").compareTo(new BigDecimal(cost.path("knownSubtotal").asText())),cost.toString());
@@ -69,65 +72,64 @@ class OfficialGeminiCatalogGraphQLTests {
             assertEquals(0,new BigDecimal(expected.get(category)).compareTo(new BigDecimal(line.path("storedAmount").asText())),line.toString());
         }
         assertEquals(5,cost.path("lineItems").size());
-        System.out.println("GRAPHQL_COST="+cost);
 
     }
 
     @Test void unrecognizedGoogleAdapterDoesNotPublishAnEstimateFromItsCounters() throws Exception {
-        String actor="dev-user", workspace=workspaces.personal(actor).id();
+        String actor = "dev-user";
         String id=ledger.begin(new UsageLedger.Dispatch(null,workspace,actor,"GOOGLE","generateContent","gemini-3.8-flash","GEMINI_API","unknown-adapter",false,"UNKNOWN"));
         assertTrue(ledger.markDispatched(id,clock -> Instant.parse("2026-11-16T00:00:00Z")));
         ledger.append(id,new UsageLedger.Snapshot("fixture-"+UUID.randomUUID(),1,"CUMULATIVE","SDK_NATIVE","1","unknown-adapter","1","INCOMPLETE",
                 "{\"promptTokenCount\":1000000,\"cachedContentTokenCount\":200000,\"candidatesTokenCount\":100000,\"thoughtsTokenCount\":50000,\"toolUsePromptTokenCount\":0}"));
         ledger.finish(id,"SUCCEEDED");
-        JsonNode cost=awaitCost(workspace,id);
+        JsonNode cost=publishedCost(workspace,id);
         assertEquals("UNKNOWN",cost.path("status").asText(),cost.toString());
         assertTrue(cost.path("knownSubtotal").isNull(),cost.toString());
         assertTrue(cost.path("reasons").toString().contains("UNSUPPORTED_ENDPOINT"),cost.toString());
     }
 
     @Test void fakeUsageCannotBePricedOnRealGoogleRoute() throws Exception {
-        String actor="dev-user", workspace=workspaces.personal(actor).id();
+        String actor = "dev-user";
         String id=ledger.begin(new UsageLedger.Dispatch(null,workspace,actor,"GOOGLE","generateContent","gemini-3.8-flash","GEMINI_API","2.1.0",false,"UNKNOWN"));
         assertTrue(ledger.markDispatched(id,clock -> Instant.parse("2026-11-16T00:00:00Z")));
         ledger.append(id,new UsageLedger.Snapshot("fixture-"+UUID.randomUUID(),1,"FINAL","FAKE_RAW","pricing-fixture-v1","1","1","COMPLETE",
                 "{\"promptTokenCount\":1000000,\"cachedContentTokenCount\":200000,\"candidatesTokenCount\":100000,\"thoughtsTokenCount\":50000,\"toolUsePromptTokenCount\":0}"));
         ledger.finish(id,"SUCCEEDED");
-        JsonNode cost=awaitCost(workspace,id);
+        JsonNode cost=publishedCost(workspace,id);
         assertEquals("UNKNOWN",cost.path("status").asText(),cost.toString());
         assertTrue(cost.path("knownSubtotal").isNull(),cost.toString());
         assertTrue(cost.path("reasons").toString().contains("UNSUPPORTED_ENDPOINT"),cost.toString());
     }
 
     @Test void announcedBoundarySelectsNewRatesWithoutChangingEarlierSnapshot() throws Exception {
-        String actor="dev-user", workspace=workspaces.personal(actor).id();
+        String actor = "dev-user";
         String before=syntheticAttempt(workspace,actor,Instant.parse("2026-12-31T23:59:59Z"));
-        JsonNode oldCost=awaitCost(workspace,before);
+        JsonNode oldCost=publishedCost(workspace,before);
         assertEquals(0,new BigDecimal("1.1775").compareTo(new BigDecimal(oldCost.path("knownSubtotal").asText())),oldCost.toString());
         String oldSnapshot=oldCost.path("priceSnapshotId").asText();
         assertFalse(oldSnapshot.isBlank());
         String after=syntheticAttempt(workspace,actor,Instant.parse("2027-01-01T00:00:00Z"));
-        JsonNode newCost=awaitCost(workspace,after);
+        JsonNode newCost=publishedCost(workspace,after);
         assertEquals(0,new BigDecimal("2.355").compareTo(new BigDecimal(newCost.path("knownSubtotal").asText())),newCost.toString());
-        JsonNode retained=awaitCost(workspace,before);
+        JsonNode retained=publishedCost(workspace,before);
         assertEquals(oldSnapshot,retained.path("priceSnapshotId").asText());
         assertEquals(0,new BigDecimal("1.1775").compareTo(new BigDecimal(retained.path("knownSubtotal").asText())));
     }
 
     @Test void actualSdkCaptureAndLaterSourceVersionConvergeWithoutCompleteClaim() throws Exception {
-        String actor="dev-user", workspace=workspaces.personal(actor).id();
+        String actor = "dev-user";
         var adapter=new io.github.samzhu.bot.execution.internal.capture.GoogleUsageCaptureAdapter("gemini-3.8-flash");
         String id=ledger.begin(adapter.dispatch(null,workspace,actor));
         assertTrue(ledger.markDispatched(id,clock -> Instant.parse("2026-11-16T00:00:00Z")));
         ledger.append(id,sdkSnapshot(adapter,1,1000000));
         ledger.finish(id,"SUCCEEDED");
-        JsonNode first=awaitCost(workspace,id);
+        JsonNode first=publishedCost(workspace,id);
         assertEquals("PARTIAL",first.path("status").asText(),first.toString());
         assertEquals(0,new BigDecimal("1.1775").compareTo(new BigDecimal(first.path("knownSubtotal").asText())));
         assertTrue(first.path("completeAmount").isNull());
         String pinned=first.path("priceSnapshotId").asText();
         ledger.append(id,sdkSnapshot(adapter,2,2000000));
-        JsonNode second=awaitCost(workspace,id);
+        JsonNode second=publishedCost(workspace,id);
         assertEquals("PARTIAL",second.path("status").asText(),second.toString());
         assertEquals(0,new BigDecimal("1.9275").compareTo(new BigDecimal(second.path("knownSubtotal").asText())),second.toString());
         assertTrue(second.path("completeAmount").isNull());
@@ -157,9 +159,9 @@ class OfficialGeminiCatalogGraphQLTests {
     }
 
     @Test void dispatchAndReconciliationReferenceSameImmutableCatalogMetadata() throws Exception {
-        String actor="dev-user",workspace=workspaces.personal(actor).id();
+        String actor = "dev-user";
         String id=syntheticAttempt(workspace,actor,Instant.parse("2026-12-31T23:59:59Z"));
-        JsonNode first=awaitCost(workspace,id);
+        JsonNode first=publishedCost(workspace,id);
         String automatic=first.path("priceSnapshotId").asText();
         String entry=jdbc.queryForObject("select catalog_entry_id from usage_price_snapshot where id=?",String.class,automatic);
         assertNotNull(entry);
@@ -168,7 +170,7 @@ class OfficialGeminiCatalogGraphQLTests {
         String mutation="mutation { reconcileCost(input:{workspaceId:\""+workspace+"\",attemptId:\""+id+"\",expectedRevision:\""+first.path("currentRevision").asText()+"\",expectedSourceProjectionVersion:\""+first.path("sourceProjectionVersion").asText()+"\",idempotencyKey:\"meta-"+UUID.randomUUID()+"\",catalogRevisionId:\""+catalog+"\",evidenceReference:\"test\",reason:\"test\"}) { outcome revision { priceSnapshotId } } }";
         JsonNode response=graph(mutation); assertFalse(response.has("errors"),response.toString());
         assertEquals("APPLIED",response.path("data").path("reconcileCost").path("outcome").asText());
-        JsonNode reconciled=awaitCost(workspace,id);
+        JsonNode reconciled=publishedCost(workspace,id);
         assertEquals(first.path("status"),reconciled.path("status"));
         assertEquals(first.path("knownSubtotal"),reconciled.path("knownSubtotal"));
         assertEquals(first.path("completeAmount"),reconciled.path("completeAmount"));
@@ -178,32 +180,41 @@ class OfficialGeminiCatalogGraphQLTests {
         assertEquals(entry,jdbc.queryForObject("select catalog_entry_id from usage_price_snapshot where id=?",String.class,audited));
         assertEquals(metadata,jdbc.queryForObject("select metadata::text from pricing_catalog_entry where id=?",String.class,entry));
         String later=syntheticAttempt(workspace,actor,Instant.parse("2027-01-01T00:00:00Z"));
-        assertEquals(0,new BigDecimal("2.355").compareTo(new BigDecimal(awaitCost(workspace,later).path("knownSubtotal").asText())));
+        assertEquals(0,new BigDecimal("2.355").compareTo(new BigDecimal(publishedCost(workspace,later).path("knownSubtotal").asText())));
         assertEquals(metadata,jdbc.queryForObject("select metadata::text from pricing_catalog_entry where id=?",String.class,entry));
         assertEquals("0.50",json.readTree(metadata).path("storageRate").asText());
     }
 
-    @Test void legacyCatalogWithoutMetadataKeepsHistoricalHashAcrossRestart() {
-        String id=UUID.randomUUID().toString(),entry=UUID.randomUUID().toString(),revision="legacy-fixture-"+UUID.randomUUID();
-        jdbc.update("insert into pricing_catalog_revision(id,source_reference,source_revision,content_hash) values (?,'legacy-source',?,'b7d8a998e7050db252188e6b7c219ce0ca7154eeb2c05f10398224143e63e02d')",id,revision);
-        jdbc.update("insert into pricing_catalog_entry(id,revision_id,provider,endpoint,model,channel,price_revision,effective_from,effective_until,rates) values (?,?,'FAKE','fixture','model','FAKE','old-price','2020-01-01T00:00:00Z','2030-01-01T00:00:00Z','{\"input\":\"1\"}'::jsonb)",entry,id);
-        var ds=(com.zaxxer.hikari.HikariDataSource)dataSource;
-        try(var context=new org.springframework.boot.builder.SpringApplicationBuilder(BotApplication.class, io.github.samzhu.bot.TestChatModelConfiguration.class, io.github.samzhu.bot.TestUsageCaptureConfiguration.class)
-                .web(org.springframework.boot.WebApplicationType.NONE).profiles("test")
-                .properties("spring.datasource.url="+ds.getJdbcUrl(),"spring.datasource.username="+ds.getUsername(),
-                        "spring.datasource.password="+ds.getPassword(),"spring.docker.compose.enabled=false")
-                .run()) {
-            var catalog = context.getBean(io.github.samzhu.bot.usage.internal.pricing.CatalogActivation.class);
-            var published = catalog.publish(revision, "legacy-source", java.util.List.of(
-                    new io.github.samzhu.bot.pricing.PriceCatalog.Entry(
-                            new io.github.samzhu.bot.pricing.PriceSnapshot("FAKE", "fixture", "model", "FAKE", "old-price", java.util.Map.of("input", "1")),
-                            Instant.parse("2020-01-01T00:00:00Z"), Instant.parse("2030-01-01T00:00:00Z"))));
-            assertEquals(id, published.id());
-            assertEquals(id,jdbc.queryForObject("select id from pricing_catalog_revision where source_revision=?",String.class,revision));
-            assertEquals(1,jdbc.queryForObject("select count(*) from pricing_catalog_entry where id=? and metadata is null",Integer.class,entry));
-        }
+    @Test
+    void missingPricePublishesUnknownAndIsIdempotent() {
+        String attempt=ledger.begin(new UsageLedger.Dispatch(null,workspace,null,"GOOGLE","generateContent","fixture-model","GEMINI_API","1",false,"UNKNOWN"));
+        assertTrue(ledger.markDispatched(attempt,java.time.Clock::instant));
+        var source=ledger.readPricingInput(attempt);
+        assertTrue(publisher.recompute(attempt));
+        assertFalse(publisher.recompute(attempt));
+        assertEquals(1,jdbc.queryForObject("select count(*) from usage_cost_estimate where attempt_id=?",Integer.class,attempt));
+        assertEquals(source.projectionVersion(),jdbc.queryForObject("select source_version from usage_cost_estimate where attempt_id=?",Long.class,attempt));
+        assertEquals("UNKNOWN",jdbc.queryForObject("select status from usage_cost_estimate where attempt_id=?",String.class,attempt));
+        var unknown=costs.readCosts(java.util.List.of(attempt)).get(attempt);
+        assertTrue(unknown.reasons().containsAll(java.util.List.of("MISSING_PRICE","COVERAGE_UNKNOWN","USAGE_UNKNOWN","EXTRA_COST_UNKNOWN")));
+        assertThrows(org.springframework.dao.DataIntegrityViolationException.class, () -> jdbc.update("""
+            insert into usage_cost_estimate(id,attempt_id,source_version,source_snapshot_id,price_snapshot_id,calculator_version,status,known_subtotal,complete_amount,details,payload_hash)
+            select ?,attempt_id,source_version,source_snapshot_id,price_snapshot_id,calculator_version,status,known_subtotal,complete_amount,details,payload_hash
+              from usage_cost_estimate where attempt_id=?
+            """,java.util.UUID.randomUUID().toString(),attempt));
     }
 
+    @Test
+    void calculatorVersionParticipatesInEstimateIdentity() {
+        String id=ledger.begin(new UsageLedger.Dispatch(null,workspace,null,"GOOGLE","generateContent","model","GEMINI_API","1",false,"UNKNOWN"));
+        assertTrue(ledger.markDispatched(id,java.time.Clock::instant));
+        assertTrue(publisher.recompute(id));
+        // The fixture acts as an estimate persisted by an earlier calculator.
+        jdbc.update("update usage_cost_estimate set calculator_version='old-fixture' where attempt_id=?",id);
+        assertTrue(publisher.recompute(id));
+        assertEquals(2,jdbc.queryForObject("select count(*) from usage_cost_estimate where attempt_id=?",Integer.class,id));
+        assertEquals(io.github.samzhu.bot.pricing.PricingCalculator.VERSION,jdbc.queryForObject("select e.calculator_version from usage_cost_current c join usage_cost_estimate e on e.id=c.estimate_id where c.attempt_id=?",String.class,id));
+    }
     private String syntheticAttempt(String workspace,String actor,Instant time) {
         String id=ledger.begin(new UsageLedger.Dispatch(null,workspace,actor,"GOOGLE","generateContent","gemini-3.8-flash","GEMINI_API","2.1.0-RC2",false,"UNKNOWN"));
         assertTrue(ledger.markDispatched(id,clock -> time));
@@ -213,20 +224,19 @@ class OfficialGeminiCatalogGraphQLTests {
         return id;
     }
 
-    private JsonNode awaitCost(String workspace,String attempt) throws Exception {
+    private JsonNode publishedCost(String workspace,String attempt) throws Exception {
         String query="{ workspaceUsageAttempt(workspaceId:\""+workspace+"\",id:\""+attempt+"\") { cost { status knownSubtotal completeAmount needsReprice priceSnapshotId currentRevision sourceProjectionVersion reasons lineItems { category nativeQuantity unit meaning rate rateBasis exactAmount storedAmount reasons } } } }";
-        JsonNode cost=null; long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
-        do {
-            JsonNode result=graph(query); assertFalse(result.has("errors"),result.toString());
-            cost=result.path("data").path("workspaceUsageAttempt").path("cost");
-            if(!cost.path("needsReprice").asBoolean(true)) return cost;
-            Thread.sleep(50);
-        } while(System.nanoTime()<deadline);
-        fail("pricing did not converge: "+cost); return cost;
+        publisher.recompute(attempt);
+        JsonNode result = graph(query);
+        assertFalse(result.has("errors"), result.toString());
+        JsonNode cost = result.path("data").path("workspaceUsageAttempt").path("cost");
+        assertFalse(cost.path("needsReprice").asBoolean(true), cost.toString());
+        return cost;
     }
 
     private JsonNode graph(String query) throws Exception {
         var request=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/graphql"))
+                .timeout(java.time.Duration.ofSeconds(10))
                 .header("Content-Type","application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(Map.of("query",query)))).build();
         return json.readTree(http.send(request,HttpResponse.BodyHandlers.ofString()).body());

@@ -126,9 +126,132 @@ class SharedWorkspaceMonthlyBudgetGraphQLTests {
                 Integer.class, workspace));
     }
 
+    @Test
+    void authorizationPrecedesMutationValidationAndMemberCanRead() throws Exception {
+        setMembership("MEMBER", true);
+        var read = graph("""
+                query Budget($workspace: ID!) {
+                  workspaceMonthlyBudget(workspaceId: $workspace, simulation: false) { workspaceId state }
+                }
+                """, Map.of("workspace", workspace));
+        assertFalse(read.has("errors"), read.toString());
+        assertEquals(workspace, read.path("data").path("workspaceMonthlyBudget").path("workspaceId").asText());
+        assertCode("WORKSPACE_MANAGER_REQUIRED", configure("authorize", "bad", "bad", false));
+
+        setMembership("MEMBER", false);
+        assertCode("WORKSPACE_ACCESS_DENIED", configure("authorize", "bad", "bad", false));
+        assertCode("WORKSPACE_ACCESS_DENIED",
+                configureWorkspace("missing-" + UUID.randomUUID(), "authorize", "bad", "bad", false));
+        assertEquals(0, jdbc.queryForObject("""
+                select count(*) from workspace_monthly_budget_command where workspace_id=?
+                """, Integer.class, workspace));
+    }
+
+    @Test
+    void revokedManagerCannotReplayOrReadPreviousResult() throws Exception {
+        assertEquals("APPLIED", configured(configure("revoked", "0", "5", false)).path("outcome").asText());
+
+        setMembership("MANAGER", false);
+        var replay = configure("revoked", "0", "5.00", false);
+        assertCode("WORKSPACE_ACCESS_DENIED", replay);
+        assertTrue(replay.path("data").isNull());
+        assertConfigVersion(1);
+        assertEquals(1, jdbc.queryForObject("""
+                select count(*) from workspace_monthly_budget_command where workspace_id=?
+                """, Integer.class, workspace));
+    }
+
+    @Test
+    void untouchedLegacyRowGetsDefaultButSavedNullAndDisabledChoiceStaySaved() throws Exception {
+        seedUnconfiguredPolicy();
+        var first = budget();
+        assertMoney("10", first.path("capUsd"));
+        assertFalse(first.path("enabled").asBoolean());
+        assertEquals("0", first.path("configVersion").asText());
+
+        String command = """
+                mutation Disable($workspace: ID!) {
+                  configureWorkspaceMonthlyBudget(input: {workspaceId: $workspace, simulation: false, enabled: false,
+                    capUsd: null, expectedConfigVersion: "0", idempotencyKey: "legacy-null"}) { outcome }
+                }
+                """;
+        assertEquals("APPLIED", configured(graph(command, Map.of("workspace", workspace))).path("outcome").asText());
+        assertEquals("REPLAYED", configured(graph(command, Map.of("workspace", workspace))).path("outcome").asText());
+        var saved = budget();
+        assertTrue(saved.path("capUsd").isNull());
+        assertFalse(saved.path("enabled").asBoolean());
+        assertEquals("1", saved.path("configVersion").asText());
+        assertEquals(1, jdbc.queryForObject("""
+                select count(*) from workspace_monthly_budget_command where workspace_id=? and partition='REAL'
+                """, Integer.class, workspace));
+    }
+
+    @Test
+    void versionZeroWithCommandEvidenceIsNotOverwritten() throws Exception {
+        seedUnconfiguredPolicy();
+        jdbc.update("""
+                insert into workspace_monthly_budget_command(workspace_id,partition,actor_id,idempotency_key,
+                    expected_config_version,enabled,cap_usd) values (?,'REAL','dev-user','legacy',0,false,null)
+                """, workspace);
+        var result = budget();
+        assertTrue(result.path("capUsd").isNull());
+        assertEquals("0", result.path("configVersion").asText());
+    }
+
+    @Test
+    void receiptFromPastPeriodReplaysAgainstCurrentPolicyWithoutASecondEffect() throws Exception {
+        jdbc.update("""
+                insert into workspace_monthly_budget(workspace_id,partition,enabled,cap_usd,config_version)
+                values (?,'REAL',true,8,2)
+                """, workspace);
+        jdbc.update("""
+                insert into workspace_monthly_budget_command(workspace_id,partition,actor_id,idempotency_key,
+                    expected_config_version,enabled,cap_usd,applied_at)
+                values (?,'REAL','dev-user','past',0,true,5,current_timestamp-interval '2 months')
+                """, workspace);
+        var result = configured(configure("past", "0", "5.00", false));
+        assertEquals("REPLAYED", result.path("outcome").asText());
+        assertMoney("8", result.path("budget").path("capUsd"));
+        assertConfigVersion(2);
+        assertEquals(1, jdbc.queryForObject("""
+                select count(*) from workspace_monthly_budget_command where workspace_id=? and partition='REAL'
+                """, Integer.class, workspace));
+        assertEquals(0, jdbc.queryForObject("""
+                select count(*) from workspace_admission_effect_outbox where target_workspace_id=?
+                """, Integer.class, workspace));
+    }
+
+    private void seedUnconfiguredPolicy() {
+        jdbc.update("""
+                insert into workspace_monthly_budget(workspace_id,partition,enabled,cap_usd,config_version)
+                values (?,'REAL',false,null,0)
+                """, workspace);
+    }
+
+    private JsonNode budget() throws Exception {
+        var response = graph("""
+                query Budget($workspace: ID!) {
+                  workspaceMonthlyBudget(workspaceId: $workspace, simulation: false) { capUsd enabled configVersion }
+                }
+                """, Map.of("workspace", workspace));
+        assertFalse(response.has("errors"), response.toString());
+        return response.path("data").path("workspaceMonthlyBudget");
+    }
+
+    private void setMembership(String role, boolean active) {
+        assertEquals(1, jdbc.update("""
+                update workspace_member set role=?, active=? where workspace_id=? and user_id='dev-user'
+                """, role, active, workspace));
+    }
+
     private JsonNode configure(String key, String version, String cap, boolean simulation) throws Exception {
+        return configureWorkspace(workspace, key, version, cap, simulation);
+    }
+
+    private JsonNode configureWorkspace(String targetWorkspace, String key, String version, String cap,
+                                        boolean simulation) throws Exception {
         return graph(CONFIGURE, Map.of("input", Map.of(
-                "workspaceId", workspace, "simulation", simulation, "enabled", true, "capUsd", cap,
+                "workspaceId", targetWorkspace, "simulation", simulation, "enabled", true, "capUsd", cap,
                 "expectedConfigVersion", version, "idempotencyKey", key)));
     }
 

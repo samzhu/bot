@@ -15,6 +15,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
 
@@ -59,8 +60,69 @@ class UsageCostReviewQueueIntegrationTests {
         JsonNode denied=graph("{ costReviewAttempts(workspaceId:\""+workspace+"\",first:1,after:\""+cursor+"\") { nodes { id } } }");
         assertEquals("WORKSPACE_MANAGER_REQUIRED",denied.path("errors").get(0).path("extensions").path("code").asText());
     }
+    @Test
+    void costReviewSelectorIncludesEachIncompleteBranchAndExcludesCompleteVerifiedCurrent() throws Exception {
+        String workspace = "review-branches-" + UUID.randomUUID();
+        data.createWorkspace(workspace, "dev-user");
+        String missing="review-selector-missing-"+UUID.randomUUID();
+        String stale="review-selector-stale-"+UUID.randomUUID();
+        String partial="review-selector-partial-"+UUID.randomUUID();
+        String unknownCoverage="review-selector-coverage-"+UUID.randomUUID();
+        String complete="review-selector-complete-"+UUID.randomUUID();
+
+        insertReviewAttempt(workspace,missing,"VERIFIED",11,null,null,null);
+        insertReviewAttempt(workspace,stale,"VERIFIED",11,10L,"COMPLETE","2");
+        insertReviewAttempt(workspace,partial,"VERIFIED",11,11L,"PARTIAL","2");
+        insertReviewAttempt(workspace,unknownCoverage,"UNKNOWN",11,11L,"COMPLETE","2");
+        insertReviewAttempt(workspace,complete,"VERIFIED",11,11L,"COMPLETE","2");
+
+        JsonNode result=graph("{ costReviewAttempts(workspaceId:\""+workspace+"\",simulation:false,first:100){nodes{id}} }");
+        assertFalse(result.has("errors"),result.toString());
+        var nodes=result.path("data").path("costReviewAttempts").path("nodes");
+        java.util.Set<String> ids=new java.util.HashSet<>();
+        nodes.forEach(node->ids.add(node.path("id").asText()));
+        assertTrue(ids.contains(missing),"attempt without a current estimate must be reviewed");
+        assertTrue(ids.contains(stale),"source-version mismatch must be reviewed");
+        assertTrue(ids.contains(partial),"non-COMPLETE current estimate must be reviewed");
+        assertTrue(ids.contains(unknownCoverage),"unknown dispatch coverage must be reviewed");
+        assertFalse(ids.contains(complete),"current COMPLETE estimate with matching source and VERIFIED coverage is not review work");
+    }
+
+    private void insertReviewAttempt(String workspace,String id,String coverage,long projectionVersion,
+                                     Long sourceVersion,String costStatus,String amount) {
+        jdbc.update("""
+            insert into provider_attempt(id,workspace_id,actor_id,provider,endpoint,model,channel,adapter_version,
+              simulation,attempt_coverage,prepared_at,started_at,finished_at,execution_outcome,usage_presence,
+              capture_completeness,projection_state,projection_version)
+            values (?,?, 'dev-user','FAKE','local','review-model','test','fixture',false,?,now(),now(),now(),
+              'SUCCEEDED','UNKNOWN','UNKNOWN','UNKNOWN',?)
+            """,id,workspace,coverage,projectionVersion);
+        if(sourceVersion==null) return;
+
+        String suffix=UUID.randomUUID().toString().substring(0,12);
+        String price="review-p-"+suffix;
+        String estimate="review-e-"+suffix;
+        jdbc.update("insert into usage_price_snapshot(id,attempt_id,selection_state,provider,endpoint,model,channel) values (?,?,'MISSING','FAKE','local','review-model','test')",price,id);
+        jdbc.update("""
+            insert into usage_cost_estimate(id,attempt_id,source_version,price_snapshot_id,calculator_version,status,
+              known_subtotal,complete_amount,details,payload_hash)
+            values (?,?,?,?,'review-fixture',?,?,?,'{\"reasons\":[],\"lines\":[]}'::jsonb,?)
+            """,estimate,id,sourceVersion,price,costStatus,
+                amount==null?null:new java.math.BigDecimal(amount),
+                "COMPLETE".equals(costStatus)?new java.math.BigDecimal(amount):null,"hash-"+suffix);
+        jdbc.update("insert into usage_cost_current(attempt_id,estimate_id) values (?,?)",id,estimate);
+    }
+
     private JsonNode graph(String query) throws Exception {
-        var request=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/graphql")).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(Map.of("query",query)))).build();
-        return json.readTree(HttpClient.newHttpClient().send(request,HttpResponse.BodyHandlers.ofString()).body());
+        var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/graphql"))
+                .timeout(Duration.ofSeconds(10))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(Map.of("query", query))))
+                .build();
+        try (var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build()) {
+            var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, response.statusCode(), response.body());
+            return json.readTree(response.body());
+        }
     }
 }

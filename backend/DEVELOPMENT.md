@@ -2,14 +2,14 @@
 
 ## 本機啟動
 
-使用 Java 25 和專案的 Gradle Wrapper。啟動前確認 Docker daemon 可用，且 `docker compose version` 顯示 2.2.0 以上。從 `backend/` 執行以下命令，使用 Ollama 作為本機開發的聊天模型。
+使用 Java 25 和專案的 Gradle Wrapper。啟動前確認 Docker daemon 可用，且 `docker compose version` 顯示 2.2.0 以上。開發時若沒有 Gemini API key，可明確選擇 Ollama 作為本機聊天模型。以下指令由 `spring.ai.model.chat=ollama` 明確指定。
 
 ```sh
 cd backend
 ./gradlew bootRun --args='--spring.profiles.active=dev --spring.ai.model.chat=ollama --management.endpoint.health.probes.enabled=true'
 ```
 
-使用 Gemini 時將模型選擇改為 `google-genai`，並依 README 設定本機金鑰。需要同時開啟 Angular 時，從專案根目錄執行 `./dev.sh`。 [模型與完整開發環境](../README.md)
+使用 Gemini 的開發部署將模型選擇設為 `google-genai`，並依 README 設定本機金鑰。需要同時開啟 Angular 時，從專案根目錄執行 `./dev.sh`。 [模型與完整開發環境](../README.md)
 
 ## Compose 與 PostgreSQL
 
@@ -27,15 +27,15 @@ cd backend
 
 ## 功能回歸測試設計
 
-新增或遷入一般後端功能整合測試時，在測試類別標註 `@BackendIntegrationTest`。啟動冒煙、對話與 Run、一般用量與成本案例已採用共用環境。既有專項仍有其他啟動設定，全套收斂與效能驗收在 #95 追蹤。 [共用測試註解](src/test/java/io/github/samzhu/bot/BackendIntegrationTest.java) · [#92](https://github.com/samzhu/bot/issues/92) · [#93](https://github.com/samzhu/bot/issues/93) · [#94](https://github.com/samzhu/bot/issues/94) · [#95](https://github.com/samzhu/bot/issues/95)
+一般後端功能整合測試使用 `@BackendIntegrationTest`。啟動冒煙、Bot 與工作區授權、對話與 Title、Run、用量、定價與預算沿用同一主環境。純單元與輕量設定測試使用各自的最小 fixture，其中 Ollama adapter 測試直接驗證缺少用量時的擷取語意。 [共用測試註解](src/test/java/io/github/samzhu/bot/BackendIntegrationTest.java) · [#92](https://github.com/samzhu/bot/issues/92) · [#93](https://github.com/samzhu/bot/issues/93) · [#94](https://github.com/samzhu/bot/issues/94) · [#95](https://github.com/samzhu/bot/issues/95)
 
 本機開發與預設回歸直接驗證一般 Bot 合約及 GKE 未連線行為，無須啟用 GKE 模擬器。各部署位置沿用同一應用套件、部署設定介面與應用程式路徑，服務連線等設定由執行環境注入。2026-11-26 查核。 [Twelve-Factor Config](https://12factor.net/config) · [Dev/prod parity](https://12factor.net/dev-prod-parity)
 
 ### 測哪一層
 
 - 純計算及輸入輸出規則直接用 JUnit 驗證。需要驗證公開 API、交易、SQL 或持久狀態時，從真 HTTP 呼叫 GraphQL 或 AG-UI/SSE，並視需要查核真 PostgreSQL 的結果。
-- 功能整合測試只替換會呼叫外部 LLM 的 model Bean。讓測試模型回傳受控的普通回應、串流與用量資料，以實際的應用 Bean 驗證用量擷取、成本計算和持久化。每個案例開始前重設模型狀態，結束時確認該案例的串流與背景工作已完成。
-- 用量與成本依 API 已定義的輸入與計算規則驗證。用明確輸入在 API 或純計算測試涵蓋缺少匹配定價的結果。共用資料庫維持正常參照資料。功能回歸範圍以產品行為為準，空庫、舊版遷移、profile 切換、重啟和多實例等環境情境由相應變更個別驗收。
+- 功能整合測試只替換會呼叫外部 LLM 的 model Bean。讓測試模型回傳受控的普通回應、串流與用量資料，以實際的應用 Bean 驗證用量擷取、成本計算和持久化。同一個 in-process 模型 fixture 提供對話串流及 Title 回覆。案例先重設模型，結束前等自己的 Run 與 admission 終止並清理。模型產生的 SDK 型別用量是合成輸入，由實際 capture、用量與成本實作處理。
+- 用量與成本依 API 已定義的輸入與計算規則驗證。用明確輸入在 API 或純計算測試涵蓋缺少匹配定價的結果。共用資料庫維持正常參照資料。功能回歸以產品行為為準。空庫、舊版遷移、profile 切換、服務重啟、多實例和故障注入的歷史案例可由 #95 記載的提交重現。變更這些邊界時，用獨立資料庫驗收。預設 GKE 維持 OFF，覆蓋一般 Bot 合約及未連線行為。
 
 ### 如何使用框架
 
@@ -46,7 +46,31 @@ cd backend
 ### 如何執行與判讀結果
 
 - 從 `backend/` 用 `./gradlew test --tests 'TestClass.testMethod' --fail-fast` 定向重現。完整驗收使用 `./gradlew test`。記錄測試範圍與結果，涉及共用資料時再換序執行，確認案例可獨立通過。 [Gradle 測試篩選與 fail-fast](https://docs.gradle.org/current/userguide/java_testing.html)
-- 驗收共用環境時，以 Spring cache 日誌、容器建立事件及資料庫識別確認整輪功能整合測試只啟動一個 context 和 PostgreSQL 容器。用相同測試選集與資源設定比較耗時。快取與 heap 上限的現況以 Gradle 設定為準。快取上限只控制同時保留的 context 數。若測試中斷後容器仍在執行，使用 Docker 的 `org.testcontainers.sessionId` 標籤確認歸屬，再檢查該輪測試程序。 [Gradle 設定](build.gradle) · [Spring 快取觀測](https://docs.spring.io/spring-framework/reference/testing/testcontext-framework/ctx-management/caching.html)
+- 驗收共用環境時，以 Spring cache 日誌、容器建立事件及資料庫識別確認整輪功能整合測試只啟動一個 context 和 PostgreSQL 容器。用相同功能選集、JDK、heap、cache、worker 數、PostgreSQL 映像與暖機條件比較耗時。先開始持續記錄 Docker 事件，再啟動測試。核對 PG 啟動、同時峰值與移除，並以 Spring cache miss 計算累計啟動。若測試中斷後容器仍在執行，使用 Docker 的 `org.testcontainers.sessionId` 標籤確認歸屬，再檢查該輪測試程序。 [Gradle 設定](build.gradle) · [Spring 快取觀測](https://docs.spring.io/spring-framework/reference/testing/testcontext-framework/ctx-management/caching.html)
+
+### #95 驗收紀錄
+
+完整回歸後檢查 JUnit XML、Spring cache 與容器事件，記錄測試結束後當輪容器的回收。對照既有案例時，先以 Git 中的原方法及 #95 的處置記錄確認舊刺激與仍保留的產品斷言。 [#95 驗收與來源對照](https://github.com/samzhu/bot/issues/95)
+
+| 完整預設套件 | 通過 | 耗時 | Spring cache miss | PG 啟動／同時峰值 |
+| --- | ---: | ---: | ---: | ---: |
+| 基線 `e6582a0` | 482/482 | 466.24 s | 66 | 67／至少 5 |
+| 整合驗收候選 | 241/241 | 52.42 s | 1 | 1／1 |
+
+基線的 Docker 事件於執行後讀取，受歷史保留上限影響。67 個不同 PG 啟動取自完整 Testcontainers 日誌，至少 5 個同時執行取自即時取樣。整合驗收從 Gradle 開始前持續收集事件，確認 PG 完成移除。164 個共用功能案例重用一個 `test` context、同一 PG 與一次 Liquibase 初始化。12 個輕量設定套件共 41 個案例，未開啟 PG。共用功能環境僅使用 in-process 模型；個別設定測試用合成設定核對 provider 組裝，Ollama transport 探針使用 loopback。
+
+兩輪完整套件均使用 Java 25、既定 1536 MiB 測試 heap、cache 上限 4、單一測試 worker 與同一 PostgreSQL 映像。基線包含編譯，整合驗收沿用已編譯類別。完整結果也反映選集改變。 [Docker events](https://docs.docker.com/reference/cli/docker/system/events/)
+
+已量測的同功能選集另列如下，包含各輪既定冒煙。全套選集的增刪不計入這些配對比較。
+
+| 配對選集 | 前／後耗時 | PG 啟動前／後 | PG 峰值前／後 |
+| --- | ---: | ---: | ---: |
+| Bot OFF、編輯與搜尋 | 15.12–15.51 s／10.16 s | 3／1 | 3／1 |
+| 月預算 GraphQL | 22.44 s／10.23 s | 6／1 | 2／1 |
+| AG-UI 公開拒絕 | 13.29 s／11.10 s | 2／1 | 2／1 |
+| 手動成本修訂 | 13.60 s／9.95 s | 2／1 | 2／1 |
+
+[Bot 配對紀錄](https://github.com/samzhu/bot/issues/95#issuecomment-7182823504) · [月預算配對紀錄](https://github.com/samzhu/bot/issues/95#issuecomment-7182961885) · [AG-UI 與成本配對紀錄](https://github.com/samzhu/bot/issues/95#issuecomment-7183361305)
 
 ## 遷移與啟動變更驗收
 
