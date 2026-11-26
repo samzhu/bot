@@ -23,11 +23,11 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT)
-@Import({TestcontainersConfiguration.class,WorkspaceStartupMonthBoundaryTests.ClockConfiguration.class})
+@Import({TestcontainersConfiguration.class,BudgetBoundaryTestClock.ClockConfiguration.class})
 @ActiveProfiles("test")
 class WorkspaceMonthlyBudgetMonthReplayTests {
     @LocalServerPort int port;
-    @Autowired WorkspaceStartupMonthBoundaryTests.MutableClock clock;
+    @Autowired BudgetBoundaryTestClock clock;
     @Autowired WorkspaceAdmission admission;
     @Autowired ConversationOperations conversations;
     @Autowired JdbcTemplate jdbc;

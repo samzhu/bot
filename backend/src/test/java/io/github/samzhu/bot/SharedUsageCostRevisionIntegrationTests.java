@@ -29,7 +29,7 @@ class SharedUsageCostRevisionIntegrationTests {
             mutation ManualRevision($input: ManualCostRevisionInput!) {
               manualCostRevision(input: $input) {
                 outcome
-                revision { id actorId knownSubtotal completeAmount status }
+                revision { id actorId knownSubtotal completeAmount status sourceSnapshotId }
                 effectiveCost { currentRevision sourceProjectionVersion knownSubtotal completeAmount needsReprice }
               }
             }
@@ -164,12 +164,92 @@ class SharedUsageCostRevisionIntegrationTests {
         assertTrue(zero.path("revision").path("completeAmount").isNull());
     }
 
+    @Test
+    void notDispatchedAttemptCannotBeManuallyCorrected() throws Exception {
+        transactions.executeWithoutResult(status -> {
+            jdbc.update("""
+                    update provider_attempt
+                       set execution_outcome='NOT_DISPATCHED', execution_reason=null, started_at=null
+                     where id=?
+                    """, attempt);
+            jdbc.update("""
+                    update usage_cost_estimate
+                       set status='NOT_DISPATCHED', details='{"reasons":["NOT_DISPATCHED"],"lines":[]}'::jsonb
+                     where id=?
+                    """, initialRevision);
+        });
+        assertCode("INVALID_COST_REVISION",
+                manual(initialRevision, SOURCE_VERSION, "not-dispatched", "10", "evidence"));
+        assertNoManualRevision();
+    }
+
+    @Test
+    void manualSourceTypeAndUnicodeWhitespaceEvidenceAreRejected() throws Exception {
+        assertCode("INVALID_COST_REVISION", manual(initialRevision, SOURCE_VERSION, "wrong-source", "1",
+                "evidence", "SERVER_RAW_CATALOG", "reason"));
+        assertCode("INVALID_COST_REVISION", manual(initialRevision, SOURCE_VERSION, "unicode-blank", "0",
+                "\u3000", "MANUAL_ESTIMATE", "\u3000"));
+        assertNoManualRevision();
+    }
+
+    @Test
+    void manualRequiresSubstantiveUnicodeEvidenceAndReason() throws Exception {
+        for (String blank : List.of("\u00a0", "\u202f", " \u3000\u00a0\u202f ")) {
+            assertCode("INVALID_COST_REVISION", manual(initialRevision, SOURCE_VERSION, "blank-evidence", "1",
+                    blank, "MANUAL_ESTIMATE", "reason"));
+            assertCode("INVALID_COST_REVISION", manual(initialRevision, SOURCE_VERSION, "blank-reason", "1",
+                    "proof", "MANUAL_ESTIMATE", blank));
+        }
+        assertNoManualRevision();
+
+        var valid = mutationResult(manual(initialRevision, SOURCE_VERSION, "unicode-valid", "1",
+                "\u00a0證據\u202f", "MANUAL_ESTIMATE", "\u202f理由\u00a0"));
+        assertEquals("APPLIED", valid.path("outcome").asText());
+        assertEquals(1, auditCount());
+    }
+
+    @Test
+    void manualRevisionPinsEffectiveSnapshotIdForLaterAudit() throws Exception {
+        String snapshot = "manual-cost-source-" + UUID.randomUUID();
+        transactions.executeWithoutResult(status -> {
+            jdbc.update("""
+                    insert into usage_snapshot(id,attempt_id,event_id,payload_hash,ordinal,semantic,source_layer,
+                      schema_version,adapter_version,capture_version,capture_completeness,raw_state,raw_usage,captured_at)
+                    values (?,?,?,'fixture',1,'FINAL','FAKE_RAW','1','1','1','COMPLETE','JSONB','{"input":10}'::jsonb,now())
+                    """, snapshot, attempt, "event-" + snapshot);
+            jdbc.update("""
+                    update provider_attempt
+                       set projection_state='VALID', usage_presence='PRESENT', projection_snapshot_id=?
+                     where id=?
+                    """, snapshot, attempt);
+            jdbc.update("update usage_cost_estimate set source_snapshot_id=? where id=?", snapshot, initialRevision);
+        });
+        var result = mutationResult(manual(initialRevision, SOURCE_VERSION, "snapshot-source", "10", "evidence"));
+        var revision = result.path("revision");
+        assertEquals(snapshot, revision.path("sourceSnapshotId").asText());
+        String current = storedCurrent();
+        assertEquals(revision.path("id").asText(), current);
+        assertEquals(snapshot, jdbc.queryForObject("""
+                select source_snapshot_id from usage_cost_estimate where attempt_id=? and id=?
+                """, String.class, attempt, current));
+    }
+
+    private void assertNoManualRevision() {
+        assertEquals(0, auditCount());
+        assertEquals(initialRevision, storedCurrent());
+    }
+
     private JsonNode manual(String expectedRevision, String sourceVersion, String key, String amount,
                             String evidence) throws Exception {
+        return manual(expectedRevision, sourceVersion, key, amount, evidence, "MANUAL_ESTIMATE", "manual test");
+    }
+
+    private JsonNode manual(String expectedRevision, String sourceVersion, String key, String amount,
+                            String evidence, String sourceType, String reason) throws Exception {
         var input = Map.of(
                 "workspaceId", workspace, "attemptId", attempt, "expectedRevision", expectedRevision,
                 "expectedSourceProjectionVersion", sourceVersion, "idempotencyKey", key, "amount", amount,
-                "sourceType", "MANUAL_ESTIMATE", "evidenceReference", evidence, "reason", "manual test");
+                "sourceType", sourceType, "evidenceReference", evidence, "reason", reason);
         var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/graphql"))
                 .timeout(Duration.ofSeconds(10))
                 .header("Content-Type", "application/json")

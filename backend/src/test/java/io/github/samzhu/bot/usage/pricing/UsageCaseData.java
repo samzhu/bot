@@ -70,6 +70,7 @@ public final class UsageCaseData {
                     delete from ai_session where id in (select id from conversation where workspace_id = :workspace)
                     """, scope);
             sql.update("delete from conversation where workspace_id = :workspace", scope);
+            sql.update("delete from workspace_monthly_budget_command where workspace_id = :workspace", scope);
             sql.update("delete from workspace_monthly_budget_period where workspace_id = :workspace", scope);
             sql.update("delete from workspace_monthly_budget where workspace_id = :workspace", scope);
             sql.update("delete from workspace_member where workspace_id = :workspace", scope);

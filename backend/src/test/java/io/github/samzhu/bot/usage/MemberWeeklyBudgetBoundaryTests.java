@@ -15,10 +15,10 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @io.github.samzhu.bot.UseTestFakes
 @SpringBootTest
-@Import({TestcontainersConfiguration.class,WorkspaceStartupMonthBoundaryTests.ClockConfiguration.class})
+@Import({TestcontainersConfiguration.class,BudgetBoundaryTestClock.ClockConfiguration.class})
 @ActiveProfiles("test")
 class MemberWeeklyBudgetBoundaryTests {
- @Autowired WorkspaceStartupMonthBoundaryTests.MutableClock clock;
+ @Autowired BudgetBoundaryTestClock clock;
  @Autowired WorkspaceOperations workspaces; @Autowired ConversationOperations conversations;
  @Autowired WorkspaceAdmission admission; @Autowired MemberWeeklyBudgetOperations weekly; @Autowired JdbcTemplate jdbc;
  @Test void oldMonthUnknownStillBlocksSameWeekAndNextWeekClears() {

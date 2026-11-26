@@ -335,15 +335,6 @@ class UsageCostRevisionIntegrationTests {
     }
 
     @Test
-    void notDispatchedAttemptCannotBeManuallyCorrected() throws Exception {
-        Fixture f=fixture();
-        jdbc.update("update provider_attempt set execution_outcome='NOT_DISPATCHED',started_at=null where id=?",f.attemptId());
-        JsonNode result=manual(f,null,f.sourceVersion(),"not-dispatched","10","evidence");
-        assertEquals("INVALID_COST_REVISION",result.path("errors").get(0).path("extensions").path("code").asText());
-        assertEquals(0,jdbc.queryForObject("select count(*) from usage_cost_revision_audit where attempt_id=?",Integer.class,f.attemptId()));
-    }
-
-    @Test
     void nonTerminalAndNotDispatchedRejectBeforeContentValidation() throws Exception {
         Fixture f=fixture();
         for (String outcome : java.util.List.of("IN_PROGRESS","NOT_DISPATCHED")) {
@@ -359,16 +350,6 @@ class UsageCostRevisionIntegrationTests {
     }
 
     @Test
-    void manualSourceTypeAndUnicodeWhitespaceEvidenceAreRejected() throws Exception {
-        Fixture f=fixture();
-        JsonNode source=manual(f,null,f.sourceVersion(),"wrong-source","1","evidence","SERVER_RAW_CATALOG","reason");
-        assertEquals("INVALID_COST_REVISION",source.path("errors").get(0).path("extensions").path("code").asText());
-        JsonNode blank=manual(f,null,f.sourceVersion(),"unicode-blank","0","\u3000","MANUAL_ESTIMATE","\u3000");
-        assertEquals("INVALID_COST_REVISION",blank.path("errors").get(0).path("extensions").path("code").asText());
-        assertEquals(0,jdbc.queryForObject("select count(*) from usage_cost_revision_audit where attempt_id=?",Integer.class,f.attemptId()));
-    }
-
-    @Test
     void nonBreakingSpaceAloneIsNotEvidenceOrReason() throws Exception {
         Fixture f=fixture();
         for (boolean evidenceBlank : java.util.List.of(true,false)) {
@@ -381,21 +362,6 @@ class UsageCostRevisionIntegrationTests {
         assertEquals(0,jdbc.queryForObject("select count(*) from usage_cost_revision_audit where attempt_id=?",Integer.class,f.attemptId()));
         assertEquals(0,jdbc.queryForObject("select count(*) from usage_price_snapshot where attempt_id=?",Integer.class,f.attemptId()));
         assertEquals(0,jdbc.queryForObject("select count(*) from usage_cost_current where attempt_id=?",Integer.class,f.attemptId()));
-    }
-
-    @Test
-    void manualRequiresSubstantiveUnicodeEvidenceAndReason() throws Exception {
-        Fixture f=fixture();
-        for (String blank : java.util.List.of("\u00a0", "\u202f", " \u3000\u00a0\u202f ")) {
-            for (boolean evidenceBlank : java.util.List.of(true, false)) {
-                JsonNode response=manual(f,null,f.sourceVersion(),"blank-"+UUID.randomUUID(),"1",
-                        evidenceBlank?blank:"proof","MANUAL_ESTIMATE",evidenceBlank?"reason":blank);
-                assertEquals("INVALID_COST_REVISION",response.path("errors").path(0).path("extensions").path("code").asText(),response.toString());
-            }
-        }
-        assertEquals(0,jdbc.queryForObject("select count(*) from usage_cost_revision_audit where attempt_id=?",Integer.class,f.attemptId()));
-        JsonNode valid=manual(f,null,f.sourceVersion(),"unicode-valid","1","\u00a0證據\u202f","MANUAL_ESTIMATE","\u202f理由\u00a0");
-        assertFalse(valid.has("errors"),valid.toString());
     }
 
     @Test
@@ -439,18 +405,6 @@ class UsageCostRevisionIntegrationTests {
         assertEquals(0,jdbc.queryForObject("select count(*) from usage_price_snapshot where attempt_id=?",Integer.class,f.attemptId()));
         JsonNode valid=reconcile(f,null,f.sourceVersion(),"unicode-valid",catalog,"\u00a0證據\u202f","\u202f理由\u00a0");
         assertFalse(valid.has("errors"),valid.toString());
-    }
-
-    @Test
-    void manualRevisionPinsEffectiveSnapshotIdForLaterAudit() throws Exception {
-        Fixture f=fixture();
-        String snapshot="revision-snapshot-"+UUID.randomUUID();
-        jdbc.update("insert into usage_snapshot(id,attempt_id,event_id,payload_hash,ordinal,semantic,source_layer,schema_version,adapter_version,capture_version,capture_completeness,raw_state,raw_usage,captured_at) values (?,?,?,'hash',1,'FINAL','FAKE_RAW','1','1','1','COMPLETE','JSONB','{\"input\":10}'::jsonb,now())",snapshot,f.attemptId(),"event-"+snapshot);
-        jdbc.update("update provider_attempt set projection_state='VALID',usage_presence='PRESENT',projection_snapshot_id=? where id=?",snapshot,f.attemptId());
-        JsonNode result=manual(f,null,f.sourceVersion(),"snapshot-source","10","evidence");
-        assertFalse(result.has("errors"),result.toString());
-        String estimate=jdbc.queryForObject("select estimate_id from usage_cost_current where attempt_id=?",String.class,f.attemptId());
-        assertEquals(snapshot,jdbc.queryForObject("select source_snapshot_id from usage_cost_estimate where id=?",String.class,estimate));
     }
 
     @Test

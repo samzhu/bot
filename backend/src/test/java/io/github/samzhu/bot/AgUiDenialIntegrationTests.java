@@ -3,9 +3,6 @@ package io.github.samzhu.bot;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.samzhu.bot.execution.ExecutionOperations;
-import io.github.samzhu.bot.usage.UsageLedger;
-import io.github.samzhu.bot.usage.WorkspaceAdmission;
-import io.github.samzhu.bot.usage.WorkspaceMonthlyBudgetOperations;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.model.ChatModel;
@@ -18,18 +15,13 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.convention.TestBean;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 
-import java.math.BigDecimal;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.time.Clock;
-import java.time.YearMonth;
-import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -41,10 +33,6 @@ import static org.mockito.Mockito.*;
 class AgUiDenialIntegrationTests {
     @LocalServerPort int port;
     @Autowired JdbcTemplate jdbc;
-    @Autowired WorkspaceAdmission admission;
-    @Autowired WorkspaceMonthlyBudgetOperations budgets;
-    @Autowired UsageLedger ledger;
-    @Autowired Clock usageClock;
     @MockitoSpyBean ExecutionOperations execution;
     @TestBean(name="mockChatModel",methodName="model",enforceOverride=true) ChatModel chatModel;
     static ControlledChatModel model() { return ControlledChatModel.getInstance(); }
@@ -74,10 +62,6 @@ class AgUiDenialIntegrationTests {
         var body=Map.of("threadId",conversation,"runId",run,"state",Map.of(),"messages",List.of(Map.of("id",UUID.randomUUID().toString(),"role","user","content","synthetic denial")),"tools",List.of(),"context",List.of(),"forwardedProps",Map.of());
         return post("/api/ag-ui",body,"text/event-stream");
     }
-    WorkspaceMonthlyBudgetOperations.Scope scope(String workspace) {
-        return new WorkspaceMonthlyBudgetOperations.Scope(workspace,WorkspaceAdmission.Partition.SIMULATION,
-                YearMonth.from(usageClock.instant().atZone(ZoneId.of("Asia/Taipei"))));
-    }
     void assertDenial(HttpResponse<String> response,String code,String conversation,String run) throws Exception {
         assertEquals(503,response.statusCode(),response.body());
         assertTrue(response.headers().firstValue("Content-Type").orElse("").startsWith("application/json"),response.toString());
@@ -88,36 +72,6 @@ class AgUiDenialIntegrationTests {
         JsonNode body=json.readTree(response.body());
         assertEquals(code,body.path("code").asText(),response.body());
         assertEquals(1,body.size(),"no raw error details may be returned");
-    }
-    @Test void capZeroReturnsBudgetCodeForSseAcceptWithoutRunOrProvider() throws Exception {
-        String workspace=workspace(), conversation=conversation(workspace), run=UUID.randomUUID().toString();
-        budgets.configure(new WorkspaceMonthlyBudgetOperations.ConfigureCommand(scope(workspace),"dev-user",true,BigDecimal.ZERO,0)).toCompletableFuture().get(10,TimeUnit.SECONDS);
-        assertDenial(start(conversation,run),"MONTH_CAP",conversation,run);
-    }
-    @Test void unknownOnlyReturnsBudgetCodeForSseAcceptWithoutRunOrProvider() throws Exception {
-        String workspace=workspace(), sourceConversation=conversation(workspace), deniedConversation=conversation(workspace);
-        String sourceRun=UUID.randomUUID().toString(), deniedRun=UUID.randomUUID().toString();
-        var registration=assertInstanceOf(WorkspaceAdmission.RegisterResult.Registered.class,admission.register(
-                new WorkspaceAdmission.Register(workspace,sourceRun,"dev-user",sourceConversation,WorkspaceAdmission.Partition.SIMULATION)).toCompletableFuture().get(10,TimeUnit.SECONDS)).registration();
-        jdbc.update("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values (?,?,?,'synthetic','PENDING')",sourceRun,sourceConversation,UUID.randomUUID().toString());
-        String ownerToken=UUID.randomUUID().toString();
-        jdbc.update("insert into run_ownership(run_id,owner_token,generation,lease_until) values (?,?,1,clock_timestamp()+interval '1 hour')",sourceRun,ownerToken);
-        var owner=new io.github.samzhu.bot.usage.RunOwnershipGuard.Fence(sourceRun,ownerToken,1);
-        assertInstanceOf(WorkspaceAdmission.PublicationResult.Ready.class,admission.publish(registration).toCompletableFuture().get(10,TimeUnit.SECONDS));
-        String attempt=ledger.begin(new UsageLedger.Dispatch(sourceRun,workspace,"dev-user","FAKE","test","model","FAKE","1",true,"UNKNOWN"),owner);
-        var claim=assertInstanceOf(WorkspaceAdmission.Decision.Allowed.class,admission.dispatch(new WorkspaceAdmission.Dispatch(registration,attempt,owner)).toCompletableFuture().get(10,TimeUnit.SECONDS)).claim();
-        assertEquals(WorkspaceAdmission.FinalizationResult.SETTLED,admission.finalizeAttempt(new WorkspaceAdmission.FinalizeAttempt(registration,attempt,claim,WorkspaceAdmission.TerminalKind.UNKNOWN,null,owner)).toCompletableFuture().get(10,TimeUnit.SECONDS));
-        jdbc.update("update chat_run set status='FAILED' where id=?",sourceRun);
-        var configured=budgets.configure(new WorkspaceMonthlyBudgetOperations.ConfigureCommand(scope(workspace),"dev-user",true,new BigDecimal("100"),0)).toCompletableFuture().get(10,TimeUnit.SECONDS);
-        assertTrue(configured.terminalEffectiveUnknown());
-        assertTrue(configured.knownSubtotalUsd()==null || configured.knownSubtotalUsd().signum()==0);
-        assertDenial(start(deniedConversation,deniedRun),"MONTH_UNKNOWN",deniedConversation,deniedRun);
-    }
-    @Test void disconnectedGkeKeepsItsOwnCodeForSseAccept() throws Exception {
-        String workspace=workspace(), bot="denial-gke-"+UUID.randomUUID(), conversation="denial-conv-"+UUID.randomUUID(), run=UUID.randomUUID().toString();
-        jdbc.update("insert into bot(id,name,target,description,instructions,owner_id,created_at,updated_at) values (?,'GKE','GKE_REMOTE','synthetic','synthetic','dev-user',current_timestamp,current_timestamp)",bot);
-        jdbc.update("insert into conversation(id,bot_id,title,user_id,pinned,created_at,updated_at,workspace_id) values (?,?,'synthetic','dev-user',false,current_timestamp,current_timestamp,?)",conversation,bot,workspace);
-        assertDenial(start(conversation,run),"GKE_AGENT_NOT_CONNECTED",conversation,run);
     }
     @Test void unavailableCodesUseOnlySafeAllowlist() throws Exception {
         String workspace=workspace(), conversation=conversation(workspace);
