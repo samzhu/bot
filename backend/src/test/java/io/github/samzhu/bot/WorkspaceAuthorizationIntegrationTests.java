@@ -1,7 +1,22 @@
 package io.github.samzhu.bot;
-import com.fasterxml.jackson.databind.*;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.samzhu.bot.identity.CurrentUserProvider;
-import org.junit.jupiter.api.*;
+import io.github.samzhu.bot.usage.pricing.UsageCaseData;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -11,19 +26,285 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.convention.TestBean;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
-import java.net.URI;
-import java.net.http.*;
-import java.util.*;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.when;
+
+@BackendIntegrationTest
+class WorkspaceAuthorizationIntegrationTests {
+    private static final String CALLER = "dev-user";
+
+    @LocalServerPort int port;
+    @Autowired JdbcTemplate jdbc;
+    @Autowired TransactionTemplate transactions;
+    @Autowired BackendTestChatModel model;
+
+    private final ObjectMapper json = new ObjectMapper();
+    private final HttpClient http = HttpClient.newHttpClient();
+    private final String scope = "workspace-auth-" + UUID.randomUUID();
+    private final String localBot = UUID.randomUUID().toString();
+    private final String remoteBot = UUID.randomUUID().toString();
+    private final String messageId = UUID.randomUUID().toString();
+    private UsageCaseData caseData;
+
+    @BeforeEach
+    void prepareCase() {
+        model.reset();
+        caseData = new UsageCaseData(jdbc, transactions);
+    }
+
+    @AfterEach
+    void cleanCase() throws InterruptedException {
+        try {
+            caseData.cleanUp();
+            transactions.executeWithoutResult(status -> {
+                jdbc.update("delete from conversation where user_id=? and bot_id=?", CALLER, localBot);
+                jdbc.update("delete from bot where id in (?,?) and owner_id=?", localBot, remoteBot, CALLER);
+            });
+        } finally {
+            http.close();
+            model.reset();
+        }
+    }
+
+    @Test
+    void personalAndInvalidScopeAreDistinct() throws Exception {
+        var data = graphData(graph("{ personalWorkspace { id } workspaces { id name role personal } }"));
+        String personal = data.path("personalWorkspace").path("id").asText();
+        assertFalse(personal.isBlank(), data.toString());
+        var workspaces = data.path("workspaces");
+        assertTrue(workspaces.isArray(), data.toString());
+        boolean foundPersonal = false;
+        for (var workspace : workspaces) {
+            if (personal.equals(workspace.path("id").asText())) {
+                assertTrue(workspace.path("personal").asBoolean(), workspace.toString());
+                foundPersonal = true;
+            }
+        }
+        assertTrue(foundPersonal, data.toString());
+        assertGraphCode("WORKSPACE_ACCESS_DENIED",
+                graph("{ conversations(workspaceId: \"%s\") { id } }".formatted(scope)));
+    }
+
+    @Test
+    void deniedStartHasNoSideEffects() throws Exception {
+        String missing = UUID.randomUUID().toString();
+        assertJsonError(post("/api/ag-ui", runInput(missing, UUID.randomUUID().toString(), "hello")),
+                404, "CONVERSATION_ACCESS_DENIED");
+        assertNoRunEffects(missing);
+    }
+
+    @Test
+    void scopeOwnerAndRevocationProtectAllPaths() throws Exception {
+        prepareWorkspace();
+        String owner = UUID.randomUUID().toString();
+        assertEquals(1, jdbc.update("update workspace_member set role='MEMBER' where workspace_id=? and user_id=?",
+                scope, CALLER));
+        var created = createConversation("workspaceId: \"%s\"".formatted(scope), scope);
+        String owned = created.path("id").asText();
+        assertEquals(scope, created.path("workspaceId").asText());
+
+        assertEquals(Set.of(), conversationIds("search: \"%s\"".formatted(scope)));
+        assertEquals(Set.of(), conversationIds("workspaceId: null, search: \"%s\"".formatted(scope)));
+        assertEquals(Set.of(owned), conversationIds("workspaceId: \"%s\"".formatted(scope)));
+
+        // Preserve the legacy negative check: even a workspace manager cannot access a member's conversation.
+        assertEquals(1, jdbc.update("update workspace_member set role='MANAGER' where workspace_id=? and user_id=?",
+                scope, CALLER));
+        jdbc.update("insert into workspace_member(workspace_id,user_id,role,active) values (?,?,'MEMBER',true)",
+                scope, owner);
+        String foreign = UUID.randomUUID().toString();
+        jdbc.update("insert into conversation(id,bot_id,title,user_id,workspace_id) values (?,?,?,?,?)",
+                foreign, localBot, "Foreign conversation", owner, scope);
+        assertTrue(graphData(graph("{ conversation(id: \"%s\") { id messages { id } runs { id } } }"
+                .formatted(foreign))).path("conversation").isNull());
+        assertGraphCode("CONVERSATION_ACCESS_DENIED",
+                graph("mutation { setConversationPinned(id: \"%s\", pinned: true) { id } }".formatted(foreign)));
+        var denied = post("/api/ag-ui", runInput(foreign, UUID.randomUUID().toString(), "hello"));
+        assertJsonError(denied, 404, "CONVERSATION_ACCESS_DENIED");
+        assertFalse(denied.body().contains(foreign));
+        assertNoRunEffects(foreign);
+
+        assertEquals(1, jdbc.update("update workspace_member set role='MEMBER' where workspace_id=? and user_id=?",
+                scope, CALLER));
+        revokeCaller();
+        assertGraphCode("WORKSPACE_ACCESS_DENIED",
+                graph("{ conversations(workspaceId: \"%s\") { id } }".formatted(scope)));
+        assertTrue(graphData(graph("{ conversation(id: \"%s\") { id } }".formatted(owned)))
+                .path("conversation").isNull());
+    }
+
+    @Test
+    void explicitNullAndOmittedScopeResolvePersonal() throws Exception {
+        insertBot(localBot, "LOCAL");
+        String personal = graphData(graph("{ personalWorkspace { id } }")).path("personalWorkspace").path("id").asText();
+        assertFalse(personal.isBlank());
+        var omitted = createConversation("", scope + " omitted");
+        var explicit = createConversation("workspaceId: null", scope + " explicit");
+
+        assertEquals(personal, omitted.path("workspaceId").asText());
+        assertEquals(personal, explicit.path("workspaceId").asText());
+        assertEquals(Set.of(omitted.path("id").asText(), explicit.path("id").asText()),
+                conversationIds("workspaceId: null, search: \"%s\"".formatted(scope)));
+    }
+
+    @Test
+    void legacyStartAndCancelMissingAreNonLeaking() throws Exception {
+        String missingConversation = UUID.randomUUID().toString();
+        String missingRun = UUID.randomUUID().toString();
+        var start = post("/api/conversations/" + missingConversation + "/runs",
+                Map.of("clientRequestId", UUID.randomUUID().toString(), "message", "hello"));
+        assertJsonError(start, 404, "CONVERSATION_ACCESS_DENIED");
+        assertFalse(start.body().contains(missingConversation));
+        var cancel = post("/api/runs/" + missingRun + "/cancel", Map.of());
+        assertJsonError(cancel, 404, "RUN_ACCESS_DENIED");
+        assertFalse(cancel.body().contains(missingRun));
+        assertNoRunEffects(missingConversation);
+    }
+
+    @Test
+    void revokedConversationRejectsSseAcceptWithoutSideEffects() throws Exception {
+        prepareWorkspace();
+        String conversation = createConversation("workspaceId: \"%s\"".formatted(scope), "Revoked fixture")
+                .path("id").asText();
+        revokeCaller();
+        var denied = postSse(runInput(conversation, UUID.randomUUID().toString(), "hello"));
+        assertJsonError(denied, 404, "CONVERSATION_ACCESS_DENIED");
+        assertNoRunEffects(conversation);
+    }
+
+    @Test
+    void httpAgentAcceptPreservesSuccessAndErrors() throws Exception {
+        assertJsonError(postSse(Map.of()), 400, "INVALID_AG_UI_INPUT");
+        assertJsonError(postSse(runInput(UUID.randomUUID().toString(), UUID.randomUUID().toString(), "hi")),
+                404, "CONVERSATION_ACCESS_DENIED");
+
+        prepareWorkspace();
+        String conversation = createConversation("workspaceId: \"%s\"".formatted(scope), "Agent fixture")
+                .path("id").asText();
+        String run = UUID.randomUUID().toString();
+        var request = runInput(conversation, run, "hi");
+        var success = postSse(request);
+        assertEquals(200, success.statusCode(), success.body());
+        assertTrue(contentType(success).startsWith("text/event-stream"));
+        assertTrue(success.body().contains("RUN_FINISHED"), success.body());
+        assertJsonError(postSse(request), 409, "DUPLICATE_RUN");
+        assertJsonError(postSse(runInput(conversation, run, "changed")), 409, "RUN_CONFLICT");
+
+        insertBot(remoteBot, "GKE_REMOTE");
+        // OFF prevents GraphQL creation for this Bot. Seed an existing conversation to exercise the Run path.
+        String remoteConversation = UUID.randomUUID().toString();
+        jdbc.update("insert into conversation(id,bot_id,title,user_id,workspace_id) values (?,?,?,?,?)",
+                remoteConversation, remoteBot, "Remote fixture", CALLER, scope);
+        assertJsonError(postSse(runInput(remoteConversation, UUID.randomUUID().toString(), "hi")),
+                503, "GKE_AGENT_NOT_CONNECTED");
+        assertEquals(1, model.invocations());
+        assertEquals(0, jdbc.queryForObject("select count(*) from chat_run where conversation_id=?",
+                Integer.class, remoteConversation));
+    }
+
+    private void prepareWorkspace() {
+        caseData.createWorkspace(scope, CALLER);
+        insertBot(localBot, "LOCAL");
+    }
+
+    private void insertBot(String bot, String target) {
+        jdbc.update("insert into bot(id,name,target,owner_id) values (?,'Workspace authorization fixture',?,?)",
+                bot, target, CALLER);
+    }
+
+    private void revokeCaller() {
+        assertEquals(1, jdbc.update("update workspace_member set active=false where workspace_id=? and user_id=?",
+                scope, CALLER));
+    }
+
+    private JsonNode createConversation(String scopeArgument, String title) throws Exception {
+        String query = """
+                mutation { createConversation(botId: "%s", title: "%s"%s) { id workspaceId } }
+                """.formatted(localBot, title, scopeArgument.isEmpty() ? "" : ", " + scopeArgument);
+        var created = graphData(graph(query)).path("createConversation");
+        assertFalse(created.path("id").asText().isBlank(), created.toString());
+        return created;
+    }
+
+    private Set<String> conversationIds(String arguments) throws Exception {
+        var conversations = graphData(graph("{ conversations(%s) { id } }".formatted(arguments)))
+                .path("conversations");
+        assertTrue(conversations.isArray(), conversations.toString());
+        Set<String> ids = new HashSet<>();
+        conversations.forEach(conversation -> assertTrue(ids.add(conversation.path("id").asText())));
+        return ids;
+    }
+
+    private void assertNoRunEffects(String conversation) {
+        assertEquals(0, model.invocations());
+        assertEquals(0, jdbc.queryForObject("select count(*) from chat_run where conversation_id=?",
+                Integer.class, conversation));
+        assertEquals(0, jdbc.queryForObject("select count(*) from message where conversation_id=?",
+                Integer.class, conversation));
+        assertEquals(0, jdbc.queryForObject("select count(*) from ai_session where id=?",
+                Integer.class, conversation));
+    }
+
+    private Map<String, Object> runInput(String thread, String run, String message) {
+        return Map.of("threadId", thread, "runId", run, "messages",
+                List.of(Map.of("id", messageId, "role", "user", "content", message)));
+    }
+
+    private JsonNode graph(String query) throws Exception {
+        var response = post("/graphql", Map.of("query", query));
+        assertEquals(200, response.statusCode(), response.body());
+        return json.readTree(response.body());
+    }
+
+    private JsonNode graphData(JsonNode response) {
+        assertFalse(response.has("errors"), response.toString());
+        return response.path("data");
+    }
+
+    private void assertGraphCode(String code, JsonNode response) {
+        assertEquals(code, response.path("errors").path(0).path("extensions").path("code").asText(),
+                response.toString());
+    }
+
+    private void assertJsonError(HttpResponse<String> response, int status, String code) throws Exception {
+        assertEquals(status, response.statusCode(), response.body());
+        assertTrue(contentType(response).startsWith("application/json"));
+        assertEquals(code, json.readTree(response.body()).path("code").asText());
+    }
+
+    private String contentType(HttpResponse<?> response) {
+        return response.headers().firstValue("content-type").orElse("");
+    }
+
+    private HttpResponse<String> post(String path, Object body) throws Exception {
+        return post(path, body, "*/*");
+    }
+
+    private HttpResponse<String> postSse(Object body) throws Exception {
+        return post("/api/ag-ui", body, "text/event-stream");
+    }
+
+    private HttpResponse<String> post(String path, Object body, String accept) throws Exception {
+        var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
+                .timeout(Duration.ofSeconds(10))
+                .header("Content-Type", "application/json")
+                .header("Accept", accept)
+                .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body)))
+                .build();
+        return http.send(request, HttpResponse.BodyHandlers.ofString());
+    }
+}
+
+// The same live Run must be called as both its owner and a second authenticated user.
 @io.github.samzhu.bot.UseTestFakes
 @SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(TestcontainersConfiguration.class)
 @ActiveProfiles("test")
-class WorkspaceAuthorizationIntegrationTests {
+class WorkspaceAuthorizationActorSwitchIntegrationTests {
  @LocalServerPort int port;
  @Autowired JdbcTemplate jdbc;
- @Autowired javax.sql.DataSource dataSource;
  @MockitoBean CurrentUserProvider actor;
  @TestBean(name="mockChatModel",methodName="model",enforceOverride=true) ChatModel chat;
  static ControlledChatModel model(){return ControlledChatModel.getInstance();}
@@ -31,32 +312,6 @@ class WorkspaceAuthorizationIntegrationTests {
  @BeforeEach void setup(){when(actor.getCurrentUserId()).thenReturn("workspace-test-user");model().reset();jdbc.update("insert into bot(id,name,target) values ('workspace-test-bot','test','LOCAL') on conflict do nothing");}
  HttpResponse<String> post(String path,Object body)throws Exception{return http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+path)).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body))).build(),HttpResponse.BodyHandlers.ofString());}
  JsonNode graph(String query)throws Exception{return json.readTree(post("/graphql",Map.of("query",query)).body());}
- @Test void personalAndInvalidScopeAreDistinct()throws Exception{
-  var result=graph("{ workspaces { id name role personal } }"); assertFalse(result.has("errors"),result.toString()); assertEquals(1,result.path("data").path("workspaces").size()); assertTrue(result.path("data").path("workspaces").get(0).path("personal").asBoolean());
-  var denied=graph("{ conversations(workspaceId: \"no-such-workspace\") { id } }"); assertEquals("WORKSPACE_ACCESS_DENIED",denied.path("errors").get(0).path("extensions").path("code").asText());
- }
- @Test void deniedStartHasNoSideEffects()throws Exception{
-  var r=post("/api/ag-ui",Map.of("threadId","missing-thread","runId",UUID.randomUUID().toString(),"messages",List.of(Map.of("id","u","role","user","content","hello"))));
-  assertEquals(404,r.statusCode()); assertEquals("CONVERSATION_ACCESS_DENIED",json.readTree(r.body()).path("code").asText()); assertTrue(model().getRecordedPrompts().isEmpty()); assertEquals(0,jdbc.queryForObject("select count(*) from chat_run where conversation_id='missing-thread'",Integer.class));
- }
- @Test void scopeOwnerAndRevocationProtectAllPaths() throws Exception {
-  String actorId="scope-owner"; when(actor.getCurrentUserId()).thenReturn(actorId);
-  jdbc.update("insert into workspace(id,name) values ('shared-test','Shared') on conflict do nothing");
-  jdbc.update("insert into workspace_member(workspace_id,user_id,role,active) values ('shared-test',?,'MEMBER',true),('shared-test','scope-manager','MANAGER',true) on conflict (workspace_id,user_id) do update set active=true",actorId);
-  var created=graph("mutation { createConversation(botId: \"workspace-test-bot\", workspaceId: \"shared-test\") { id workspaceId } }");
-  assertFalse(created.has("errors"),created.toString()); String id=created.path("data").path("createConversation").path("id").asText(); assertEquals("shared-test",created.path("data").path("createConversation").path("workspaceId").asText());
-  assertEquals(0,graph("{ conversations { id } }").path("data").path("conversations").size());
-  assertEquals(0,graph("{ conversations(workspaceId: null) { id } }").path("data").path("conversations").size());
-  assertEquals(1,graph("{ conversations(workspaceId: \"shared-test\") { id } }").path("data").path("conversations").size());
-  when(actor.getCurrentUserId()).thenReturn("scope-manager");
-  assertTrue(graph("{ conversation(id: \""+id+"\") { id messages { id } runs { id } } }").path("data").path("conversation").isNull());
-  assertEquals("CONVERSATION_ACCESS_DENIED",graph("mutation { setConversationPinned(id: \""+id+"\", pinned:true) { id } }").path("errors").get(0).path("extensions").path("code").asText());
-  var r=post("/api/ag-ui",Map.of("threadId",id,"runId",UUID.randomUUID().toString(),"messages",List.of(Map.of("id","u","role","user","content","hello"))));
-  assertEquals(404,r.statusCode()); assertEquals("CONVERSATION_ACCESS_DENIED",json.readTree(r.body()).path("code").asText()); assertFalse(r.body().contains(id)); assertEquals(0,jdbc.queryForObject("select count(*) from chat_run where conversation_id=?",Integer.class,id)); assertEquals(0,jdbc.queryForObject("select count(*) from message where conversation_id=?",Integer.class,id)); assertEquals(0,jdbc.queryForObject("select count(*) from ai_session where id=?",Integer.class,id)); assertTrue(model().getRecordedPrompts().isEmpty());
-  when(actor.getCurrentUserId()).thenReturn(actorId); jdbc.update("update workspace_member set active=false where workspace_id='shared-test' and user_id=?",actorId);
-  assertEquals("WORKSPACE_ACCESS_DENIED",graph("{ conversations(workspaceId: \"shared-test\") { id } }").path("errors").get(0).path("extensions").path("code").asText());
-  assertTrue(graph("{ conversation(id: \""+id+"\") { id } }").path("data").path("conversation").isNull());
- }
  @Test void activeCancellationRechecksMembership() throws Exception {
   String owner="cancel-owner"; when(actor.getCurrentUserId()).thenReturn(owner);
   var created=graph("mutation { createConversation(botId: \"workspace-test-bot\") { id workspaceId } }");
@@ -77,77 +332,5 @@ class WorkspaceAuthorizationIntegrationTests {
   var denied=post("/api/runs/"+run+"/cancel",Map.of()); assertEquals(404,denied.statusCode()); assertEquals("RUN_ACCESS_DENIED",json.readTree(denied.body()).path("code").asText()); assertFalse(denied.body().contains(run)); assertEquals("RUNNING",jdbc.queryForObject("select status from chat_run where id=?",String.class,run));
   jdbc.update("update workspace_member set active=true where workspace_id=? and user_id=?",workspace,owner);
   assertEquals(200,post("/api/runs/"+run+"/cancel",Map.of()).statusCode()); stream.body().close();
- }
- @Test void migrationBackfillsAndPreservesHistoryAndSession() throws Exception {
-  try (var connection=dataSource.getConnection(); var sql=connection.createStatement()) {
-   connection.setAutoCommit(false); sql.execute("create schema workspace_migration_test"); sql.execute("set local search_path to workspace_migration_test");
-   for (String file : List.of("V1__initial_schema.sql","V3__session_schema.sql","V4__add_conversation_pinned.sql","V5__gke_bot_and_run_mode.sql")) {
-    try(var in=getClass().getResourceAsStream("/db/migration/"+file)){ sql.execute(new String(in.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8)); }
-   }
-   sql.execute("insert into bot(id,name) values ('b','B')");
-   sql.execute("insert into conversation(id,bot_id,title,user_id) values ('c1','b','one','alice'),('c2','b','two','alice'),('c3','b','three','bob')");
-   sql.execute("insert into chat_run(id,conversation_id,client_request_id,input_text,status) values ('r','c1','request','hello','COMPLETED')");
-   sql.execute("insert into message(id,conversation_id,run_id,role,content,interrupted) values ('m','c1','r','USER','hello',false),('m2','c1','r','ASSISTANT','partial',true)");
-   sql.execute("insert into ai_session(id,created_at,metadata,event_version) values ('c1',now(),'{\"principalName\":\"alice\"}',7)");
-   sql.execute("insert into ai_session_event(id,session_id,\"timestamp\",event_type,message_type,message_content,payload,metadata) values ('event1','c1',now(),'MESSAGE','USER','hello','{}','{}')");
-   try(var in=getClass().getResourceAsStream("/db/migration/V6__workspace.sql")){sql.execute(new String(in.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8));}
-   try(var rows=sql.executeQuery("select count(distinct workspace_id),count(*) from conversation")){ assertTrue(rows.next()); assertEquals(2,rows.getInt(1)); assertEquals(3,rows.getInt(2)); }
-   try(var rows=sql.executeQuery("select count(*) from workspace_member where role='MANAGER' and active")){assertTrue(rows.next()); assertEquals(2,rows.getInt(1));}
-   try(var rows=sql.executeQuery("select c.user_id,r.id,r.client_request_id,s.metadata,s.event_version,e.id,e.message_content from conversation c join chat_run r on r.conversation_id=c.id join ai_session s on s.id=c.id join ai_session_event e on e.session_id=s.id where c.id='c1'")){assertTrue(rows.next());assertEquals("alice",rows.getString(1));assertEquals("r",rows.getString(2));assertEquals("request",rows.getString(3));assertEquals("{\"principalName\":\"alice\"}",rows.getString(4));assertEquals(7,rows.getLong(5));assertEquals("event1",rows.getString(6));assertEquals("hello",rows.getString(7));}
-   try(var rows=sql.executeQuery("select id,content,interrupted from message order by id")){assertTrue(rows.next());assertEquals("m",rows.getString(1));assertEquals("hello",rows.getString(2));assertFalse(rows.getBoolean(3));assertTrue(rows.next());assertEquals("m2",rows.getString(1));assertEquals("partial",rows.getString(2));assertTrue(rows.getBoolean(3));}
-   try(var rows=sql.executeQuery("select count(*) from conversation c join workspace w on w.id=c.workspace_id join workspace_member m on m.workspace_id=w.id and m.user_id=c.user_id where w.personal_owner_id=c.user_id and m.role='MANAGER' and m.active")){assertTrue(rows.next());assertEquals(3,rows.getInt(1));}
-   try(var rows=sql.executeQuery("select count(*) from pg_constraint where conrelid in ('conversation'::regclass,'workspace_member'::regclass) and contype in ('f','c') and conname in ('fk_conversation_workspace','workspace_member_workspace_id_fkey','workspace_member_role_check')")){assertTrue(rows.next());assertEquals(3,rows.getInt(1));}
-   try(var rows=sql.executeQuery("select obj_description('workspace'::regclass), col_description('conversation'::regclass,(select attnum from pg_attribute where attrelid='conversation'::regclass and attname='workspace_id'))")){assertTrue(rows.next());assertNotNull(rows.getString(1));assertNotNull(rows.getString(2));}
-   connection.rollback();
-  }
- }
- @Test void explicitNullAndOmittedScopeResolvePersonal() throws Exception {
-  when(actor.getCurrentUserId()).thenReturn("null-scope-owner");
-  var personal=graph("{ workspaces { id personal } }"); String id=personal.path("data").path("workspaces").get(0).path("id").asText();
-  var a=graph("mutation { createConversation(botId: \"workspace-test-bot\") { workspaceId } }");
-  var b=graph("mutation { createConversation(botId: \"workspace-test-bot\", workspaceId: null) { workspaceId } }");
-  assertEquals(id,a.path("data").path("createConversation").path("workspaceId").asText()); assertEquals(id,b.path("data").path("createConversation").path("workspaceId").asText());
-  assertEquals(2,graph("{ conversations(workspaceId: null) { id } }").path("data").path("conversations").size());
- }
- @Test void legacyStartAndCancelMissingAreNonLeaking() throws Exception {
-  var start=post("/api/conversations/unknown-conversation/runs",Map.of("clientRequestId","request","message","hello"));
-  assertEquals(404,start.statusCode()); assertEquals("CONVERSATION_ACCESS_DENIED",json.readTree(start.body()).path("code").asText()); assertFalse(start.body().contains("unknown-conversation"));
-  var cancel=post("/api/runs/unknown-run/cancel",Map.of()); assertEquals(404,cancel.statusCode()); assertEquals("RUN_ACCESS_DENIED",json.readTree(cancel.body()).path("code").asText()); assertFalse(cancel.body().contains("unknown-run"));
-  assertTrue(model().getRecordedPrompts().isEmpty());
- }
- @Test void revokedConversationRejectsSseAcceptWithoutSideEffects() throws Exception {
-  when(actor.getCurrentUserId()).thenReturn("sse-owner");
-  var created=graph("mutation { createConversation(botId: \"workspace-test-bot\") { id workspaceId } }");
-  String id=created.path("data").path("createConversation").path("id").asText(); String workspace=created.path("data").path("createConversation").path("workspaceId").asText();
-  jdbc.update("update workspace_member set active=false where workspace_id=? and user_id=?",workspace,"sse-owner");
-  var body=Map.of("threadId",id,"runId",UUID.randomUUID().toString(),"messages",List.of(Map.of("id","u","role","user","content","hello")));
-  var request=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/api/ag-ui")).header("Content-Type","application/json").header("Accept","text/event-stream").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body))).build();
-  var response=http.send(request,HttpResponse.BodyHandlers.ofString()); assertEquals(404,response.statusCode(),response.body()); assertEquals("CONVERSATION_ACCESS_DENIED",json.readTree(response.body()).path("code").asText()); assertTrue(response.headers().firstValue("content-type").orElse("").startsWith("application/json"));
-  assertEquals(0,jdbc.queryForObject("select count(*) from chat_run where conversation_id=?",Integer.class,id)); assertEquals(0,jdbc.queryForObject("select count(*) from message where conversation_id=?",Integer.class,id)); assertEquals(0,jdbc.queryForObject("select count(*) from ai_session where id=?",Integer.class,id)); assertTrue(model().getRecordedPrompts().isEmpty());
- }
- HttpResponse<String> postSse(Object body) throws Exception {
-  return http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/api/ag-ui")).header("Content-Type","application/json").header("Accept","text/event-stream").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body))).build(),HttpResponse.BodyHandlers.ofString());
- }
- void assertJsonError(HttpResponse<String> response,int status,String code) throws Exception {
-  assertEquals(status,response.statusCode(),response.body());
-  assertTrue(response.headers().firstValue("content-type").orElse("").startsWith("application/json"));
-  assertEquals(code,json.readTree(response.body()).path("code").asText());
- }
- @Test void httpAgentAcceptPreservesSuccessAndErrors() throws Exception {
-  when(actor.getCurrentUserId()).thenReturn("sse-path-owner");
-  assertJsonError(postSse(Map.of()),400,"INVALID_AG_UI_INPUT");
-  var unknown=Map.of("threadId","unknown-thread","runId",UUID.randomUUID().toString(),"messages",List.of(Map.of("id","u","role","user","content","hi")));
-  assertJsonError(postSse(unknown),404,"CONVERSATION_ACCESS_DENIED");
-  var created=graph("mutation { createConversation(botId: \"workspace-test-bot\") { id workspaceId } }");
-  String id=created.path("data").path("createConversation").path("id").asText(); String workspace=created.path("data").path("createConversation").path("workspaceId").asText();
-  var request=Map.of("threadId",id,"runId",UUID.randomUUID().toString(),"messages",List.of(Map.of("id","u","role","user","content","hi")));
-  var success=postSse(request); assertEquals(200,success.statusCode()); assertTrue(success.headers().firstValue("content-type").orElse("").startsWith("text/event-stream")); assertTrue(success.body().contains("RUN_FINISHED"));
-  assertJsonError(postSse(request),409,"DUPLICATE_RUN");
-  var conflicting=Map.of("threadId",id,"runId",request.get("runId"),"messages",List.of(Map.of("id","u","role","user","content","changed")));
-  assertJsonError(postSse(conflicting),409,"RUN_CONFLICT");
-  jdbc.update("insert into bot(id,name,target,owner_id) values ('sse-gke','remote','GKE_REMOTE','sse-path-owner') on conflict do nothing");
-  jdbc.update("insert into conversation(id,bot_id,title,user_id,workspace_id) values ('sse-gke-conv','sse-gke','remote','sse-path-owner',?) on conflict do nothing",workspace);
-  var unavailable=Map.of("threadId","sse-gke-conv","runId",UUID.randomUUID().toString(),"messages",List.of(Map.of("id","u","role","user","content","hi")));
-  assertJsonError(postSse(unavailable),503,"GKE_AGENT_NOT_CONNECTED");
  }
 }

@@ -42,23 +42,6 @@ class WorkspaceMonthlyBudgetGraphQLTests {
         return json.readTree(http.send(request,HttpResponse.BodyHandlers.ofString()).body());
     }
 
-    @Test void emptyPeriodShowsDisabledBudgetAndExactZero() throws Exception {
-        var personal=graph("{ personalWorkspace { id } }");
-        assertFalse(personal.has("errors"),personal.toString());
-        String workspace=personal.path("data").path("personalWorkspace").path("id").asText();
-        var result=graph("{ workspaceMonthlyBudget(workspaceId:\""+workspace+"\",simulation:false) { workspaceId simulation period periodStart periodEnd enabled capUsd knownSubtotalUsd terminalUnknownCount state reason configVersion generation } }");
-        assertFalse(result.has("errors"),result.toString());
-        var budget=result.path("data").path("workspaceMonthlyBudget");
-        assertEquals(workspace,budget.path("workspaceId").asText());
-        assertFalse(budget.path("enabled").asBoolean());
-        assertEquals(0, new java.math.BigDecimal("10").compareTo(new java.math.BigDecimal(budget.path("capUsd").asText())));
-        assertEquals(0,new java.math.BigDecimal(budget.path("knownSubtotalUsd").asText()).signum());
-        assertEquals("0",budget.path("terminalUnknownCount").asText());
-        assertEquals("DISABLED",budget.path("state").asText());
-        assertEquals("DISABLED",budget.path("reason").asText());
-        assertEquals("0",budget.path("configVersion").asText());
-    }
-
     @Test void untouchedLegacyRowGetsDefaultButSavedNullAndDisabledChoiceStaySaved() throws Exception {
         String workspace=graph("{ personalWorkspace { id } }").path("data").path("personalWorkspace").path("id").asText();
         jdbc.update("insert into workspace_monthly_budget(workspace_id,partition,enabled,cap_usd,config_version) values (?,'REAL',false,null,0)",workspace);
@@ -108,27 +91,6 @@ class WorkspaceMonthlyBudgetGraphQLTests {
             assertEquals(0,new java.math.BigDecimal("7.25").compareTo(new java.math.BigDecimal(budget.path("capUsd").asText())));
             assertTrue(budget.path("enabled").asBoolean()); assertEquals("1",budget.path("configVersion").asText());
         }
-    }
-
-    @Test void durableReplayUsesCurrentBudgetAndConflictingPayloadDoesNotMutate() throws Exception {
-        String workspace=graph("{ personalWorkspace { id } }").path("data").path("personalWorkspace").path("id").asText();
-        String key="budget-key-"+java.util.UUID.randomUUID(),later="later-key-"+java.util.UUID.randomUUID();
-        var first=configure(workspace,key,"0","5.0");
-        assertFalse(first.has("errors"),first.toString());
-        assertEquals("APPLIED",first.path("data").path("configureWorkspaceMonthlyBudget").path("outcome").asText());
-        var second=configure(workspace,later,"1","8");
-        assertFalse(second.has("errors"),second.toString());
-        var replay=configure(workspace,key,"0","5.00");
-        assertFalse(replay.has("errors"),replay.toString());
-        var value=replay.path("data").path("configureWorkspaceMonthlyBudget");
-        assertEquals("REPLAYED",value.path("outcome").asText());
-        assertEquals(0,new java.math.BigDecimal("8").compareTo(new java.math.BigDecimal(value.path("budget").path("capUsd").asText())));
-        assertEquals("2",value.path("budget").path("configVersion").asText());
-        var conflict=configure(workspace,key,"0","6");
-        assertEquals("BUDGET_CONFIGURATION_CONFLICT",conflict.path("errors").path(0).path("extensions").path("code").asText());
-        assertEquals(0,new java.math.BigDecimal("8").compareTo(jdbc.queryForObject("select cap_usd from workspace_monthly_budget where workspace_id=? and partition='REAL'",java.math.BigDecimal.class,workspace)));
-        assertEquals(2L,jdbc.queryForObject("select config_version from workspace_monthly_budget where workspace_id=? and partition='REAL'",Long.class,workspace));
-        assertEquals(0,jdbc.queryForObject("select count(*) from workspace_admission_effect_outbox where target_workspace_id=?",Integer.class,workspace));
     }
 
     private JsonNode configure(String workspace,String key,String version,String cap) throws Exception {
@@ -221,19 +183,6 @@ class WorkspaceMonthlyBudgetGraphQLTests {
         }
     }
 
-    @Test void sameKeyIsIsolatedBetweenRealAndSimulation() throws Exception {
-        String workspace=graph("{ personalWorkspace { id } }").path("data").path("personalWorkspace").path("id").asText();
-        String key="partition-"+java.util.UUID.randomUUID();
-        var real=configurePartition(workspace,key,"0","5",false);
-        var simulation=configurePartition(workspace,key,"0","9",true);
-        assertFalse(real.has("errors"),real.toString()); assertFalse(simulation.has("errors"),simulation.toString());
-        assertEquals("APPLIED",real.path("data").path("configureWorkspaceMonthlyBudget").path("outcome").asText());
-        assertEquals("APPLIED",simulation.path("data").path("configureWorkspaceMonthlyBudget").path("outcome").asText());
-        assertEquals(2,jdbc.queryForObject("select count(*) from workspace_monthly_budget_command where workspace_id=? and idempotency_key=?",Integer.class,workspace,key));
-        assertEquals(0,new java.math.BigDecimal("5").compareTo(jdbc.queryForObject("select cap_usd from workspace_monthly_budget where workspace_id=? and partition='REAL'",java.math.BigDecimal.class,workspace)));
-        assertEquals(0,new java.math.BigDecimal("9").compareTo(jdbc.queryForObject("select cap_usd from workspace_monthly_budget where workspace_id=? and partition='SIMULATION'",java.math.BigDecimal.class,workspace)));
-    }
-
     @Test void revokedManagerCannotReplayOrReadPreviousResult() throws Exception {
         String workspace=graph("{ personalWorkspace { id } }").path("data").path("personalWorkspace").path("id").asText();
         String key="revoked-"+java.util.UUID.randomUUID();
@@ -242,17 +191,6 @@ class WorkspaceMonthlyBudgetGraphQLTests {
         var replay=configure(workspace,key,"0","5.00");
         assertEquals("WORKSPACE_ACCESS_DENIED",replay.path("errors").path(0).path("extensions").path("code").asText());
         assertTrue(replay.path("data").isNull());
-        assertEquals(1L,jdbc.queryForObject("select config_version from workspace_monthly_budget where workspace_id=? and partition='REAL'",Long.class,workspace));
-        assertEquals(1,jdbc.queryForObject("select count(*) from workspace_monthly_budget_command where workspace_id=?",Integer.class,workspace));
-    }
-
-    @Test void invalidInputAndCasConflictUseExplicitCodesWithoutChangingConfiguration() throws Exception {
-        String workspace=graph("{ personalWorkspace { id } }").path("data").path("personalWorkspace").path("id").asText();
-        assertEquals("INVALID_BUDGET_CONFIGURATION",configure(workspace,"invalid","0","-1").path("errors").path(0).path("extensions").path("code").asText());
-        assertEquals("INVALID_BUDGET_CONFIGURATION",configure(workspace,"invalid","0","0.0000000000001").path("errors").path(0).path("extensions").path("code").asText());
-        assertEquals("INVALID_BUDGET_CONFIGURATION",configure(workspace,"invalid","bad","1").path("errors").path(0).path("extensions").path("code").asText());
-        assertFalse(configure(workspace,"first","0","5").has("errors"));
-        assertEquals("BUDGET_CONFIGURATION_CONFLICT",configure(workspace,"stale","0","7").path("errors").path(0).path("extensions").path("code").asText());
         assertEquals(1L,jdbc.queryForObject("select config_version from workspace_monthly_budget where workspace_id=? and partition='REAL'",Long.class,workspace));
         assertEquals(1,jdbc.queryForObject("select count(*) from workspace_monthly_budget_command where workspace_id=?",Integer.class,workspace));
     }

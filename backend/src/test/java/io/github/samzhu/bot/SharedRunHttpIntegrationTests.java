@@ -8,7 +8,11 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -34,6 +38,7 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -41,6 +46,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @BackendIntegrationTest
 class SharedRunHttpIntegrationTests {
@@ -370,6 +376,51 @@ class SharedRunHttpIntegrationTests {
     }
 
     @Test
+    void completedRunReordersOnlyItsConversationInWorkspacePagination() throws Exception {
+        String older = conversation();
+        String newer = conversation();
+        Instant later = Instant.now().minus(Duration.ofHours(1)).truncatedTo(ChronoUnit.SECONDS);
+        Instant earlier = later.minus(Duration.ofHours(1));
+        assertThat(jdbc.update("update conversation set updated_at = ? where workspace_id = ? and id = ?",
+                Timestamp.from(earlier), workspace, older)).isEqualTo(1);
+        assertThat(jdbc.update("update conversation set updated_at = ? where workspace_id = ? and id = ?",
+                Timestamp.from(later), workspace, newer)).isEqualTo(1);
+        assertThat(List.of(conversationAtOffset(0), conversationAtOffset(1))).containsExactly(newer, older);
+
+        model.streamWith(Flux.just(usageChunk("Order reply")));
+        Event terminal = onlyLegacyTerminal(events(post(legacyPath(older), legacyInput("Order message"))));
+        assertThat(terminal.name()).isEqualTo("run.completed");
+        assertThat(runStatus(terminal.data().path("runId").asText())).isEqualTo("COMPLETED");
+
+        assertThat(List.of(conversationAtOffset(0), conversationAtOffset(1))).containsExactly(older, newer);
+        assertThat(conversationUpdatedAt(older)).isAfter(later);
+        assertThat(conversationUpdatedAt(newer)).isEqualTo(later);
+    }
+
+    @Test
+    void messageForeignKeyRequiresTheConversationThatOwnsItsRun() throws Exception {
+        String owner = conversation();
+        String other = conversation();
+        String run = UUID.randomUUID().toString();
+        jdbc.update("""
+                insert into chat_run(id, conversation_id, client_request_id, input_text, status)
+                values (?, ?, ?, 'fixture', 'COMPLETED')
+                """, run, owner, UUID.randomUUID().toString());
+        String insertMessage = """
+                insert into message(id, conversation_id, run_id, role, content)
+                values (?, ?, ?, 'USER', ?)
+                """;
+        assertThatThrownBy(() -> jdbc.update(insertMessage, UUID.randomUUID().toString(), other, run, "mismatched"))
+                .isInstanceOfSatisfying(DataIntegrityViolationException.class, failure ->
+                        assertThat(failure.getMostSpecificCause()).isInstanceOfSatisfying(SQLException.class,
+                                cause -> assertThat(cause.getSQLState()).isEqualTo("23503")));
+        assertThat(jdbc.update(insertMessage, UUID.randomUUID().toString(), owner, run, "matched")).isEqualTo(1);
+        assertThat(jdbc.queryForList("select conversation_id from message where run_id = ?", String.class, run))
+                .containsExactly(owner);
+        assertThat(model.invocations()).isZero();
+    }
+
+    @Test
     void legacyRunValidatesPayloadAndHidesForeignConversation() throws Exception {
         String conversation = conversation();
         String path = legacyPath(conversation);
@@ -552,6 +603,26 @@ class SharedRunHttpIntegrationTests {
 
     private String runStatus(String run) {
         return jdbc.queryForObject("select status from chat_run where id = ?", String.class, run);
+    }
+
+    private String conversationAtOffset(int offset) throws Exception {
+        var response = post("/graphql", Map.of("query", """
+                query($workspace: ID!, $offset: Int!) {
+                    conversations(workspaceId: $workspace, limit: 1, offset: $offset) { id }
+                }
+                """, "variables", Map.of("workspace", workspace, "offset", offset)));
+        assertThat(response.statusCode()).isEqualTo(200);
+        var result = json.readTree(response.body());
+        assertThat(result.has("errors")).isFalse();
+        var conversations = result.path("data").path("conversations");
+        assertThat(conversations.isArray()).isTrue();
+        assertThat(conversations.size()).isEqualTo(1);
+        return conversations.get(0).path("id").asText();
+    }
+
+    private Instant conversationUpdatedAt(String conversation) {
+        return jdbc.queryForObject("select updated_at from conversation where workspace_id = ? and id = ?",
+                Timestamp.class, workspace, conversation).toInstant();
     }
 
     private void awaitTerminalWork() throws InterruptedException {

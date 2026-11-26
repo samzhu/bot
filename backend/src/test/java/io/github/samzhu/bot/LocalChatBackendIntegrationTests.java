@@ -3,7 +3,6 @@ package io.github.samzhu.bot;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.samzhu.bot.bot.internal.BotRepository;
-import io.github.samzhu.bot.conversation.ConversationOperations;
 import io.github.samzhu.bot.conversation.ConversationView;
 import io.github.samzhu.bot.conversation.internal.ConversationRepository;
 import io.github.samzhu.bot.conversation.internal.Message;
@@ -20,7 +19,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
-import org.springframework.data.jdbc.core.JdbcAggregateTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.convention.TestBean;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
@@ -53,9 +51,6 @@ class LocalChatBackendIntegrationTests {
     private int port;
 
     @Autowired
-    private ConversationOperations conversationOperations;
-
-    @Autowired
     private ConversationRepository conversationRepository;
 
     @Autowired
@@ -71,9 +66,6 @@ class LocalChatBackendIntegrationTests {
     private org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
 
     @Autowired
-    private liquibase.integration.spring.SpringLiquibase springLiquibase;
-
-    @Autowired
     private org.springframework.transaction.support.TransactionTemplate transactionTemplate;
 
     @Autowired
@@ -84,9 +76,6 @@ class LocalChatBackendIntegrationTests {
 
     @Autowired
     private io.github.samzhu.bot.execution.internal.RunExecutionServiceImpl runExecutionService;
-
-    @Autowired
-    private JdbcAggregateTemplate jdbcAggregateTemplate;
 
     @Autowired
     private javax.sql.DataSource dataSource;
@@ -358,27 +347,6 @@ class LocalChatBackendIntegrationTests {
         JsonNode repeatNode = objectMapper.readTree(repeatResp.body());
         assertEquals(RunStatus.COMPLETED.name(), repeatNode.path("status").asText(), "Repeated cancel status must be COMPLETED");
         assertFalse(repeatNode.path("cancelled").asBoolean(), "Repeated cancel boolean must be false");
-    }
-
-    @Test
-    void test9_LiquibaseRerunPreservesExistingRun() throws Exception {
-        String convId = createTestConversation("Orphan Conv");
-        String orphanRunId = UUID.randomUUID().toString();
-
-        ChatRun orphan = new ChatRun(
-                orphanRunId, convId, "req-orphan", "prompt",
-                RunStatus.RUNNING.name(), "LOCAL", null, Instant.now(), Instant.now()
-        );
-        jdbcAggregateTemplate.insert(orphan);
-
-        springLiquibase.afterPropertiesSet();
-
-        ChatRun recovered = chatRunRepository.findById(orphanRunId).orElseThrow();
-        assertEquals(RunStatus.RUNNING.name(), recovered.status());
-        assertNull(recovered.errorMessage());
-
-
-        jdbcTemplate.update("delete from chat_run where id = ?", orphanRunId);
     }
 
     private void consumeSseStream(InputStream is) throws Exception {
@@ -907,98 +875,6 @@ class LocalChatBackendIntegrationTests {
             blockLatch.countDown();
             sseFuture.cancel(true);
         }
-    }
-
-    @Test
-    void test_CompositeForeignKey_EnforcesConversationIntegrity() throws Exception {
-        String conv1 = createTestConversation("Conv 1");
-        String conv2 = createTestConversation("Conv 2");
-        String runId = UUID.randomUUID().toString();
-        Instant now = Instant.now();
-
-        // 1. Insert chat_run in conv1
-        ChatRun run = new ChatRun(runId, conv1, "req-cfk", "hello", RunStatus.COMPLETED.name(), "LOCAL", null, now, now);
-        jdbcAggregateTemplate.insert(run);
-
-        // 2. Inserting message with conv2 (mismatched conversation_id) must fail composite FK fk_msg_conv_run
-        Message mismatchedMsg = new Message(UUID.randomUUID().toString(), conv2, runId, "USER", "mismatched", false, now);
-        assertThrows(org.springframework.dao.DataIntegrityViolationException.class, () -> {
-            jdbcAggregateTemplate.insert(mismatchedMsg);
-        }, "Inserting message with mismatched conversation_id and run_id must violate composite FK constraint");
-
-        // 3. Inserting message with conv1 (matching) succeeds
-        Message matchedMsg = new Message(UUID.randomUUID().toString(), conv1, runId, "USER", "matched", false, now);
-        assertDoesNotThrow(() -> jdbcAggregateTemplate.insert(matchedMsg));
-    }
-
-    @Test
-    void test_ConversationUpdatedAt_UpdatedOnAppendMessage_ReordersConversations() throws Exception {
-        // 1. Create two conversations: conv1 and conv2
-        String conv1 = createTestConversation("Old Conv 1");
-        String conv2 = createTestConversation("New Conv 2");
-
-        // 2. Set explicit timestamp fixtures: conv1 = 2 hours ago, conv2 = 1 hour ago
-        Instant tConv1 = Instant.now().minus(Duration.ofHours(2));
-        Instant tConv2 = Instant.now().minus(Duration.ofHours(1));
-        jdbcTemplate.update("UPDATE conversation SET updated_at = ? WHERE id = ?", java.sql.Timestamp.from(tConv1), conv1);
-        jdbcTemplate.update("UPDATE conversation SET updated_at = ? WHERE id = ?", java.sql.Timestamp.from(tConv2), conv2);
-
-        // Helper lambda to fetch all conversation IDs in order via bounded GraphQL pagination
-        java.util.function.Supplier<List<String>> fetchConversationIdsInOrder = () -> {
-            List<String> orderedIds = new ArrayList<>();
-            int offset = 0;
-            int limit = 20;
-            while (offset < 200) { // bounded pagination
-                String query = String.format("{\"query\":\"query { conversations(limit: %d, offset: %d) { id } }\"}", limit, offset);
-                try {
-                    HttpRequest req = HttpRequest.newBuilder()
-                            .uri(URI.create(baseUrl + "/graphql"))
-                            .header("Content-Type", "application/json")
-                            .POST(HttpRequest.BodyPublishers.ofString(query))
-                            .build();
-                    HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
-                    JsonNode listNode = objectMapper.readTree(resp.body()).path("data").path("conversations");
-                    if (!listNode.isArray() || listNode.isEmpty()) {
-                        break;
-                    }
-                    for (JsonNode n : listNode) {
-                        orderedIds.add(n.path("id").asText());
-                    }
-                    if (listNode.size() < limit) {
-                        break;
-                    }
-                    offset += limit;
-                } catch (Exception ex) {
-                    throw new RuntimeException(ex);
-                }
-            }
-            return orderedIds;
-        };
-
-        // 3. Verify initial GraphQL ordering: conv2 (1h ago) before conv1 (2h ago)
-        List<String> allBefore = fetchConversationIdsInOrder.get();
-        int idxConv1Before = allBefore.indexOf(conv1);
-        int idxConv2Before = allBefore.indexOf(conv2);
-        assertTrue(idxConv1Before >= 0 && idxConv2Before >= 0, "Both conversations must be reachable via GraphQL pagination");
-        assertTrue(idxConv2Before < idxConv1Before, "Initially, conv2 must appear before conv1");
-
-        // 4. Send message to conv1 (the older conversation)
-        String runId = UUID.randomUUID().toString();
-        Instant now = Instant.now();
-        ChatRun run = new ChatRun(runId, conv1, "req-touch-order", "Order message", RunStatus.COMPLETED.name(), "LOCAL", null, now, now);
-        jdbcAggregateTemplate.insert(run);
-        conversationOperations.appendMessage(conv1, "USER", "Order message", runId, false);
-
-        // 5. Query GraphQL conversations again
-        List<String> allAfter = fetchConversationIdsInOrder.get();
-        int idxConv1After = allAfter.indexOf(conv1);
-        int idxConv2After = allAfter.indexOf(conv2);
-        assertTrue(idxConv1After < idxConv2After, "After new message on conv1, conv1 must be reordered before conv2");
-
-        // 6. Verify non-target conversation conv2 timestamp is strictly unchanged
-        Instant conv2UpdatedAfter = conversationRepository.findById(conv2).orElseThrow().updatedAt();
-        assertEquals(tConv2.toEpochMilli(), conv2UpdatedAfter.toEpochMilli(),
-                "Non-target conversation updated_at must remain strictly unchanged");
     }
 
     @Test
