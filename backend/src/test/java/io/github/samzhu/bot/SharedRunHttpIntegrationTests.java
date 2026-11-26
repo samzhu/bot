@@ -749,7 +749,7 @@ class SharedRunHttpIntegrationTests {
 
     private String conversation() throws Exception {
         var response = post("/graphql", Map.of(
-                "query", "mutation($workspace: ID!) { createConversation(botId: \"bot-general\", workspaceId: $workspace) { id } }",
+                "query", "mutation($workspace: ID!) { createConversation(botId: \"bot-general\", title: \"Run fixture\", workspaceId: $workspace) { id } }",
                 "variables", Map.of("workspace", workspace)));
         assertThat(response.statusCode()).isEqualTo(200);
         var data = json.readTree(response.body());
