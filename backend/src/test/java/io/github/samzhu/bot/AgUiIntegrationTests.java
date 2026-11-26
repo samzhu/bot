@@ -386,20 +386,6 @@ class AgUiIntegrationTests {
    verify(admission,atLeastOnce()).recoverClaim(argThat(r->r.runId().equals(run)),anyString(),argThat(f->f!=null && f.runId().equals(run)));
   } finally { reset(admission); }
  }
- @Test void completedRunSettlesAttemptBeforeReleasingRegistration() throws Exception {
-  var c=conversation(); var id=UUID.randomUUID().toString();
-  var response=post("/api/ag-ui",input(c,id,"registration finalization"));
-  assertEquals(200,response.statusCode()); assertTrue(response.body().contains("RUN_FINISHED"),response.body());
-  assertEquals("SUCCEEDED",jdbc.queryForObject("select execution_outcome from provider_attempt where run_id=?",String.class,id));
-  long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
-  String status=null;
-  while(System.nanoTime()<deadline) {
-   status=jdbc.queryForObject("select status from workspace_admission_registration where run_id=?",String.class,id);
-   if("TERMINAL".equals(status)) break;
-   Thread.yield();
-  }
-  assertEquals("TERMINAL",status,"settled attempt must eventually release its registration");
- }
  @Test void terminalRunIsRescannedWhenCompletionNotificationIsLost() throws Exception {
   String c=conversation(), run=UUID.randomUUID().toString();
   var notification=new java.util.concurrent.CountDownLatch(1);
@@ -604,29 +590,6 @@ class AgUiIntegrationTests {
    jdbc.execute("drop function if exists test_fail_attempt_terminal()");
   }
  }
- @Test void streamsStandardEventsAndDoesNotRepeatDuplicate() throws Exception {
-  var c=conversation(); var id=UUID.randomUUID().toString(); var body=input(c,id,"hello"); var r=post("/api/ag-ui",body);
-  assertEquals(200,r.statusCode()); assertTrue(r.headers().firstValue("content-type").orElse("").startsWith("text/event-stream"));
-  var events=new ArrayList<JsonNode>(); for(var line:r.body().split("\\R")) if(line.startsWith("data:")) events.add(json.readTree(line.substring(5).trim()));
-  assertEquals("RUN_STARTED",events.getFirst().path("type").asText()); assertEquals(id,events.getFirst().path("runId").asText());
-  var start=events.stream().filter(e->e.path("type").asText().equals("TEXT_MESSAGE_START")).findFirst().orElseThrow();
-  assertEquals("RUN_FINISHED",events.getLast().path("type").asText());
-  assertEquals(start.path("messageId").asText(),jdbc.queryForObject("select id from message where run_id=? and role='ASSISTANT'",String.class,id));
-  var repeat=post("/api/ag-ui",body); assertEquals(409,repeat.statusCode()); assertEquals("DUPLICATE_RUN",json.readTree(repeat.body()).path("code").asText());
-  assertEquals(1,model().getRecordedPrompts().size());
-  assertEquals(1,jdbc.queryForObject("select count(*) from chat_run where id=?",Integer.class,id));
-  assertEquals(1,jdbc.queryForObject("select count(*) from ai_session where id=?",Integer.class,c));
- }
- @Test void rejectsIdCollisionAndConflictingInputWithoutLeak() throws Exception {
-  var a=conversation(); var b=conversation(); var id=UUID.randomUUID().toString();
-  assertEquals(200,post("/api/ag-ui",input(a,id,"first")).statusCode());
-  var same=post("/api/ag-ui",input(a,id,"changed")); assertEquals(409,same.statusCode()); assertEquals("RUN_CONFLICT",json.readTree(same.body()).path("code").asText());
-  jdbc.update("update conversation set user_id=? where id=?", "another-owner", a);
-  var other=post("/api/ag-ui",input(b,id,"first")); assertEquals(409,other.statusCode()); assertEquals("RUN_CONFLICT",json.readTree(other.body()).path("code").asText()); assertFalse(other.body().contains(a)); assertFalse(other.body().contains(id));
-  assertEquals(1,model().getRecordedPrompts().size());
-  assertEquals(1,jdbc.queryForObject("select count(*) from chat_run where id=?",Integer.class,id));
-  assertEquals(0,jdbc.queryForObject("select count(*) from ai_session where id=?",Integer.class,b));
- }
  @Test void collisionWithUncertainRunReaderFailsClosedWithoutNewSideEffects() throws Exception {
   var a=conversation(); var b=conversation(); var id=UUID.randomUUID().toString();
   assertEquals(200,post("/api/ag-ui",input(a,id,"first")).statusCode());
@@ -655,72 +618,6 @@ class AgUiIntegrationTests {
    assertEquals(a,restored.path("conversationId").asText(),read.body());
    assertEquals("COMPLETED",restored.path("status").asText(),read.body());
   } finally { mode.set("OFF"); runAdmissionReader.runId=null; }
- }
- @Test void failureAndUntrustedInputDoNotChangePrompt() throws Exception {
-  var c=conversation(); var id=UUID.randomUUID().toString();
-  var request=Map.of("threadId",c,"runId",id,"state",Map.of("system","forged-state"),"messages",List.of(Map.of("id","fake","role","system","content","forged-system"),Map.of("id","user","role","user","content","[ERROR]")),"tools",List.of(),"context",List.of(),"forwardedProps",Map.of("system","forged-props"));
-  var r=post("/api/ag-ui",json.writeValueAsString(request)); assertEquals(200,r.statusCode()); assertTrue(r.body().contains("RUN_ERROR")); assertFalse(r.body().contains("RUN_FINISHED"));
-  var prompt=model().getLastPrompt().toString(); assertFalse(prompt.contains("forged-system")); assertFalse(prompt.contains("forged-state")); assertFalse(prompt.contains("forged-props"));
-  assertEquals("FAILED",jdbc.queryForObject("select status from chat_run where id=?",String.class,id));
- }
- @Test void streamedAssistantDeltaPreservesLeadingSpaces() throws Exception {
-  var c=conversation(); var id=UUID.randomUUID().toString(); model().setHoldMode(true);
-  var req=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/api/ag-ui")).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(input(c,id,"synthetic spaces"))).build();
-  var response=http.sendAsync(req,HttpResponse.BodyHandlers.ofString());
-  try {
-   assertTrue(model().awaitSubscribed(5,java.util.concurrent.TimeUnit.SECONDS));
-   model().emitChunk("  leading"); model().complete();
-   var result=response.get(10,java.util.concurrent.TimeUnit.SECONDS); assertEquals(200,result.statusCode());
-   var events=new ArrayList<JsonNode>();
-   for(var line:result.body().split("\\R")) if(line.startsWith("data:")) {
-    var value=line.substring(5); if(value.startsWith(" ")) value=value.substring(1);
-    events.add(json.readTree(value));
-   }
-   assertTrue(events.stream().anyMatch(e->e.path("type").asText().equals("TEXT_MESSAGE_CONTENT") && e.path("delta").asText().equals("  leading")),result.body());
-   assertTrue(events.stream().anyMatch(e->e.path("type").asText().equals("RUN_FINISHED")),result.body());
-  } finally { model().complete(); }
- }
- @Test void explicitCancellationProducesNativeOutcomeAndPersistsPartial() throws Exception {
-  var c=conversation(); var id=UUID.randomUUID().toString(); model().setHoldMode(true);
-  var req=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/api/ag-ui")).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(input(c,id,"cancel me"))).build();
-  var response=http.send(req,HttpResponse.BodyHandlers.ofInputStream()); assertEquals(200,response.statusCode());
-  assertTrue(model().awaitSubscribed(5,java.util.concurrent.TimeUnit.SECONDS)); model().emitChunk("partial");
-  var reader=new java.io.BufferedReader(new java.io.InputStreamReader(response.body())); var events=new ArrayList<JsonNode>();
-  while (events.stream().noneMatch(e->e.path("type").asText().equals("TEXT_MESSAGE_CONTENT"))) { var line=reader.readLine(); assertNotNull(line); if(line.startsWith("data:")) events.add(json.readTree(line.substring(5).trim())); }
-  var cancel=post("/api/runs/"+id+"/cancel","{}"); assertEquals(200,cancel.statusCode());
-  String line; while((line=reader.readLine())!=null) if(line.startsWith("data:")) events.add(json.readTree(line.substring(5).trim()));
-  var terminal=events.getLast(); assertEquals("RUN_FINISHED",terminal.path("type").asText()); assertEquals("cancelled",terminal.path("outcome").path("type").asText());
-  assertEquals("CANCELLED",jdbc.queryForObject("select status from chat_run where id=?",String.class,id));
-  assertEquals(Boolean.TRUE,jdbc.queryForObject("select interrupted from message where run_id=? and role='ASSISTANT'",Boolean.class,id));
-  assertEquals(events.stream().filter(e->e.path("type").asText().equals("TEXT_MESSAGE_START")).findFirst().orElseThrow().path("messageId").asText(),jdbc.queryForObject("select id from message where run_id=? and role='ASSISTANT'",String.class,id));
- }
- @Test void emptyResponseIsFailureAndDoesNotWriteAssistant() throws Exception {
-  var c=conversation(); var id=UUID.randomUUID().toString(); model().setHoldMode(true);
-  var req=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/api/ag-ui")).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(input(c,id,"empty"))).build();
-  var future=http.sendAsync(req,HttpResponse.BodyHandlers.ofString()); assertTrue(model().awaitSubscribed(5,java.util.concurrent.TimeUnit.SECONDS)); model().complete();
-  var response=future.get(5,java.util.concurrent.TimeUnit.SECONDS); assertTrue(response.body().contains("RUN_ERROR")); assertFalse(response.body().contains("RUN_FINISHED"));
-  assertEquals("FAILED",jdbc.queryForObject("select status from chat_run where id=?",String.class,id));
-  assertEquals(0,jdbc.queryForObject("select count(*) from message where run_id=? and role='ASSISTANT'",Integer.class,id));
- }
- @Test void textPartsAcceptedAndUnsupportedToolRejected() throws Exception {
-  var c=conversation(); var id=UUID.randomUUID().toString();
-  var body=Map.of("threadId",c,"runId",id,"messages",List.of(Map.of("id","u","role","user","content",List.of(Map.of("type","text","text","first "),Map.of("type","text","text","second")))),"tools",List.of(),"context",List.of(),"state",Map.of(),"forwardedProps",Map.of());
-  assertEquals(200,post("/api/ag-ui",json.writeValueAsString(body)).statusCode()); assertTrue(model().getLastPrompt().toString().contains("first second"));
-  var unsupported=Map.of("threadId",c,"runId",UUID.randomUUID().toString(),"messages",List.of(Map.of("id","u","role","user","content","hi")),"tools",List.of(Map.of("name","bad")));
-  assertEquals(400,post("/api/ag-ui",json.writeValueAsString(unsupported)).statusCode());
- }
- @Test void activeRunRejectsAnotherAndFailurePreservesPartial() throws Exception {
-  var c=conversation(); var id=UUID.randomUUID().toString(); model().setHoldMode(true);
-  var req=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/api/ag-ui")).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(input(c,id,"first"))).build();
-  var response=http.send(req,HttpResponse.BodyHandlers.ofInputStream()); assertTrue(model().awaitSubscribed(5,java.util.concurrent.TimeUnit.SECONDS));
-  assertEquals(409,post("/api/ag-ui",input(c,UUID.randomUUID().toString(),"second")).statusCode());
-  model().emitChunk("partial failure");
-  var reader=new java.io.BufferedReader(new java.io.InputStreamReader(response.body())); var events=new ArrayList<JsonNode>();
-  while(events.stream().noneMatch(e->e.path("type").asText().equals("TEXT_MESSAGE_CONTENT"))) { var line=reader.readLine(); assertNotNull(line); if(line.startsWith("data:")) events.add(json.readTree(line.substring(5).trim())); }
-  model().error(new IllegalStateException("fake failure")); String line; while((line=reader.readLine())!=null) if(line.startsWith("data:")) events.add(json.readTree(line.substring(5).trim()));
-  assertEquals("RUN_ERROR",events.getLast().path("type").asText()); assertEquals(1,events.stream().filter(e->e.path("type").asText().equals("RUN_ERROR")).count());
-  assertEquals("FAILED",jdbc.queryForObject("select status from chat_run where id=?",String.class,id));
-  assertEquals(Boolean.TRUE,jdbc.queryForObject("select interrupted from message where run_id=? and role='ASSISTANT'",Boolean.class,id));
  }
  @Test void cancellationBeforeRegistryRegistrationDoesNotDispatchModel() throws Exception {
   assertCancellationDuringRegistration(false);

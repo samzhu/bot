@@ -1,7 +1,7 @@
 package io.github.samzhu.bot;
 
 import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -14,38 +14,46 @@ public final class BackendTestChatModel implements ChatModel {
     private static final ChatResponse DEFAULT_REPLY =
             new ChatResponse(List.of(new Generation(new AssistantMessage("Fixture reply"))));
     private static final Responses DEFAULT_RESPONSES =
-            new Responses(DEFAULT_REPLY, List.of(DEFAULT_REPLY));
+            new Responses(DEFAULT_REPLY, Flux.just(DEFAULT_REPLY));
 
-    private final AtomicInteger invocations = new AtomicInteger();
+    private final ConcurrentLinkedQueue<Prompt> prompts = new ConcurrentLinkedQueue<>();
     private volatile Responses responses = DEFAULT_RESPONSES;
 
     public void respondWith(ChatResponse reply, List<ChatResponse> stream) {
-        responses = new Responses(reply, List.copyOf(stream));
+        responses = new Responses(reply, Flux.fromIterable(List.copyOf(stream)));
+    }
+
+    public void streamWith(Flux<ChatResponse> stream) {
+        responses = new Responses(responses.reply(), stream);
     }
 
     public void reset() {
         responses = DEFAULT_RESPONSES;
-        invocations.set(0);
+        prompts.clear();
     }
 
     public int invocations() {
-        return invocations.get();
+        return prompts.size();
+    }
+
+    public List<Prompt> prompts() {
+        return List.copyOf(prompts);
     }
 
     @Override
     public ChatResponse call(Prompt prompt) {
-        invocations.incrementAndGet();
+        prompts.add(prompt);
         return responses.reply();
     }
 
     @Override
     public Flux<ChatResponse> stream(Prompt prompt) {
         return Flux.defer(() -> {
-            invocations.incrementAndGet();
-            return Flux.fromIterable(responses.stream());
+            prompts.add(prompt);
+            return responses.stream();
         });
     }
 
-    private record Responses(ChatResponse reply, List<ChatResponse> stream) {
+    private record Responses(ChatResponse reply, Flux<ChatResponse> stream) {
     }
 }
