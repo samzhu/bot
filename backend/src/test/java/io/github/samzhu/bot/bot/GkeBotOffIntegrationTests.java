@@ -1,24 +1,18 @@
 package io.github.samzhu.bot.bot;
 
-import io.github.samzhu.bot.PostgresTestImage;
-import io.github.samzhu.bot.workspace.WorkspaceOperations;
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.samzhu.bot.BotApplication;
+import io.github.samzhu.bot.BackendIntegrationTest;
+import io.github.samzhu.bot.BackendTestChatModel;
+import io.github.samzhu.bot.usage.pricing.UsageCaseData;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.web.server.LocalServerPort;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
-import org.springframework.context.annotation.Bean;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.context.ActiveProfiles;
-import org.springframework.test.context.TestPropertySource;
-import org.testcontainers.postgresql.PostgreSQLContainer;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -30,24 +24,8 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-@io.github.samzhu.bot.UseTestFakes
-@SpringBootTest(
-        classes = {BotApplication.class, GkeBotOffIntegrationTests.PostgresTestConfig.class},
-        webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT
-)
-@ActiveProfiles("test")
-@TestPropertySource(properties = "bot.gke.execution-mode=OFF")
+@BackendIntegrationTest
 public class GkeBotOffIntegrationTests {
-
-    @TestConfiguration(proxyBeanMethods = false)
-    public static class PostgresTestConfig {
-        @Bean
-        @ServiceConnection
-        PostgreSQLContainer postgresContainer() {
-            return PostgresTestImage.container();
-        }
-    }
-
     @LocalServerPort
     private int port;
 
@@ -55,28 +33,51 @@ public class GkeBotOffIntegrationTests {
     private JdbcTemplate jdbcTemplate;
 
     @Autowired
-    private WorkspaceOperations workspaces;
+    private TransactionTemplate transactions;
+
+    @Autowired
+    private BackendTestChatModel model;
+
+    private final BotCaseRows bots = new BotCaseRows();
+    private final String workspaceId = "gke-off-" + UUID.randomUUID();
+    private UsageCaseData data;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
             .build();
-    private String baseUrl;
 
     @BeforeEach
     void setUp() {
-        baseUrl = "http://127.0.0.1:" + port;
-        workspaces.personal("dev-user");
+        model.reset();
+        data = new UsageCaseData(jdbcTemplate, transactions);
+        data.createWorkspace(workspaceId, "dev-user");
+    }
+
+    @AfterEach
+    void cleanUp() throws InterruptedException {
+        try {
+            data.cleanUp();
+            bots.deleteFrom(jdbcTemplate);
+        } finally {
+            model.reset();
+            httpClient.close();
+        }
+    }
+
+    private String insertRemoteBot() {
+        String botId = bots.ownedId("remote");
         jdbcTemplate.update("""
-            INSERT INTO bot (id, name, system_prompt, target, created_at, updated_at)
-            VALUES ('bot-general', 'General Assistant', 'System prompt', 'LOCAL', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            ON CONFLICT (id) DO UPDATE SET target = 'LOCAL';
-        """);
+                INSERT INTO bot (id, name, target, description, instructions, owner_id, created_at, updated_at)
+                VALUES (?, 'GKE Off Bot', 'GKE_REMOTE', 'Desc', 'Instr', 'dev-user', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """, botId);
+        return botId;
     }
 
     private JsonNode executeGraphQL(String payload) throws Exception {
         HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create(baseUrl + "/graphql"))
+                .uri(URI.create("http://127.0.0.1:" + port + "/graphql"))
+                .timeout(Duration.ofSeconds(5))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(payload))
                 .build();
@@ -88,17 +89,14 @@ public class GkeBotOffIntegrationTests {
     @Test
     @DisplayName("1. When OFF: canChat=false, createConversation rejected with GKE_AGENT_NOT_CONNECTED (0 DB delta)")
     void testOffMode_CreateConversationRejected() throws Exception {
-        String botId = "bot-gke-off-" + UUID.randomUUID();
-        jdbcTemplate.update("""
-            INSERT INTO bot (id, name, target, description, instructions, owner_id, created_at, updated_at)
-            VALUES (?, 'GKE Off Bot', 'GKE_REMOTE', 'Desc', 'Instr', 'dev-user', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        """, botId);
+        String botId = insertRemoteBot();
 
-        int convCountBefore = jdbcTemplate.queryForObject("SELECT count(*) FROM conversation", Integer.class);
+        String countConversations = "SELECT count(*) FROM conversation WHERE workspace_id = ?";
+        int convCountBefore = jdbcTemplate.queryForObject(countConversations, Integer.class, workspaceId);
 
         String convPayload = objectMapper.writeValueAsString(Map.of(
-                "query", "mutation CreateConv($botId: ID!, $title: String) { createConversation(botId: $botId, title: $title) { id } }",
-                "variables", Map.of("botId", botId, "title", "Should Fail")
+                "query", "mutation CreateConv($botId: ID!, $title: String, $workspace: ID!) { createConversation(botId: $botId, title: $title, workspaceId: $workspace) { id } }",
+                "variables", Map.of("botId", botId, "title", "Should Fail", "workspace", workspaceId)
         ));
         JsonNode res = executeGraphQL(convPayload);
 
@@ -106,30 +104,29 @@ public class GkeBotOffIntegrationTests {
         String errorCode = res.path("errors").get(0).path("extensions").path("code").asText();
         assertEquals("GKE_AGENT_NOT_CONNECTED", errorCode);
 
-        int convCountAfter = jdbcTemplate.queryForObject("SELECT count(*) FROM conversation", Integer.class);
+        int convCountAfter = jdbcTemplate.queryForObject(countConversations, Integer.class, workspaceId);
         assertEquals(convCountBefore, convCountAfter, "Conversation row count must not increase on rejection");
     }
 
     @Test
     @DisplayName("2. When OFF: startRun on GKE bot returns HTTP 503 GKE_AGENT_NOT_CONNECTED with zero side-effects")
     void testOffMode_StartRunRejected_503_ZeroSideEffects() throws Exception {
-        String botId = "bot-gke-off-" + UUID.randomUUID();
-        jdbcTemplate.update("""
-            INSERT INTO bot (id, name, target, description, instructions, owner_id, created_at, updated_at)
-            VALUES (?, 'GKE Off Bot', 'GKE_REMOTE', 'Desc', 'Instr', 'dev-user', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        """, botId);
+        String botId = insertRemoteBot();
 
         String convId = "conv-off-" + UUID.randomUUID();
         jdbcTemplate.update("""
             INSERT INTO conversation (id, bot_id, title, user_id, pinned, created_at, updated_at, workspace_id)
-            VALUES (?, ?, 'Pre-existing GKE Conv', 'dev-user', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, (SELECT id FROM workspace WHERE personal_owner_id = 'dev-user'))
-        """, convId, botId);
+            VALUES (?, ?, 'Pre-existing GKE Conv', 'dev-user', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+        """, convId, botId, workspaceId);
 
-        int runCountBefore = jdbcTemplate.queryForObject("SELECT count(*) FROM chat_run", Integer.class);
-        int msgCountBefore = jdbcTemplate.queryForObject("SELECT count(*) FROM message", Integer.class);
+        String countRuns = "SELECT count(*) FROM chat_run WHERE conversation_id = ?";
+        String countMessages = "SELECT count(*) FROM message WHERE conversation_id = ?";
+        int runCountBefore = jdbcTemplate.queryForObject(countRuns, Integer.class, convId);
+        int msgCountBefore = jdbcTemplate.queryForObject(countMessages, Integer.class, convId);
 
         HttpRequest runReq = HttpRequest.newBuilder()
-                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .uri(URI.create("http://127.0.0.1:" + port + "/api/conversations/" + convId + "/runs"))
+                .timeout(Duration.ofSeconds(5))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(Map.of(
                         "clientRequestId", "req-off-01",
@@ -142,11 +139,14 @@ public class GkeBotOffIntegrationTests {
         JsonNode body = objectMapper.readTree(runResp.body());
         assertEquals("GKE_AGENT_NOT_CONNECTED", body.path("code").asText());
 
-        int runCountAfter = jdbcTemplate.queryForObject("SELECT count(*) FROM chat_run", Integer.class);
-        int msgCountAfter = jdbcTemplate.queryForObject("SELECT count(*) FROM message", Integer.class);
+        int runCountAfter = jdbcTemplate.queryForObject(countRuns, Integer.class, convId);
+        int msgCountAfter = jdbcTemplate.queryForObject(countMessages, Integer.class, convId);
 
         assertEquals(runCountBefore, runCountAfter, "Zero DB chat_run rows inserted on 503");
         assertEquals(msgCountBefore, msgCountAfter, "Zero DB message rows inserted on 503");
+        assertEquals(0, jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM provider_attempt WHERE workspace_id = ?", Integer.class, workspaceId));
+        assertEquals(0, model.invocations());
     }
 
     @Test
@@ -154,16 +154,20 @@ public class GkeBotOffIntegrationTests {
     void testOffMode_LocalBotUnaffected() throws Exception {
         // Create conversation with LOCAL bot
         String convPayload = objectMapper.writeValueAsString(Map.of(
-                "query", "mutation CreateConv($botId: ID!, $title: String) { createConversation(botId: $botId, title: $title) { id botId } }",
-                "variables", Map.of("botId", "bot-general", "title", "Local Bot Conv")
+                "query", "mutation CreateConv($botId: ID!, $title: String, $workspace: ID!) { createConversation(botId: $botId, title: $title, workspaceId: $workspace) { id botId } }",
+                "variables", Map.of("botId", "bot-general", "title", "Local Bot Conv", "workspace", workspaceId)
         ));
         JsonNode convRes = executeGraphQL(convPayload);
         assertFalse(convRes.has("errors"), "createConversation should succeed for LOCAL bot: " + convRes);
-        String convId = convRes.path("data").path("createConversation").path("id").asText();
+        JsonNode conversation = convRes.path("data").path("createConversation");
+        assertEquals("bot-general", conversation.path("botId").asText());
+        String convId = conversation.path("id").asText();
+        assertFalse(convId.isBlank());
 
         // Start run for LOCAL bot
         HttpRequest runReq = HttpRequest.newBuilder()
-                .uri(URI.create(baseUrl + "/api/conversations/" + convId + "/runs"))
+                .uri(URI.create("http://127.0.0.1:" + port + "/api/conversations/" + convId + "/runs"))
+                .timeout(Duration.ofSeconds(5))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(Map.of(
                         "clientRequestId", "req-local-off-01",
@@ -172,6 +176,7 @@ public class GkeBotOffIntegrationTests {
                 .build();
         HttpResponse<String> runResp = httpClient.send(runReq, HttpResponse.BodyHandlers.ofString());
         assertEquals(200, runResp.statusCode());
+        assertTrue(runResp.body().contains("run.completed"), runResp.body());
         assertTrue(runResp.headers().firstValue("Content-Type").orElse("").contains("text/event-stream"));
 
         // Verify execution_mode in chat_run is LOCAL
@@ -181,5 +186,6 @@ public class GkeBotOffIntegrationTests {
                 convId
         );
         assertEquals("LOCAL", runMode);
+        assertEquals(1, model.invocations());
     }
 }

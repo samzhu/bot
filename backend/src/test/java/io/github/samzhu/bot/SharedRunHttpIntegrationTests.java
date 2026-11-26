@@ -14,8 +14,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.stream.IntStream;
@@ -275,6 +278,98 @@ class SharedRunHttpIntegrationTests {
     }
 
     @Test
+    void legacySseCompletionAndCancellationRaceHasOneAuthoritativeOutcome() throws Exception {
+        String conversation = conversation();
+        String path = legacyPath(conversation);
+        String partial = "Partial delta before race";
+        var pending = Sinks.<ChatResponse>one();
+        var disposed = new CompletableFuture<Void>();
+        model.streamWith(Flux.concat(Flux.just(usageChunk(partial)), pending.asMono())
+                .doFinally(signal -> disposed.complete(null)));
+        try {
+            var open = openStream(path, legacyInput("Race prompt"), "message.delta");
+            String run = open.delta().get(10, TimeUnit.SECONDS).data().path("runId").asText();
+            assertThat(run).isNotBlank();
+            String cancelPath = "/api/runs/" + run + "/cancel";
+            var contenders = race(pending::tryEmitEmpty, () -> post(cancelPath, Map.of()));
+            assertThat(contenders.first()).isIn(Sinks.EmitResult.OK, Sinks.EmitResult.FAIL_CANCELLED);
+            var cancel = contenders.second();
+            assertThat(cancel.statusCode()).isEqualTo(200);
+
+            var allEvents = open.finished().get(10, TimeUnit.SECONDS);
+            Event terminal = onlyLegacyTerminal(allEvents);
+            assertThat(terminal.name()).isIn("run.completed", "run.cancelled");
+            assertThat(terminal.data().path("runId").asText()).isEqualTo(run);
+            boolean cancelled = terminal.name().equals("run.cancelled");
+            String expectedStatus = cancelled ? "CANCELLED" : "COMPLETED";
+            assertThat(runStatus(run)).isEqualTo(expectedStatus);
+            assertThat(terminal.data().path("status").asText()).isEqualTo(expectedStatus);
+
+            var cancellation = json.readTree(cancel.body());
+            assertThat(cancellation.path("status").asText()).isEqualTo(expectedStatus);
+            assertThat(cancellation.path("cancelled").asBoolean()).isEqualTo(cancelled);
+            assertCancel(run, expectedStatus, cancelled);
+            assertThat(jdbc.queryForMap("select content, interrupted from message where run_id = ? and role = 'ASSISTANT'", run))
+                    .isEqualTo(Map.of("content", partial, "interrupted", cancelled));
+            var activeMessages = sessions.getActiveMessages(conversation);
+            if (cancelled) {
+                assertThat(activeMessages).isEmpty();
+            } else {
+                assertThat(activeMessages).extracting(message -> message.getText())
+                        .containsExactly("Race prompt", partial);
+            }
+            assertThat(model.invocations()).isEqualTo(1);
+            disposed.get(10, TimeUnit.SECONDS);
+        } finally {
+            pending.tryEmitEmpty();
+        }
+    }
+
+    @Test
+    void concurrentLegacyRequestsWithSameInputReturnOneStreamAndOneReplay() throws Exception {
+        String conversation = conversation();
+        String path = legacyPath(conversation);
+        String prompt = "Concurrent dedup message";
+        var input = legacyInput(prompt);
+        model.streamWith(Flux.just(usageChunk("Single reply")));
+        var contenders = race(() -> post(path, input), () -> post(path, input));
+        boolean firstIsStream = hasContentType(contenders.first(), "text/event-stream");
+        var stream = firstIsStream ? contenders.first() : contenders.second();
+        var replay = firstIsStream ? contenders.second() : contenders.first();
+        assertThat(replay.statusCode()).isEqualTo(200);
+        assertThat(hasContentType(replay, "application/json")).isTrue();
+        var replayData = json.readTree(replay.body());
+
+        String run = assertSingleCompletedRun(conversation, input.get("clientRequestId"), prompt, stream);
+        assertThat(replayData.path("runId").asText()).isEqualTo(run);
+        assertThat(replayData.path("id").asText()).isEqualTo(run);
+        assertThat(replayData.path("clientRequestId").asText()).isEqualTo(input.get("clientRequestId"));
+        assertThat(replayData.path("promptText").asText()).isEqualTo(prompt);
+    }
+
+    @Test
+    void concurrentLegacyRequestsWithDifferentInputReturnOneStreamAndOneConflict() throws Exception {
+        String conversation = conversation();
+        String path = legacyPath(conversation);
+        String requestId = UUID.randomUUID().toString();
+        String alpha = "Payload Alpha";
+        String beta = "Payload Beta";
+        model.streamWith(Flux.just(usageChunk("Single reply")));
+        var contenders = race(
+                () -> post(path, Map.of("clientRequestId", requestId, "message", alpha)),
+                () -> post(path, Map.of("clientRequestId", requestId, "message", beta)));
+        boolean firstWon = contenders.first().statusCode() == 200;
+        var stream = firstWon ? contenders.first() : contenders.second();
+        var conflict = firstWon ? contenders.second() : contenders.first();
+        assertThat(conflict.statusCode()).isEqualTo(409);
+        assertThat(hasContentType(conflict, "application/json")).isTrue();
+        var conflictData = json.readTree(conflict.body());
+        assertThat(conflictData.path("error").asText()).isEqualTo("Conflicting message for clientRequestId");
+        String run = assertSingleCompletedRun(conversation, requestId, firstWon ? alpha : beta, stream);
+        assertThat(conflictData.path("runId").asText()).isEqualTo(run);
+    }
+
+    @Test
     void legacyRunValidatesPayloadAndHidesForeignConversation() throws Exception {
         String conversation = conversation();
         String path = legacyPath(conversation);
@@ -496,6 +591,10 @@ class SharedRunHttpIntegrationTests {
         return readEvents(response.body().lines(), event -> {});
     }
 
+    private static boolean hasContentType(HttpResponse<?> response, String type) {
+        return response.headers().firstValue("Content-Type").orElse("").startsWith(type);
+    }
+
     private OpenStream openStream(String path, Map<String, ?> input, String deltaName) throws Exception {
         var delta = new CompletableFuture<Event>();
         var finished = http.sendAsync(request(path, input), HttpResponse.BodyHandlers.ofLines()).thenApplyAsync(response -> {
@@ -532,6 +631,49 @@ class SharedRunHttpIntegrationTests {
             }
         }
         return result;
+    }
+
+    private static Event onlyLegacyTerminal(List<Event> events) {
+        var terminals = events.stream().filter(event ->
+                List.of("run.completed", "run.cancelled", "run.failed").contains(event.name())).toList();
+        assertThat(terminals).hasSize(1);
+        assertThat(events.getLast()).isEqualTo(terminals.getFirst());
+        return terminals.getFirst();
+    }
+
+    private String assertSingleCompletedRun(String conversation, String requestId, String prompt,
+            HttpResponse<String> response) throws JsonProcessingException {
+        Event terminal = onlyLegacyTerminal(events(response));
+        assertThat(terminal.name()).isEqualTo("run.completed");
+        String run = terminal.data().path("runId").asText();
+        assertThat(run).isNotBlank();
+        assertThat(jdbc.queryForList("select id, client_request_id, status from chat_run where conversation_id = ?", conversation))
+                .containsExactly(Map.of("id", run, "client_request_id", requestId, "status", "COMPLETED"));
+        assertThat(jdbc.queryForList("select role, content from message where run_id = ? order by role", run))
+                .containsExactly(Map.of("role", "ASSISTANT", "content", "Single reply"),
+                        Map.of("role", "USER", "content", prompt));
+        assertThat(model.invocations()).isEqualTo(1);
+        return run;
+    }
+
+    private static <A, B> RaceResult<A, B> race(Callable<A> first, Callable<B> second) throws Exception {
+        var startingLine = new CyclicBarrier(2);
+        try (var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+            var firstResult = workers.submit(() -> {
+                startingLine.await(5, TimeUnit.SECONDS);
+                return first.call();
+            });
+            var secondResult = workers.submit(() -> {
+                startingLine.await(5, TimeUnit.SECONDS);
+                return second.call();
+            });
+            try {
+                return new RaceResult<>(firstResult.get(15, TimeUnit.SECONDS), secondResult.get(15, TimeUnit.SECONDS));
+            } finally {
+                firstResult.cancel(true);
+                secondResult.cancel(true);
+            }
+        }
     }
 
     private static String legacyPath(String conversation) {
@@ -574,4 +716,5 @@ class SharedRunHttpIntegrationTests {
 
     private record Event(String name, JsonNode data) {}
     private record OpenStream(CompletableFuture<Event> delta, CompletableFuture<List<Event>> finished) {}
+    private record RaceResult<A, B>(A first, B second) {}
 }
