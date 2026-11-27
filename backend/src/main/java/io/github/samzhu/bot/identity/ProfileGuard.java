@@ -62,8 +62,7 @@ public class ProfileGuard implements ApplicationListener<ApplicationEnvironmentP
         if (!allowed) {
             throw new IllegalStateException(
                     "Production guard: Local Chat MVP only permits 'local' or 'test' profile. Active: "
-                            + Arrays.toString(activeProfiles)
-                            + ". Refusing to start without loopback guard.");
+                            + Arrays.toString(activeProfiles));
         }
     }
 }

@@ -138,7 +138,7 @@ try {
   console.log('[dev] Starting backend...');
   start('backend', './gradlew', [
     'bootRun', '--no-daemon', '--console=plain',
-    `--args=--spring.profiles.active=dev --server.address=${host} --server.port=${backendPort} --management.endpoint.health.probes.enabled=true`,
+    `--args=--spring.profiles.active=dev --server.port=${backendPort} --management.endpoint.health.probes.enabled=true`,
   ], { ...process.env, SPRING_AI_MODEL_CHAT: process.env.SPRING_AI_MODEL_CHAT ?? 'google-genai' });
   await waitUntilReady(`http://${host}:${backendPort}/actuator/health/readiness`,
     async response => (await response.json()).status === 'UP');

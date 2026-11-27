@@ -24,10 +24,16 @@ class OllamaStartupTests {
                     .isEqualTo("org.springframework.ai.ollama.OllamaChatModel");
             });
     }
-    @Test void rejectsNonLoopbackOllamaEndpoint() {
+    @Test void acceptsOllamaOnAnotherHost() {
         new ApplicationContextRunner().withUserConfiguration(ModelConfiguration.class)
             .withPropertyValues("spring.profiles.active=local", "spring.ai.model.chat=ollama",
-                "spring.ai.ollama.chat.model=fixture-model", "spring.ai.ollama.base-url=https://example.invalid")
+                "spring.ai.ollama.chat.model=fixture-model", "spring.ai.ollama.base-url=http://ollama.example.invalid:11434")
+            .run(context -> assertThat(context).hasNotFailed().hasSingleBean(ChatModel.class));
+    }
+    @Test void rejectsOllamaEndpointWithAPath() {
+        new ApplicationContextRunner().withUserConfiguration(ModelConfiguration.class)
+            .withPropertyValues("spring.profiles.active=local", "spring.ai.model.chat=ollama",
+                "spring.ai.ollama.chat.model=fixture-model", "spring.ai.ollama.base-url=http://ollama.example.invalid/api")
             .run(context -> assertThat(context).hasFailed());
     }
     @Test void localChatUsesOnlyLoopbackFixtureAndNeverPullsModel() throws Exception {

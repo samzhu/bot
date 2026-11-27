@@ -1,7 +1,6 @@
 package io.github.samzhu.bot.execution.internal.model;
 
 import java.net.URI;
-import java.util.Set;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.ollama.OllamaChatModel;
 import org.springframework.ai.ollama.api.OllamaApi;
@@ -21,12 +20,12 @@ class OllamaChatConfiguration {
         if (model.isBlank()) throw new IllegalStateException("Ollama requires an explicit chat model");
         URI uri;
         try { uri = URI.create(baseUrl); }
-        catch (IllegalArgumentException ex) { throw new IllegalStateException("Ollama requires a loopback HTTP origin", ex); }
-        if (!"http".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null || !Set.of("localhost", "127.0.0.1", "[::1]", "::1").contains(uri.getHost().toLowerCase(java.util.Locale.ROOT))
+        catch (IllegalArgumentException ex) { throw new IllegalStateException("Ollama requires a valid HTTP origin", ex); }
+        if (!"http".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null
                 || uri.getUserInfo() != null || uri.getQuery() != null || uri.getFragment() != null
                 || (uri.getPath() != null && !uri.getPath().isEmpty() && !"/".equals(uri.getPath()))
                 || uri.getPort() > 65535) {
-            throw new IllegalStateException("Ollama requires a loopback HTTP origin");
+            throw new IllegalStateException("Ollama requires a valid HTTP origin");
         }
         return OllamaChatModel.builder().ollamaApi(OllamaApi.builder().baseUrl(baseUrl).build())
                 .options(OllamaChatOptions.builder().model(model).build()).build();

@@ -1,6 +1,8 @@
 # Herdr Bot (Local Chat MVP)
 
-A minimal, deterministic, and resilient loopback AI chat platform built with Java 25, Spring Boot 4.2.0, Spring AI 2.1.0, Angular 22, and ThreadPlane 0.3.7. Chat uses the ThreadPlane AG-UI adapter; the backend remains Spring Boot / Spring AI.
+A minimal, deterministic, and resilient AI chat platform built with Java 25, Spring Boot 4.2.0, Spring AI 2.1.0, Angular 22, and ThreadPlane 0.3.7. Chat uses the ThreadPlane AG-UI adapter; the backend remains Spring Boot / Spring AI.
+
+See the [documentation index](docs/INDEX.md) for project guides and references.
 
 ---
 
@@ -15,7 +17,7 @@ A minimal, deterministic, and resilient loopback AI chat platform built with Jav
 
 ## 2. Development and test configuration
 
-Development uses `dev` and an explicit Spring AI selector. `dev` activates local infrastructure; missing, invalid or conflicting selections fail closed. `spring.ai.model.chat=google-genai` requires the configured Gemini key; `spring.ai.model.chat=ollama` uses the local service. A key alone does not select a provider. The application remains loopback-only; production requires an authorization strategy not provided by this MVP.
+Development uses `dev` and an explicit Spring AI selector. `dev` activates local infrastructure. Missing, invalid, or conflicting selections fail closed. `spring.ai.model.chat=google-genai` requires the configured Gemini key. `spring.ai.model.chat=ollama` connects to the configured Ollama HTTP origin. The backend is reachable from other hosts and those requests share the development identity. Production requires an authorization strategy.
 
 Automated tests provide test-owned Fake models and use isolated Testcontainers where infrastructure is needed. They never require real model credentials or invoke a paid provider. The default Bot is release-provisioned application data; test databases are provisioned explicitly by their fixtures.
 
@@ -23,62 +25,7 @@ Automated tests provide test-owned Fake models and use isolated Testcontainers w
 
 ## 3. Getting Started
 
-### Local Gemini key
-
-Gemini needs a key. If `backend/config/application-secrets.properties` already exists, use that file. Otherwise, from the repository root, create a private copy without overwriting an existing file:
-
-```bash
-(umask 077; set -C; cat backend/config/application-secrets.properties.example > backend/config/application-secrets.properties)
-```
-
-Privately set `bot-google-api-key` and keep permissions at `0600`; do not print the key or put it in command history. From `backend`, Spring Boot loads `config/application-dev.yaml`, whose guarded optional import reads that file. Missing or blank keys fail at startup for Gemini. OS environment variables, Java system properties and command-line properties take precedence over config data. Do not commit secrets.
-
-### Start the local development environment
-
-With Java 25, Node.js 26, and Docker available, install the frontend dependencies once, then run the launcher from the repository root:
-
-```bash
-(cd frontend && TPLANE_TELEMETRY_DISABLED=1 npm ci --ignore-scripts)
-./dev.sh
-```
-
-The launcher waits for the backend on `127.0.0.1:8080` to report readiness before starting Angular. Open `http://127.0.0.1:4200/`. Press Ctrl+C to stop both application processes. If either exits, the launcher stops the other.
-
-The backend selects the `dev` profile and defaults `SPRING_AI_MODEL_CHAT` to `google-genai` when the variable is unset. It uses the existing Gemini key file described above. To use local Ollama instead:
-
-```bash
-SPRING_AI_MODEL_CHAT=ollama ./dev.sh
-```
-
-The launcher accepts no arguments. An explicitly set model selector is passed through to Spring, including invalid or empty values. To run the backend on its own with other Spring configuration, invoke Gradle from `backend`:
-
-```bash
-cd backend
-./gradlew bootRun --args="--spring.profiles.active=dev --spring.ai.model.chat=google-genai"
-```
-
-Spring Boot starts or connects the Compose database and Grafana, then runs Liquibase against PostgreSQL. See [Database startup](#database-startup).
-
-Boot reconciles selected Compose services and leaves them running when the app exits. A provider switch leaves an already running Ollama service running. From `backend`, `docker compose --profile ollama stop ollama` stops only Ollama. To stop the database and Grafana as well, use `docker compose --profile ollama stop`. Both preserve volumes.
-
-### Local Ollama
-
-Choose local Ollama with standard Spring settings:
-
-```bash
-cd backend
-./gradlew bootRun --args="--spring.profiles.active=dev --spring.ai.model.chat=ollama"
-```
-
-Spring Boot starts or connects the Compose database and Ollama service. Ollama listens only on `127.0.0.1:11434`; the named `ollama-models` volume persists downloaded models. The Compose service disables Ollama cloud features with `OLLAMA_NO_CLOUD=1`; if you connect an independently managed loopback Ollama daemon, configure it for local-only operation as well. The configured model is `llama3.2:1b`. It is **not downloaded automatically**: after the service is running, explicitly obtain it when you choose to do so:
-
-```bash
-docker compose exec ollama ollama pull llama3.2:1b
-```
-
-The [Ollama model page](https://ollama.com/library/llama3.2:1b) lists the model at approximately 1.3 GB (checked 2026-11-23). Allow additional disk space and memory for inference; requirements depend on context and runtime. Initial image and model downloads need network access. If the service or model is unavailable, requests fail rather than switching provider or silently fetching a model. Actual model availability and hardware performance have not been validated by the automated tests.
-
-Local Ollama attempts are recorded separately from Gemini. Spring AI 2.1 does not expose enough raw information to distinguish a missing token count from a real zero, so usage is reported as unavailable/incomplete and cost remains unpriced. Existing budget admission rules still apply.
+Follow the [local development tutorial](docs/tutorials/local-development.md) to configure Gemini or Ollama, start the app, and stop the local services.
 
 ### Frontend Development
 
@@ -196,7 +143,7 @@ available persisted evidence before taking action; a restart alone is not proof
 that an in-flight Run was orphaned. Database recovery alone does not perform
 continuous reconciliation.
 
-The MVP retains loopback developer identity, PostgreSQL migrations, one active Run
+The MVP retains a shared developer identity, PostgreSQL migrations, one active Run
 per Conversation, bounded Session context, local Spring AI Bot simulation and
 versioned frontend drafts. GCP / GKE agents remain unconnected. OAuth2, audio,
 RAG, live tools, generated A2UI surfaces, native images, cross-node execution and

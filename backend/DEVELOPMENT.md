@@ -11,6 +11,8 @@ cd backend
 
 使用 Gemini 的開發部署將模型選擇設為 `google-genai`，並依 README 設定本機金鑰。需要同時開啟 Angular 時，從專案根目錄執行 `./dev.sh`。 [模型與完整開發環境](../README.md)
 
+開發後端預設接受其他主機的連線，所有請求共用開發身分。需要指定監聽介面時，可設定 `SERVER_ADDRESS`。Ollama 預設連到 `http://localhost:11434`，也可設定 `SPRING_AI_OLLAMA_BASE_URL=http://ollama-host:11434`。 [Spring Boot 監聽設定](https://docs.spring.io/spring-boot/4.2/appendix/application-properties/index.html#application-properties.server.server.address) · [Spring AI Ollama 位址](https://docs.spring.io/spring-ai/reference/2.1/api/chat/ollama-chat.html)
+
 ## Compose 與 PostgreSQL
 
 1. `bootRun` 使用 `main` 的 runtime classpath，其中包含開發用的 `spring-boot-docker-compose`。從 `backend/` 啟動時，Spring Boot 會找到 `compose.yaml`。`dev` profile 包含 `local`，後者啟用 Compose 並依模型選擇啟用對應的 Compose profile。 [Gradle 設定](build.gradle) · [Spring 設定](src/main/resources/application.yaml) · [本機設定](src/main/resources/application-local.yaml)

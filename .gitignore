@@ -56,5 +56,8 @@ bin/
 /nbdist/
 /.nb-gradle/
 
-# Documentation ignored from repository tracking per user request
-/docs/
+# Track published documentation and keep local drafts ignored
+/docs/*
+!/docs/INDEX.md
+!/docs/tutorials/
+!/docs/references/
